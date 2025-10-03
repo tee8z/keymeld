@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE participants SET partial_signature = ? WHERE session_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "93577c4df64003efb33d1e13c13e4bcded38f1d8e61898c04fc7a58ec2f85235"
+}

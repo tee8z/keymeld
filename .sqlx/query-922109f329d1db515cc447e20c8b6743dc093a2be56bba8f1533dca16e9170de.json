@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(session_id) FROM sessions",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(session_id)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "922109f329d1db515cc447e20c8b6743dc093a2be56bba8f1533dca16e9170de"
+}

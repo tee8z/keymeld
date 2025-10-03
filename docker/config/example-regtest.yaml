@@ -1,0 +1,22 @@
+# KeyMeld Example Configuration - Regtest Environment
+# Optimized for local development and testing with Bitcoin Core regtest
+
+# Bitcoin network to use
+# Options: mainnet, testnet, signet, regtest
+network: regtest
+
+# Number of signers in the MuSig2 setup
+num_signers: 2
+
+# KeyMeld gateway URL (Docker service name)
+gateway_url: "http://gateway:8080"
+
+# Bitcoin Core RPC connection (Docker service name)
+bitcoin_rpc_url: "http://bitcoin:18443"
+bitcoin_rpc_auth:
+  username: "keymeld"
+  password: "keymeldpass123"
+
+# Directory containing private key files for participants
+# Keys will be generated if they don't exist
+key_files_dir: "/app/keys"

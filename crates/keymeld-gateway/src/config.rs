@@ -1,0 +1,605 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum Environment {
+    #[default]
+    Development,
+    Production,
+}
+
+impl Environment {
+    pub fn from_env() -> Self {
+        match std::env::var("KEYMELD_ENVIRONMENT")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "production" | "prod" => Environment::Production,
+            _ => Environment::Development,
+        }
+    }
+
+    pub fn is_production(&self) -> bool {
+        matches!(self, Environment::Production)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub environment: Environment,
+    pub server: ServerConfig,
+    pub database: DatabaseConfig,
+    pub enclaves: EnclaveConfig,
+    pub coordinator: Option<CoordinatorConfig>,
+    pub logging: Option<LoggingConfig>,
+    pub security: SecurityConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub development: Option<DevelopmentConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub enable_cors: bool,
+    pub enable_compression: bool,
+    pub request_timeout_secs: Option<u64>,
+    pub max_request_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    pub path: String,
+    pub max_connections: u32,
+    pub connection_timeout_secs: u64,
+    pub idle_timeout_secs: Option<u64>,
+    pub enable_wal_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveConfig {
+    pub enclaves: Vec<EnclaveInfo>,
+    pub max_users_per_enclave: Option<u32>,
+    pub enclave_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveInfo {
+    pub id: u32,
+    pub cid: u32,
+    pub port: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorConfig {
+    pub processing_interval_ms: Option<u64>,
+    pub cleanup_interval_secs: Option<u64>,
+    pub batch_size: Option<u32>,
+    pub max_retries: Option<u32>,
+    pub processing_timeout_mins: Option<u64>,
+    pub delete_sessions_older_than_secs: Option<u64>,
+    pub metric_record_interval_secs: Option<u64>,
+}
+
+impl Default for CoordinatorConfig {
+    fn default() -> Self {
+        Self {
+            processing_interval_ms: Some(100),
+            cleanup_interval_secs: Some(300),
+            batch_size: Some(50),
+            max_retries: Some(3),
+            processing_timeout_mins: Some(5),
+            // 86400 = 24 * 60 * 60; 24 hours
+            delete_sessions_older_than_secs: Some(86400),
+            metric_record_interval_secs: Some(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub format: Option<String>,
+    pub enable_json: Option<bool>,
+    pub enable_file_output: Option<bool>,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    pub enable_attestation: bool,
+    pub strict_validation: bool,
+    pub allow_insecure_connections: bool,
+    pub max_session_duration_secs: u64,
+    pub require_tls: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            enable_attestation: true,
+            strict_validation: true,
+            allow_insecure_connections: false,
+            max_session_duration_secs: 3600, // 1 hour
+            require_tls: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DevelopmentConfig {
+    pub enable_test_endpoints: bool,
+    pub disable_enclave_verification: bool,
+    pub extended_logging: bool,
+}
+
+impl Config {
+    pub async fn load(config_path: &str) -> Result<Self> {
+        let config_str = tokio::fs::read_to_string(config_path)
+            .await
+            .with_context(|| format!("Failed to read config file: {config_path}"))?;
+
+        let config = if config_path.ends_with(".toml") {
+            toml::from_str(&config_str)
+                .with_context(|| format!("Failed to parse TOML config: {config_path}"))?
+        } else if config_path.ends_with(".yaml") || config_path.ends_with(".yml") {
+            serde_yaml::from_str(&config_str)
+                .with_context(|| format!("Failed to parse YAML config: {config_path}"))?
+        } else if config_path.ends_with(".json") {
+            serde_json::from_str(&config_str)
+                .with_context(|| format!("Failed to parse JSON config: {config_path}"))?
+        } else {
+            toml::from_str(&config_str)
+                .with_context(|| format!("Failed to parse config as TOML: {config_path}"))?
+        };
+
+        Ok(config)
+    }
+
+    pub async fn load_with_env_override(config_path: Option<&str>) -> Result<Self> {
+        let environment = Environment::from_env();
+
+        let mut config = match config_path {
+            Some(path) => Self::load(path).await?,
+            None => match Self::find_environment_config(environment).await {
+                Ok(config) => config,
+                Err(_) => Self::default_for_environment(environment),
+            },
+        };
+
+        config.environment = environment;
+        config.override_from_env();
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    async fn find_environment_config(environment: Environment) -> Result<Self> {
+        let env_name = match environment {
+            Environment::Development => "development",
+            Environment::Production => "production",
+        };
+
+        let possible_paths = vec![
+            format!("config/{}.yaml", env_name),
+            format!("config/{}.yml", env_name),
+            format!("config/keymeld-{}.yaml", env_name),
+            format!("config/keymeld-{}.yml", env_name),
+            format!("./{}.yaml", env_name),
+            format!("./{}.yml", env_name),
+            format!("./config.{}.yaml", env_name),
+            format!("./config.{}.yml", env_name),
+        ];
+
+        for path in possible_paths {
+            if tokio::fs::metadata(&path).await.is_ok() {
+                return Self::load(&path)
+                    .await
+                    .with_context(|| format!("Found config file {} but failed to load it", path));
+            }
+        }
+
+        anyhow::bail!(
+            "No environment-specific config file found for environment: {:?}",
+            environment
+        )
+    }
+
+    pub fn default_for_environment(env: Environment) -> Self {
+        let mut config = Self {
+            environment: env,
+            ..Default::default()
+        };
+
+        match env {
+            Environment::Development => {
+                config.security.enable_attestation = false;
+                config.security.strict_validation = false;
+                config.security.allow_insecure_connections = true;
+                config.security.require_tls = false;
+                config.development = Some(DevelopmentConfig {
+                    enable_test_endpoints: true,
+                    disable_enclave_verification: true,
+                    extended_logging: true,
+                });
+                config.database.path = "./data/keymeld-dev.db".to_string();
+                config.server.port = 8080;
+            }
+            Environment::Production => {
+                config.security.enable_attestation = true;
+                config.security.strict_validation = true;
+                config.security.allow_insecure_connections = false;
+                config.security.require_tls = true;
+                config.development = None;
+
+                config.database.path = "/var/lib/keymeld/keymeld.db".to_string();
+                config.server.host = "0.0.0.0".to_string();
+                config.server.port = 443;
+                config.server.enable_cors = false;
+                config.database.max_connections = 50;
+            }
+        }
+
+        config
+    }
+
+    pub fn override_from_env(&mut self) {
+        if let Ok(host) = std::env::var("KEYMELD_HOST") {
+            self.server.host = host;
+        }
+        if let Ok(port) = std::env::var("KEYMELD_PORT") {
+            if let Ok(port) = port.parse() {
+                self.server.port = port;
+            }
+        }
+        if let Ok(cors) = std::env::var("KEYMELD_ENABLE_CORS") {
+            self.server.enable_cors = cors.parse().unwrap_or(true);
+        }
+
+        if let Ok(db_path) = std::env::var("KEYMELD_DATABASE_PATH") {
+            self.database.path = db_path;
+        }
+        if let Ok(max_conn) = std::env::var("KEYMELD_MAX_CONNECTIONS") {
+            if let Ok(max_conn) = max_conn.parse() {
+                self.database.max_connections = max_conn;
+            }
+        }
+
+        if let Ok(log_level) = std::env::var("RUST_LOG") {
+            if self.logging.is_none() {
+                self.logging = Some(LoggingConfig::default());
+            }
+            if let Some(logging) = self.logging.as_mut() {
+                logging.level = log_level;
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.server.port == 0 {
+            anyhow::bail!("Server port cannot be 0");
+        }
+
+        if self.database.path.is_empty() {
+            anyhow::bail!("Database path cannot be empty");
+        }
+
+        if self.enclaves.enclaves.is_empty() {
+            anyhow::bail!("Must have at least one user enclave");
+        }
+
+        match self.environment {
+            Environment::Production => {
+                if !self.security.enable_attestation {
+                    anyhow::bail!("Attestation must be enabled in production");
+                }
+                if !self.security.strict_validation {
+                    anyhow::bail!("Strict validation must be enabled in production");
+                }
+                if self.security.allow_insecure_connections {
+                    anyhow::bail!("Insecure connections are not allowed in production");
+                }
+                if self.development.is_some() {
+                    anyhow::bail!("Development configuration is not allowed in production");
+                }
+                if self.server.port == 8080 || self.server.port == 3000 {
+                    anyhow::bail!("Default development ports are not allowed in production");
+                }
+            }
+            Environment::Development => {
+                // No special validation needed for development
+            }
+        }
+
+        let mut cids: Vec<u32> = self.enclaves.enclaves.iter().map(|e| e.cid).collect();
+        cids.sort();
+        let original_len = cids.len();
+        cids.dedup();
+        if cids.len() != original_len {
+            anyhow::bail!("Duplicate enclave CIDs detected");
+        }
+
+        self.validate_security_configuration()?;
+
+        Ok(())
+    }
+
+    fn validate_security_configuration(&self) -> Result<()> {
+        if self.security.require_tls && self.security.allow_insecure_connections {
+            anyhow::bail!(
+                "Configuration conflict: TLS is required but insecure connections are allowed"
+            );
+        }
+
+        if self.environment.is_production() && !self.security.enable_attestation {
+            anyhow::bail!("Attestation is required in production environment for security");
+        }
+
+        Ok(())
+    }
+
+    pub fn is_safe_for_environment(&self) -> bool {
+        match self.environment {
+            Environment::Production => {
+                self.security.enable_attestation
+                    && self.security.strict_validation
+                    && !self.security.allow_insecure_connections
+                    && self.security.require_tls
+                    && self.development.is_none()
+            }
+            Environment::Development => true, // Development is always considered "safe" for its purpose
+        }
+    }
+
+    pub fn security_summary(&self) -> SecuritySummary {
+        SecuritySummary {
+            environment: self.environment,
+            attestation_enabled: self.security.enable_attestation,
+            strict_validation: self.security.strict_validation,
+            tls_required: self.security.require_tls,
+            insecure_connections_allowed: self.security.allow_insecure_connections,
+            development_features_enabled: self.development.is_some(),
+            mock_services_enabled: false,
+        }
+    }
+
+    pub fn validate_production_readiness(&self) -> Result<()> {
+        if !matches!(self.environment, Environment::Production) {
+            anyhow::bail!("Configuration is not set for production environment");
+        }
+
+        if !self.is_safe_for_environment() {
+            anyhow::bail!("Configuration does not meet production security requirements");
+        }
+
+        // KMS validation removed - using direct ECIES encryption
+
+        if self.database.path.starts_with("./") || self.database.path.starts_with("../") {
+            anyhow::bail!("Production database path should be absolute, not relative");
+        }
+
+        if self.server.port == 8080 || self.server.port == 3000 {
+            anyhow::bail!("Production should not use default development ports");
+        }
+
+        if self.server.enable_cors {
+            eprintln!("WARNING: CORS is enabled in production. This may not be intended.");
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SecuritySummary {
+    pub environment: Environment,
+    pub attestation_enabled: bool,
+    pub strict_validation: bool,
+    pub tls_required: bool,
+    pub insecure_connections_allowed: bool,
+    pub development_features_enabled: bool,
+    pub mock_services_enabled: bool,
+}
+
+impl std::fmt::Display for SecuritySummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Environment: {:?}, Attestation: {}, Strict: {}, TLS: {}, Insecure: {}, DevFeatures: {}, MockServices: {}",
+            self.environment,
+            self.attestation_enabled,
+            self.strict_validation,
+            self.tls_required,
+            self.insecure_connections_allowed,
+            self.development_features_enabled,
+            self.mock_services_enabled
+        )
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            environment: Environment::Development,
+            server: ServerConfig::default(),
+            database: DatabaseConfig::default(),
+            enclaves: EnclaveConfig::default(),
+            coordinator: Some(CoordinatorConfig::default()),
+            logging: Some(LoggingConfig::default()),
+            security: SecurityConfig::default(),
+            development: Some(DevelopmentConfig::default()),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            enable_cors: true,
+            enable_compression: true,
+            request_timeout_secs: Some(30),
+            max_request_size_bytes: Some(1024 * 1024), // 1MB
+        }
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: "./data/keymeld.db".to_string(),
+            max_connections: 10,
+            connection_timeout_secs: 30,
+            idle_timeout_secs: Some(300), // 5 minutes
+            enable_wal_mode: Some(true),
+        }
+    }
+}
+
+impl Default for EnclaveConfig {
+    fn default() -> Self {
+        Self {
+            enclaves: vec![
+                EnclaveInfo {
+                    id: 0,
+                    cid: 3,
+                    port: 5000,
+                },
+                EnclaveInfo {
+                    id: 1,
+                    cid: 4,
+                    port: 5001,
+                },
+                EnclaveInfo {
+                    id: 2,
+                    cid: 5,
+                    port: 5002,
+                },
+            ],
+            max_users_per_enclave: Some(100),
+            enclave_timeout_secs: Some(30),
+            // AWS region removed
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            format: Some("pretty".to_string()),
+            enable_json: Some(false),
+            enable_file_output: Some(false),
+            file_path: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn test_load_toml_config() {
+        let config_content = r#"
+environment = "development"
+
+[server]
+host = "127.0.0.1"
+port = 9090
+enable_cors = true
+enable_compression = true
+
+[database]
+path = "./test.db"
+max_connections = 5
+connection_timeout_secs = 60
+
+[enclaves]
+kms_key_arn = "arn:aws:kms:us-west-2:123456789012:key/test-key-id"
+
+[[enclaves.enclaves]]
+id = 0
+cid = 10
+port = 5000
+
+[[enclaves.enclaves]]
+id = 1
+cid = 11
+port = 5001
+
+[[enclaves.enclaves]]
+id = 2
+cid = 12
+port = 5002
+
+[security]
+enable_attestation = false
+strict_validation = false
+allow_insecure_connections = true
+max_session_duration_secs = 3600
+require_tls = false
+"#;
+
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        write!(temp_file, "{config_content}").expect("Failed to write to temp file");
+        let config_path = temp_file
+            .path()
+            .to_str()
+            .expect("Failed to get temp file path");
+
+        let config = Config::load(config_path)
+            .await
+            .expect("Failed to load config");
+
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.port, 9090);
+        assert!(config.server.enable_cors);
+        assert_eq!(config.database.path, "./test.db");
+        assert_eq!(config.database.max_connections, 5);
+        assert_eq!(config.enclaves.enclaves.len(), 3);
+        assert_eq!(config.enclaves.enclaves[0].cid, 10);
+        assert_eq!(config.enclaves.enclaves[0].port, 5000);
+        assert_eq!(config.enclaves.enclaves[1].cid, 11);
+        assert_eq!(config.enclaves.enclaves[1].port, 5001);
+        assert_eq!(config.enclaves.enclaves[2].cid, 12);
+        assert_eq!(config.enclaves.enclaves[2].port, 5002);
+    }
+
+    #[tokio::test]
+    async fn test_config_validation() {
+        let mut config = Config::default();
+
+        assert!(config.validate().is_ok());
+
+        config.server.port = 0;
+        assert!(config.validate().is_err());
+        config.server.port = 8080;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_env_override() {
+        std::env::set_var("KEYMELD_HOST", "192.168.1.100");
+        std::env::set_var("KEYMELD_PORT", "3000");
+        std::env::set_var("KEYMELD_DATABASE_PATH", "/custom/db.sqlite");
+
+        let mut config = Config::default();
+        config.override_from_env();
+
+        assert_eq!(config.server.host, "192.168.1.100");
+        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.database.path, "/custom/db.sqlite");
+
+        std::env::remove_var("KEYMELD_HOST");
+        std::env::remove_var("KEYMELD_PORT");
+        std::env::remove_var("KEYMELD_DATABASE_PATH");
+    }
+}

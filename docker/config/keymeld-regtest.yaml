@@ -1,0 +1,50 @@
+environment: development
+server:
+  host: "0.0.0.0"
+  port: 8080
+  enable_cors: true
+  enable_compression: true
+  request_timeout_secs: 30
+  max_request_size_bytes: 10485760
+database:
+  path: "/data/keymeld.db"
+  max_connections: 20
+  connection_timeout_secs: 30
+  idle_timeout_secs: 60
+  enable_wal_mode: true
+enclaves:
+  kms_key_arn: "arn:aws:kms:us-west-2:123456789012:key/dev-mock-key"
+  enclaves:
+    - id: 0
+      cid: 3
+      port: 5000
+    - id: 1
+      cid: 4
+      port: 5001
+    - id: 2
+      cid: 5
+      port: 5002
+  max_users_per_enclave: 50
+  enclave_timeout_secs: 30
+  aws_region: "us-west-2"
+coordinator:
+  processing_interval_ms: 100
+  batch_size: 100
+  max_retries: 5
+  processing_timeout_mins: 1
+logging:
+  level: "debug"
+  format: "pretty"
+  enable_json: false
+  enable_file_output: false
+  file_path: null
+security:
+  enable_attestation: false
+  strict_validation: false
+  allow_insecure_connections: true
+  max_session_duration_secs: 86400
+  require_tls: false
+development:
+  enable_test_endpoints: true
+  disable_enclave_verification: true
+  extended_logging: true

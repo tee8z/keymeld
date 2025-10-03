@@ -1,0 +1,48 @@
+environment: production
+server:
+  host: "0.0.0.0"
+  port: 443
+  enable_cors: false
+  enable_compression: true
+  request_timeout_secs: 60
+  max_request_size_bytes: 5242880
+database:
+  path: "/var/lib/keymeld/keymeld.db"
+  max_connections: 50
+  connection_timeout_secs: 10
+  idle_timeout_secs: 300
+  enable_wal_mode: true
+enclaves:
+  # REQUIRED: Set via KEYMELD_KMS_KEY_ARN environment variable
+  # Example: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
+  kms_key_arn: ""
+  enclaves:
+    - id: 0
+      cid: 3
+      port: 5000
+    - id: 1
+      cid: 4
+      port: 5001
+    - id: 2
+      cid: 5
+      port: 5002
+  max_users_per_enclave: 500
+  enclave_timeout_secs: 60
+  aws_region: ""
+coordinator:
+  processing_interval_ms: 100
+  batch_size: 100
+  max_retries: 5
+  processing_timeout_mins: 1
+logging:
+  level: "info"
+  format: "json"
+  enable_json: true
+  enable_file_output: true
+  file_path: "/var/log/keymeld/keymeld.log"
+security:
+  enable_attestation: true
+  strict_validation: true
+  allow_insecure_connections: false
+  max_session_duration_secs: 14400
+  require_tls: true

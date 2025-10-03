@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(keygen_session_id) FROM keygen_sessions",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(keygen_session_id)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "70dfb3ded4ba2b85ecc50adbc3bd31c44e520601e62fa5907d68ad1297c7e25d"
+}

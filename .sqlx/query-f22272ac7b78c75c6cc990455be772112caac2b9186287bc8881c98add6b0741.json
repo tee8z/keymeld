@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f22272ac7b78c75c6cc990455be772112caac2b9186287bc8881c98add6b0741"
+}

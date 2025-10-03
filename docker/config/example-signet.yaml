@@ -1,0 +1,25 @@
+# KeyMeld Example Configuration - Signet Environment
+# For testing with Mutinynet signet
+
+# Bitcoin network to use
+network: signet
+
+# Number of signers in the MuSig2 setup
+num_signers: 2
+
+# KeyMeld gateway URL (Docker service name)
+gateway_url: "http://gateway:8080"
+
+# Bitcoin Core RPC connection (configure your signet node)
+bitcoin_rpc_url: "http://bitcoin:38332"
+bitcoin_rpc_auth:
+  username: "your_signet_rpc_user"
+  password: "your_signet_rpc_password"
+
+# Directory containing private key files for participants
+key_files_dir: "/app/keys"
+# Signet Setup Instructions:
+# 1. Run a Bitcoin Core signet node with RPC enabled
+# 2. Get test coins from https://faucet.mutinynet.com/
+# 3. Update bitcoin_rpc_url and bitcoin_rpc_auth above
+# 4. Run the KeyMeld example

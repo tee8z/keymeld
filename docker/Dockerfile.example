@@ -1,0 +1,70 @@
+FROM rust:1.88-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY examples ./examples
+
+ENV SQLX_OFFLINE=true
+RUN cargo build --release --bin keymeld_example
+
+FROM debian:bookworm-slim
+
+# Build argument to determine environment (dev, prod)
+ARG ENVIRONMENT=dev
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 -s /bin/bash keymeld
+
+RUN mkdir -p /app/keys /app/config /app/data && \
+    chown -R keymeld:keymeld /app
+
+COPY --from=builder /app/target/release/keymeld_example /usr/local/bin/keymeld-example
+
+# Copy all example configs
+COPY --chown=keymeld:keymeld examples/config.yaml /app/config/regtest.yaml
+COPY --chown=keymeld:keymeld docker/config/example-regtest.yaml /app/config/example-regtest.yaml
+COPY --chown=keymeld:keymeld docker/config/example-signet.yaml /app/config/example-signet.yaml
+
+# Create symlink based on environment
+RUN if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "development" ]; then \
+        ln -sf /app/config/example-regtest.yaml /app/config/config.yaml; \
+    elif [ "$ENVIRONMENT" = "prod" ] || [ "$ENVIRONMENT" = "production" ]; then \
+        ln -sf /app/config/example-signet.yaml /app/config/config.yaml; \
+    else \
+        ln -sf /app/config/example-regtest.yaml /app/config/config.yaml; \
+    fi
+
+RUN chown keymeld:keymeld /usr/local/bin/keymeld-example && \
+    chmod +x /usr/local/bin/keymeld-example
+
+USER keymeld
+
+WORKDIR /app
+
+ENV RUST_LOG=info,keymeld_example=debug \
+    KEYMELD_CONFIG_PATH=/app/config/config.yaml \
+    KEYMELD_KEYS_DIR=/app/keys
+
+VOLUME ["/app/keys", "/app/config", "/app/data"]
+
+COPY --chown=keymeld:keymeld docker/example-entrypoint.sh /usr/local/bin/example-entrypoint.sh
+RUN chmod +x /usr/local/bin/example-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/example-entrypoint.sh"]
+
+CMD ["--config", "/app/config/config.yaml", "--amount", "50000", "--destination", "bcrt1qw2c3lxufxqe2x9s4rdzh65tpf4d7fssjgh8nv6"]

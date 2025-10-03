@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO sessions (\n                session_id, coordinator_pubkey, expected_participants,\n                status, created_at, expires_at, updated_at, coordinator_enclave_id,\n                encrypted_session_secret, encrypted_message, message_hash\n            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "61ea47775e370011fea42184685ad200d22796dc85f43429bd05403b64c48072"
+}

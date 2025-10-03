@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(session_id) FROM sessions WHERE status NOT IN ('Completed', 'Failed')",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(session_id)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "18c6a15353a9b8d64742a9c3d79ca6e05e849eeaa88b243f80034759b1e7e42a"
+}

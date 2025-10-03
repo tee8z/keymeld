@@ -1,0 +1,86 @@
+[package]
+name = "keymeld-gateway"
+version = "0.1.0"
+edition = "2021"
+authors = ["tee8z@protonmail.com"]
+description = "Gateway service for KeyMeld - manages distributed MuSig2 signing across AWS Nitro Enclaves"
+license = "MIT"
+
+[dependencies]
+
+keymeld-core = { path = "../keymeld-core", features = ["sqlx"] }
+axum = { version = "0.8.5", features = ["macros", "tokio", "http1"] }
+axum-core = "0.5.0"
+tower = { version = "0.5.2", features = ["full"] }
+tower-http = { version = "0.6.6", features = ["cors", "trace", "compression-gzip"] }
+hyper = "1.7.0"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-vsock = "0.5.0"
+async-trait = "0.1.83"
+serde = { version = "1.0.216", features = ["derive"] }
+serde_json = "1.0.133"
+serde_yaml = "0.9"
+toml = "0.8"
+thiserror = "2.0.16"
+anyhow = "1.0.95"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+log = "0.4.22"
+aws-config = "1.8.7"
+aws-sdk-kms = "1.83.0"
+aws-sdk-sts = "1.83.0"
+reqwest = { version = "0.12.9", features = ["json", "rustls-tls"] }
+reqwest-middleware = "0.4.2"
+jsonwebtoken = "9.3"
+ed25519-dalek = { version = "2.1.1", features = ["pkcs8"] }
+config = { version = "0.14", features = ["yaml", "toml"] }
+dotenv = "0.15"
+uuid = { version = "1.11", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde", "macros", "formatting"] }
+secp256k1 = { version = "0.31.0", features = ["rand", "serde"] }
+bitcoin_hashes = "0.14.0"
+hex = "0.4.3"
+rand = "0.9.0"
+sha2 = "0.10.8"
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "uuid", "time", "migrate"], optional = true }
+moka = { version = "0.12.8", features = ["future"], optional = true }
+prometheus = { version = "0.13", optional = true }
+lazy_static = { version = "1.4.0", optional = true }
+opentelemetry = { version = "0.24", optional = true }
+opentelemetry-prometheus = { version = "0.17", optional = true }
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+tonic-build = { version = "0.12", optional = true }
+utoipa = { version = "5.4.0", features = [
+  "axum_extras",
+  "time",
+  "uuid",
+  "macros",
+  "non_strict_integers",
+  "preserve_order",
+  "preserve_path_order",
+] }
+utoipa-scalar = { version = "0.3.0", features = ["axum"] }
+bdk_wallet = { version = "1.0.0-beta.4", features = ["keys-bip39"] }
+
+
+[dev-dependencies]
+mockito = "1.6.1"
+proptest = "1.5.0"
+tempfile = "3.15.0"
+
+[build-dependencies]
+tonic-build = { version = "0.12", optional = true }
+
+[features]
+default = ["rest", "database", "metrics"]
+rest = []
+grpc = ["tonic", "prost", "tonic-build"]
+database = ["sqlx"]
+cache = ["moka"]
+metrics = ["prometheus", "lazy_static", "opentelemetry", "opentelemetry-prometheus"]
+full = ["rest", "grpc", "database", "cache", "metrics"]
+
+[[bin]]
+name = "keymeld-gateway"
+path = "src/main.rs"

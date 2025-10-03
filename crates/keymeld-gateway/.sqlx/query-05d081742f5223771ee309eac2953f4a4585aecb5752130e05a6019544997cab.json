@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(keygen_session_id) FROM keygen_sessions WHERE status_name NOT IN ('completed', 'failed')",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(keygen_session_id)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "05d081742f5223771ee309eac2953f4a4585aecb5752130e05a6019544997cab"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE participants SET public_nonces = ? WHERE session_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7f6d52d3227af0dcebc5896dfc0fe8497363196f6b457d190ea60252dee8883e"
+}
