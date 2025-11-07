@@ -8,6 +8,35 @@
 
 Distributed MuSig2 Bitcoin signing via AWS Nitro Enclaves using a secure 2-phase workflow.
 
+## Motivation
+
+### The Challenge
+MuSig2 as a protocol has two key constraints that make it difficult to use in multi-party setups:
+
+- **Two rounds of communication**: All participants must come online and communicate in two distinct rounds to create an aggregated signature
+- **Known participants**: All participant public keys must be known at the start of the process
+- **Liveness requirements**: Especially challenging in mobile or distributed scenarios where participants may have unreliable connectivity or may never come back online after joining
+
+### KeyMeld's Solution
+KeyMeld addresses these challenges by delegating the coordination complexity to secure AWS Nitro Enclaves:
+
+- **Asynchronous participation**: Participants can join sessions without requiring others to be online
+- **Dynamic participant discovery**: No need to know all participants upfront
+- **Reliable coordination**: Enclaves handle the two-round MuSig2 protocol automatically
+- **2-phase workflow**: Separates key generation from signing for better UX
+
+### Security Trade-offs
+This approach requires sending encrypted private keys to enclaves, which involves security trade-offs:
+
+- **Higher risk**: Any key movement increases compromise risk compared to local signing
+- **Enclave protection**: AWS Nitro Enclaves provide hardware-level isolation and attestation
+- **Ideal for hot wallets**: Best suited for scenarios requiring frequent multi-party transactions
+
+### Use Cases
+- **Corporate treasury management**: Multi-signature spending from company funds
+- **Insurance payouts**: Multi-party approval for claim settlements
+- **Escrow services**: Trustless multi-party transaction coordination
+
 ## Quick Start
 
 ```bash
