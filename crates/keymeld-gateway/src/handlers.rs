@@ -6,10 +6,10 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, State},
+    http::{HeaderMap, StatusCode},
     response::Response,
     Json,
 };
-
 use keymeld_core::{
     api::{
         validation::{
@@ -115,7 +115,7 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
 
     // Get cached enclave health data from database
     let enclave_health_data = state.db.get_all_enclave_health().await?;
-    let total_enclaves = enclave_health_data.len() as u32;
+    let total_enclaves = enclave_health_data.len();
     let mut enclaves = Vec::new();
     let mut healthy_count = 0;
 
@@ -233,6 +233,7 @@ pub async fn create_keygen_session(
 pub async fn register_keygen_participant(
     State(state): State<AppState>,
     Path(keygen_session_id): Path<SessionId>,
+    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
     Json(request): Json<RegisterKeygenParticipantRequest>,
 ) -> ApiResult<Json<RegisterKeygenParticipantResponse>> {
     debug!(
@@ -272,7 +273,7 @@ pub async fn register_keygen_participant(
             &coordinator_enclave_id,
             &keygen_session_id,
             &request.user_id,
-            &request.session_hmac,
+            &session_hmac,
             &encrypted_session_secret,
         )
         .await
@@ -329,6 +330,7 @@ pub async fn register_keygen_participant(
         expected_participants: session_status.expected_participants_count(),
         signer_index: current_count,
         assigned_enclave_id: assigned_enclave,
+        require_signing_approval: request.require_signing_approval,
     };
 
     Ok(Json(response))
@@ -339,12 +341,18 @@ pub async fn register_keygen_participant(
     path = "/keygen/{keygen_session_id}/status",
     tag = "keygen",
     summary = "Get keygen session status",
-    description = "Retrieves the current status and details of a keygen session",
+    description = "Retrieves the current status and details of a keygen session. Requires Authorization header with Bearer token containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
+    security(
+        ("Bearer" = [])
+    ),
     params(
         ("keygen_session_id" = SessionId, Path, description = "Keygen session ID")
     ),
     responses(
         (status = 200, description = "Keygen status retrieved successfully", body = KeygenSessionStatusResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 403, description = "Invalid HMAC or user not permitted", body = ErrorResponse),
         (status = 404, description = "Session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
@@ -352,8 +360,23 @@ pub async fn register_keygen_participant(
 pub async fn get_keygen_status(
     State(state): State<AppState>,
     Path(keygen_session_id): Path<SessionId>,
+    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
 ) -> ApiResult<Json<KeygenSessionStatusResponse>> {
     debug!("Getting keygen session status: {}", keygen_session_id);
+
+    let encrypted_session_secret = state
+        .db
+        .get_keygen_encrypted_session_secret(&keygen_session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Session secret not found"))?;
+
+    let _user_id = validate_keygen_session_hmac(
+        &state,
+        &keygen_session_id,
+        session_hmac,
+        &encrypted_session_secret,
+    )
+    .await?;
 
     let session_status = state
         .db
@@ -386,23 +409,44 @@ pub async fn get_keygen_status(
     path = "/signing",
     tag = "signing",
     summary = "Create a new signing session",
-    description = "Creates a new MuSig2 signing session that inherits participants from a keygen session",
+    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires Authorization header with Bearer token containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
     request_body = CreateSigningSessionRequest,
+    security(
+        ("Bearer" = [])
+    ),
     responses(
         (status = 200, description = "Signing session created successfully", body = CreateSigningSessionResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 403, description = "Invalid HMAC or user not permitted", body = ErrorResponse),
         (status = 404, description = "Keygen session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
 pub async fn create_signing_session(
     State(state): State<AppState>,
+    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
     Json(request): Json<CreateSigningSessionRequest>,
 ) -> ApiResult<Json<CreateSigningSessionResponse>> {
     info!("Creating signing session: {}", request.signing_session_id);
 
-    keymeld_core::api::validation::validate_create_signing_session_request(&request)
+    validate_create_signing_session_request(&request)
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {}", e)))?;
+
+    // Validate session HMAC against the keygen session
+    let encrypted_session_secret = state
+        .db
+        .get_keygen_encrypted_session_secret(&request.keygen_session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Keygen session secret not found"))?;
+
+    let _user_id = validate_keygen_session_hmac(
+        &state,
+        &request.keygen_session_id,
+        session_hmac,
+        &encrypted_session_secret,
+    )
+    .await?;
 
     if state
         .db
@@ -452,8 +496,10 @@ pub async fn create_signing_session(
         )));
     }
 
-    let participants_count = match keygen_session_record {
-        KeygenSessionStatus::Completed(ref status) => status.expected_participants.len(),
+    match keygen_session_record {
+        KeygenSessionStatus::Completed(_) => {
+            // Keygen session is completed, proceed
+        }
         _ => {
             return Err(ApiError::bad_request(
                 "Keygen session must be completed before creating signing session",
@@ -465,12 +511,18 @@ pub async fn create_signing_session(
 
     let current_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("Time went backwards")
         .as_secs();
 
+    // Get participant count from the associated keygen session
+    let participants_count = state
+        .db
+        .get_keygen_participant_count(&request.keygen_session_id)
+        .await? as usize;
+
     let response = CreateSigningSessionResponse {
-        signing_session_id: request.signing_session_id,
-        keygen_session_id: request.keygen_session_id,
+        signing_session_id: request.signing_session_id.clone(),
+        keygen_session_id: request.keygen_session_id.clone(),
         status: SigningStatusKind::CollectingParticipants,
         participants_count,
         expires_at: current_time + request.timeout_secs,
@@ -480,16 +532,169 @@ pub async fn create_signing_session(
 }
 
 #[utoipa::path(
+    post,
+    path = "/signing/{signing_session_id}",
+    tag = "signing",
+    summary = "Approve a signing session as a participant",
+    description = "Approve a MuSig2 signing session as a participant. Requires Authorization header with Bearer token containing user_hmac in format 'user_id:nonce:signature' where signature is created with the user's private key.",
+    security(
+        ("Bearer" = [])
+    ),
+    responses(
+        (status = 200, description = "Signing session approved successfully"),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 403, description = "Invalid signature or user not permitted to approve", body = ErrorResponse),
+        (status = 404, description = "Signing session not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+pub async fn approve_signing_session(
+    State(state): State<AppState>,
+    Path(signing_session_id): Path<SessionId>,
+    TypedHeader(Authorization(user_hmac)): TypedHeader<Authorization<Bearer>>,
+) -> ApiResult<StatusCode> {
+    info!("Approving signing session: {}", signing_session_id);
+
+    if state
+        .db
+        .get_signing_session_by_id(&signing_session_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("Signing session not found"));
+    }
+
+    let user_id = extract_user_id_from_hmac(user_hmac)?;
+    let keygen_session_id = state
+        .db
+        .get_keygen_session_id_from_signing_session(&signing_session_id)
+        .await?
+        .ok_or_else(|| ApiError::database("Could not find associated keygen session"))?;
+
+    let user_public_key = state
+        .db
+        .get_user_public_key_from_keygen(&keygen_session_id, &user_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("User is not a participant in this keygen session"))?;
+
+    validate_user_hmac_against_public_key(&user_id, user_hmac, &user_public_key)?;
+
+    state
+        .db
+        .approve_signing_session(&signing_session_id, &user_id)
+        .await?;
+
+    info!(
+        "Signing session {} approved by user {}",
+        signing_session_id, user_id
+    );
+
+    Ok(StatusCode::OK)
+}
+
+fn extract_user_id_from_hmac(user_hmac: &str) -> Result<UserId, ApiError> {
+    // Parse user_hmac format: user_id:nonce:signature
+    let parts: Vec<&str> = user_hmac.split(':').collect();
+    if parts.len() != 3 {
+        return Err(ApiError::bad_request(
+            "Invalid user HMAC format, expected 'user_id:nonce:signature'",
+        ));
+    }
+
+    let user_id_str = parts[0];
+    UserId::parse(user_id_str).map_err(|_| ApiError::bad_request("Invalid user ID in HMAC"))
+}
+
+fn validate_user_hmac_against_public_key(
+    expected_user_id: &UserId,
+    user_hmac: &str,
+    user_public_key: &[u8],
+) -> Result<(), ApiError> {
+    use keymeld_core::api::validation::validate_user_hmac;
+
+    // Validate that the HMAC format is correct and extract user_id for verification
+    let parts: Vec<&str> = user_hmac.split(':').collect();
+    if parts.len() != 3 {
+        return Err(ApiError::bad_request(
+            "Invalid user HMAC format, expected 'user_id:nonce:signature'",
+        ));
+    }
+
+    let hmac_user_id = parts[0];
+    if hmac_user_id != expected_user_id.as_str() {
+        return Err(ApiError::bad_request(
+            "User ID in HMAC does not match expected user ID",
+        ));
+    }
+
+    validate_user_hmac(&expected_user_id.as_str(), user_hmac, user_public_key)
+        .map_err(|e| ApiError::bad_request(&format!("User HMAC validation failed: {}", e)))?;
+
+    info!("User HMAC validated for user: {}", expected_user_id);
+    Ok(())
+}
+
+async fn validate_keygen_session_hmac(
+    state: &AppState,
+    keygen_session_id: &SessionId,
+    session_hmac: &str,
+    encrypted_session_secret: &str,
+) -> Result<UserId, ApiError> {
+    // Parse session_hmac format: user_id:nonce:hmac
+    let parts: Vec<&str> = session_hmac.split(':').collect();
+    if parts.len() != 3 {
+        return Err(ApiError::bad_request(
+            "Invalid session HMAC format, expected 'user_id:nonce:hmac'",
+        ));
+    }
+
+    let user_id_str = parts[0];
+    let user_id = UserId::parse(user_id_str)
+        .map_err(|_| ApiError::bad_request("Invalid user ID in session HMAC"))?;
+
+    // Get the participant's assigned enclave ID from the keygen session
+    let participants = state.db.get_keygen_participants(keygen_session_id).await?;
+
+    let participant_enclave = participants
+        .iter()
+        .find(|p| p.user_id == user_id)
+        .ok_or_else(|| ApiError::bad_request("User is not a participant in this keygen session"))?
+        .enclave_id;
+
+    // Route validation to the appropriate enclave
+    state
+        .enclave_manager
+        .validate_keygen_participant_hmac(
+            &participant_enclave,
+            keygen_session_id,
+            &user_id,
+            session_hmac,
+            encrypted_session_secret,
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(&format!("Session HMAC validation failed: {}", e)))?;
+
+    Ok(user_id)
+}
+
+#[utoipa::path(
     get,
     path = "/signing/{signing_session_id}/status",
     tag = "signing",
     summary = "Get signing session status",
-    description = "Retrieves the current status and details of a signing session",
+    description = "Retrieves the current status and details of a signing session. Requires Authorization header with Bearer token containing user HMAC in format 'user_id:nonce:signature' signed with user's private key.",
+    security(
+        ("Bearer" = [])
+    ),
     params(
         ("signing_session_id" = SessionId, Path, description = "Signing session ID")
     ),
     responses(
         (status = 200, description = "Signing status retrieved successfully", body = SigningSessionStatusResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 403, description = "Invalid signature or user not permitted", body = ErrorResponse),
         (status = 404, description = "Session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
@@ -497,14 +702,33 @@ pub async fn create_signing_session(
 pub async fn get_signing_status(
     State(state): State<AppState>,
     Path(signing_session_id): Path<SessionId>,
+    TypedHeader(Authorization(user_hmac)): TypedHeader<Authorization<Bearer>>,
 ) -> ApiResult<Json<SigningSessionStatusResponse>> {
     debug!("Getting signing session status: {}", signing_session_id);
+
+    let user_id = extract_user_id_from_hmac(user_hmac)?;
 
     let session_status = state
         .db
         .get_signing_session_by_id(&signing_session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Signing session not found"))?;
+
+    let keygen_session_id = state
+        .db
+        .get_keygen_session_id_from_signing_session(&signing_session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Associated keygen session not found"))?;
+
+    let user_public_key = state
+        .db
+        .get_user_public_key_from_keygen(&keygen_session_id, &user_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::bad_request("User is not a participant in this signing session")
+        })?;
+
+    validate_user_hmac_against_public_key(&user_id, user_hmac, &user_public_key)?;
 
     let participant_count = state
         .db

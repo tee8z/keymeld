@@ -9,16 +9,20 @@ use crate::{
         },
         types::AggregatePublicKey,
     },
-    Advanceable, KeyMeldError,
+    Advanceable, DatabaseTrait, KeyMeldError,
 };
-use tracing::info;
+use tracing::{debug, info};
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningSessionStatus {
-    async fn process(
+    async fn process<D>(
         self,
         enclave_manager: &EnclaveManager,
-    ) -> Result<SigningSessionStatus, KeyMeldError> {
+        database: &D,
+    ) -> Result<SigningSessionStatus, KeyMeldError>
+    where
+        D: DatabaseTrait + Send + Sync,
+    {
         match self {
             SigningSessionStatus::CollectingParticipants(state) => {
                 state.process(enclave_manager).await
@@ -44,10 +48,14 @@ impl Advanceable<SigningSessionStatus> for SigningSessionStatus {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
-    async fn process(
+    async fn process<D>(
         self,
         enclave_manager: &EnclaveManager,
-    ) -> Result<SigningSessionStatus, KeyMeldError> {
+        database: &D,
+    ) -> Result<SigningSessionStatus, KeyMeldError>
+    where
+        D: DatabaseTrait + Send + Sync,
+    {
         info!(
             "Processing SigningCollectingParticipants for session {}",
             self.signing_session_id
@@ -64,10 +72,80 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             return Ok(SigningSessionStatus::CollectingParticipants(self));
         }
 
+        // Check if all required participants have approved before transitioning to SessionFull
+        if !self.participants_requiring_approval.is_empty() {
+            let mut all_approved = true;
+            for required_participant in &self.participants_requiring_approval {
+                if !self.approved_participants.contains(required_participant) {
+                    all_approved = false;
+                    break;
+                }
+            }
+
+            if !all_approved {
+                info!(
+                    "Signing session {} waiting for approvals before transitioning to SessionFull. Required: {:?}, Approved: {:?}",
+                    self.signing_session_id, self.participants_requiring_approval, self.approved_participants
+                );
+                return Ok(SigningSessionStatus::CollectingParticipants(self));
+            }
+
+            info!(
+                "All required participants have approved signing session {}, ready to transition to SessionFull",
+                self.signing_session_id
+            );
+        }
+
         info!(
             "All participants registered for signing session {}, transitioning to SessionFull",
             self.signing_session_id
         );
+
+        // Check if any participants require signing approval
+        let participants_requiring_approval = database
+            .get_participants_requiring_approval(&self.keygen_session_id)
+            .await
+            .map_err(|e| {
+                KeyMeldError::ValidationError(format!(
+                    "Failed to get participants requiring approval: {}",
+                    e
+                ))
+            })?;
+
+        // If any participants require approval, check if all have approved
+        if !participants_requiring_approval.is_empty() {
+            let approved_participants = database
+                .get_signing_session_approvals(&self.signing_session_id)
+                .await
+                .map_err(|e| {
+                    KeyMeldError::ValidationError(format!(
+                        "Failed to get signing session approvals: {}",
+                        e
+                    ))
+                })?;
+
+            // Check if all required participants have approved
+            for required_participant in &participants_requiring_approval {
+                if !approved_participants.contains(required_participant) {
+                    debug!(
+                        "Signing session {} waiting for approval from user {}. Required: {:?}, Approved: {:?}",
+                        self.signing_session_id, required_participant, participants_requiring_approval, approved_participants
+                    );
+                    // Stay in CollectingParticipants state until all approvals received
+                    return Ok(SigningSessionStatus::CollectingParticipants(self));
+                }
+            }
+
+            info!(
+                "All required participants have approved signing session {}, proceeding to SessionFull",
+                self.signing_session_id
+            );
+        } else {
+            info!(
+                "No approval requirements for signing session {}, transitioning to SessionFull",
+                self.signing_session_id
+            );
+        }
 
         // Copy exact session assignment from keygen session (same enclave assignments)
         enclave_manager.copy_session_assignment_for_signing(
@@ -99,10 +177,14 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningSessionFull {
-    async fn process(
+    async fn process<D>(
         self,
         enclave_manager: &EnclaveManager,
-    ) -> Result<SigningSessionStatus, KeyMeldError> {
+        _database: &D,
+    ) -> Result<SigningSessionStatus, KeyMeldError>
+    where
+        D: DatabaseTrait + Send + Sync,
+    {
         info!(
             "Initializing MuSig2 session {} with {} participants",
             self.signing_session_id,
@@ -166,10 +248,14 @@ impl Advanceable<SigningSessionStatus> for SigningSessionFull {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
-    async fn process(
+    async fn process<D>(
         mut self,
         enclave_manager: &EnclaveManager,
-    ) -> Result<SigningSessionStatus, KeyMeldError> {
+        _database: &D,
+    ) -> Result<SigningSessionStatus, KeyMeldError>
+    where
+        D: DatabaseTrait + Send + Sync,
+    {
         info!(
             "Generating nonces for signing session {} with {} participants",
             self.signing_session_id,
@@ -206,10 +292,14 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningCollectingNonces {
-    async fn process(
+    async fn process<D>(
         self,
         _enclave_manager: &EnclaveManager,
-    ) -> Result<SigningSessionStatus, KeyMeldError> {
+        _database: &D,
+    ) -> Result<SigningSessionStatus, KeyMeldError>
+    where
+        D: DatabaseTrait + Send + Sync,
+    {
         info!(
             "Collecting and validating nonces for signing session {}",
             self.signing_session_id

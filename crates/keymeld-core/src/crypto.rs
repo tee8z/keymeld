@@ -627,6 +627,122 @@ impl SecureCrypto {
     ) -> Result<String, KeyMeldError> {
         Self::generate_hmac_for_data(data.as_bytes(), session_secret)
     }
+
+    /// Validates HMAC for signing approval operations and extracts user_id
+    /// Expected format: user_id:nonce:hmac
+    pub fn validate_signing_approval_hmac(
+        signing_session_id: &str,
+        provided_hmac: &str,
+        session_secret: &str,
+        message_hash: &[u8],
+    ) -> Result<String, KeyMeldError> {
+        trace!("Validating signing approval HMAC");
+
+        // Parse the format: user_id:nonce:hmac
+        let parts: Vec<&str> = provided_hmac.split(':').collect();
+        if parts.len() != 3 {
+            return Err(KeyMeldError::ValidationError(
+                "Invalid signing approval HMAC format, expected 'user_id:nonce:hmac'".to_string(),
+            ));
+        }
+
+        let user_id = parts[0];
+        let nonce = parts[1];
+        let provided_hmac_value = parts[2];
+
+        // Generate the expected HMAC for the signing approval
+        // Message format: signing_session_id:user_id:nonce:message_hash
+        let mut message_data = Vec::new();
+        message_data.extend_from_slice(signing_session_id.as_bytes());
+        message_data.push(b':');
+        message_data.extend_from_slice(user_id.as_bytes());
+        message_data.push(b':');
+        message_data.extend_from_slice(nonce.as_bytes());
+        message_data.push(b':');
+        message_data.extend_from_slice(message_hash);
+
+        let expected_hmac = Self::generate_hmac_for_data(&message_data, session_secret)?;
+
+        if provided_hmac_value
+            .as_bytes()
+            .ct_eq(expected_hmac.as_bytes())
+            .into()
+        {
+            Ok(user_id.to_string())
+        } else {
+            warn!("Signing approval HMAC validation failed");
+            Err(KeyMeldError::ValidationError(
+                "Invalid signing approval HMAC".to_string(),
+            ))
+        }
+    }
+
+    /// Validates user HMAC with format user_id:nonce:hmac signed with user's private key
+    /// The HMAC is created by signing the message with the user's private key
+    pub fn validate_user_hmac(
+        expected_user_id: &str,
+        user_hmac: &str,
+        user_public_key: &[u8],
+    ) -> Result<(), KeyMeldError> {
+        trace!("Validating user HMAC for user: {}", expected_user_id);
+
+        // Parse the format: user_id:nonce:hmac
+        let parts: Vec<&str> = user_hmac.split(':').collect();
+        if parts.len() != 3 {
+            return Err(KeyMeldError::ValidationError(
+                "Invalid user HMAC format, expected 'user_id:nonce:hmac'".to_string(),
+            ));
+        }
+
+        let hmac_user_id = parts[0];
+        let nonce = parts[1];
+        let signature_hex = parts[2];
+
+        // Verify the user_id matches
+        if hmac_user_id != expected_user_id {
+            return Err(KeyMeldError::ValidationError(
+                "User ID in HMAC does not match expected user ID".to_string(),
+            ));
+        }
+
+        // Validate public key format
+        if user_public_key.len() != 33 && user_public_key.len() != 65 {
+            return Err(KeyMeldError::ValidationError(
+                "Invalid public key length".to_string(),
+            ));
+        }
+
+        // Decode the signature
+        let signature_bytes = hex::decode(signature_hex)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {}", e)))?;
+
+        // Create the message that should have been signed: user_id:nonce
+        let message_to_verify = format!("{}:{}", hmac_user_id, nonce);
+        let message_hash = sha2::Sha256::digest(message_to_verify.as_bytes());
+
+        // Parse the public key
+        let public_key = secp256k1::PublicKey::from_slice(user_public_key)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {}", e)))?;
+
+        // Parse the signature
+        let signature =
+            secp256k1::ecdsa::Signature::from_compact(&signature_bytes).map_err(|e| {
+                KeyMeldError::ValidationError(format!("Invalid signature format: {}", e))
+            })?;
+
+        // Verify the signature
+        let message_hash_array: [u8; 32] = message_hash.into();
+        let message = secp256k1::Message::from_digest(message_hash_array);
+        signature.verify(message, &public_key).map_err(|e| {
+            KeyMeldError::ValidationError(format!("Signature verification failed: {}", e))
+        })?;
+
+        trace!(
+            "User HMAC signature verified for user: {}",
+            expected_user_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

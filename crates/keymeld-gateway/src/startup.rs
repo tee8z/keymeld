@@ -259,6 +259,10 @@ impl Application {
             )
             .route("/signing", post(handlers::create_signing_session))
             .route(
+                "/signing/{signing_session_id}",
+                post(handlers::approve_signing_session),
+            )
+            .route(
                 "/signing/{signing_session_id}/status",
                 get(handlers::get_signing_status),
             )

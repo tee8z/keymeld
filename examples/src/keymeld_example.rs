@@ -38,6 +38,9 @@ use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json;
 
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::ecdsa::Signature as EcdsaSignature;
+use bitcoin::secp256k1::{Message, Secp256k1, Signature};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::read_to_string;
@@ -104,6 +107,14 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
 
     info!("🔑 Starting Phase 1: Keygen Session");
     let keygen_session_id = test.create_keygen_session().await?;
+
+    info!("📋 Approval Configuration:");
+    info!("   - Coordinator requires signing approval: YES");
+    info!("   - Participant 0 requires signing approval: YES");
+    if test.participants.len() > 1 {
+        info!("   - Other participants require signing approval: NO");
+    }
+
     test.register_keygen_participants(&keygen_session_id)
         .await?;
     let aggregate_key = test.wait_for_keygen_completion(&keygen_session_id).await?;
@@ -119,15 +130,42 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
     let signing_session_id = test
         .create_signing_session(&keygen_session_id, &psbt)
         .await?;
+
+    info!("📋 Starting Phase 2a: Signing Approvals");
+    info!("⚠️  Participants requiring approval before signing can proceed:");
+    info!("   - Coordinator: {}", test.coordinator_user_id.as_str());
+    info!(
+        "   - Participant 0: {}",
+        test.participant_user_ids[0].as_str()
+    );
+
+    // Approve for coordinator (requires approval)
+    test.approve_signing_session(
+        &signing_session_id,
+        &test.coordinator_user_id.as_str(),
+        &test.coordinator_private_key,
+    )
+    .await?;
+
+    // Approve for first participant (requires approval)
+    test.approve_signing_session(
+        &signing_session_id,
+        &test.participant_user_ids[0].as_str(),
+        &test.participant_private_keys[0],
+    )
+    .await?;
+    info!("✅ All required approvals completed - signing can now proceed");
+
     let signature = test
         .wait_for_signing_completion(&signing_session_id, &keygen_session_id)
         .await?;
 
     let signed_tx = test.apply_signature_and_broadcast(psbt, &signature).await?;
 
-    println!("\n🎉 Two-Phase KeyMeld Test Completed Successfully!");
+    println!("\n🎉 Three-Phase KeyMeld Test Completed Successfully!");
     println!("✅ Phase 1: Keygen session completed");
-    println!("✅ Phase 2: Signing session completed (participants inherited from keygen)");
+    println!("✅ Phase 2a: Signing approvals completed (with HMAC authentication)");
+    println!("✅ Phase 2b: Signing session completed (participants inherited from keygen)");
     println!("✅ Aggregate key: {}", aggregate_key);
     println!("✅ Transaction broadcast: {}", signed_tx.compute_txid());
     println!("📋 Keygen Session ID: {}", keygen_session_id);
@@ -1059,6 +1097,8 @@ impl KeyMeldE2ETest {
                     &self.coordinator_user_id.as_str(),
                 )?
             },
+            // Coordinator also requires approval for demonstration
+            require_signing_approval: true,
         };
 
         let response = self
@@ -1130,6 +1170,8 @@ impl KeyMeldE2ETest {
                     &self.participant_user_ids[participant_index].as_str(),
                 )?
             },
+            // Make the first participant require approval for demonstration
+            require_signing_approval: participant_index == 0,
         };
 
         let response = self
@@ -1158,12 +1200,27 @@ impl KeyMeldE2ETest {
         info!("⏳ Waiting for keygen completion...");
 
         loop {
+            // Generate session HMAC for keygen status check
+            let session_secret = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
+                anyhow!(
+                    "Session secret not found for keygen session {}",
+                    keygen_session_id
+                )
+            })?;
+
+            let session_hmac = self.generate_session_hmac(
+                keygen_session_id,
+                &self.coordinator_user_id.as_str(),
+                session_secret,
+            )?;
+
             let response = self
                 .client
                 .get(format!(
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
+                .header("Authorization", format!("Bearer {}", session_hmac))
                 .send()
                 .await?;
 
@@ -1226,9 +1283,17 @@ impl KeyMeldE2ETest {
             timeout_secs: 1800,
         };
 
+        // Generate session HMAC for authorization
+        let session_hmac = self.generate_session_hmac(
+            keygen_session_id,
+            &self.coordinator_user_id.as_str(),
+            session_secret,
+        )?;
+
         let response = self
             .client
             .post(format!("{}/api/v1/signing", self.config.gateway_url))
+            .header("Authorization", format!("Bearer {}", session_hmac))
             .json(&request)
             .send()
             .await?;
@@ -1252,12 +1317,19 @@ impl KeyMeldE2ETest {
         info!("⏳ Waiting for signing completion...");
 
         loop {
+            // Generate user HMAC for signing status check (use coordinator credentials)
+            let user_hmac = self.generate_user_hmac(
+                &self.coordinator_user_id.as_str(),
+                &self.coordinator_private_key,
+            )?;
+
             let response = self
                 .client
                 .get(format!(
                     "{}/api/v1/signing/{}/status",
                     self.config.gateway_url, signing_session_id
                 ))
+                .header("Authorization", format!("Bearer {}", user_hmac))
                 .send()
                 .await?;
 
@@ -1412,5 +1484,98 @@ impl KeyMeldE2ETest {
             })?;
 
         Ok(*sighash.as_ref())
+    }
+
+    /// Generate session HMAC for keygen operations (format: user_id:nonce:hmac)
+    fn generate_session_hmac(
+        &self,
+        session_id: &str,
+        user_id: &str,
+        session_secret: &str,
+    ) -> Result<String> {
+        use rand::RngCore;
+
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = hex::encode(nonce_bytes);
+
+        // Create message: session_id:user_id:nonce
+        let message = format!("{}:{}:{}", session_id, user_id, nonce);
+
+        // Generate HMAC
+        let hmac = validation::generate_registration_hmac(&message, session_secret)
+            .map_err(|e| anyhow!("Failed to generate session HMAC: {}", e))?;
+
+        // Return format: user_id:nonce:hmac
+        Ok(format!("{}:{}:{}", user_id, nonce, hmac))
+    }
+
+    /// Generate user HMAC signature for signing operations (format: user_id:nonce:signature)
+    fn generate_user_hmac(&self, user_id: &str, private_key: &SecretKey) -> Result<String> {
+        use rand::RngCore;
+
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = hex::encode(nonce_bytes);
+
+        // Create message to sign: user_id:nonce
+        let message = format!("{}:{}", user_id, nonce);
+        let message_hash = sha256::Hash::hash(message.as_bytes());
+        let message_secp = Message::from_digest_slice(message_hash.as_ref())
+            .map_err(|e| anyhow!("Failed to create message from hash: {}", e))?;
+
+        // Sign with private key
+        let secp = Secp256k1::new();
+        let signature = secp.sign_ecdsa(&message_secp, private_key);
+        let signature_bytes = signature.serialize_compact();
+
+        // Return format: user_id:nonce:signature
+        Ok(format!(
+            "{}:{}:{}",
+            user_id,
+            nonce,
+            hex::encode(signature_bytes)
+        ))
+    }
+
+    /// Approve a signing session for participants who require approval
+    async fn approve_signing_session(
+        &self,
+        signing_session_id: &str,
+        user_id: &str,
+        private_key: &SecretKey,
+    ) -> Result<()> {
+        info!(
+            "✅ Approving signing session {} for user {}",
+            signing_session_id, user_id
+        );
+
+        // Generate user HMAC signature for authorization
+        let user_hmac = self.generate_user_hmac(user_id, private_key)?;
+
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/v1/signing/{}",
+                self.config.gateway_url, signing_session_id
+            ))
+            .header("Authorization", format!("Bearer {}", user_hmac))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Failed to approve signing session: {}",
+                response.text().await?
+            ));
+        }
+
+        info!(
+            "✅ Signing session {} approved by user {}",
+            signing_session_id, user_id
+        );
+        Ok(())
     }
 }

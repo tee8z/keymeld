@@ -28,6 +28,8 @@ pub struct SigningCollectingParticipants {
     pub expires_at: u64,
     pub required_enclave_epochs: BTreeMap<EnclaveId, u64>,
     pub taproot_tweak: Option<TaprootTweak>,
+    pub participants_requiring_approval: Vec<UserId>,
+    pub approved_participants: Vec<UserId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -36,6 +38,7 @@ pub struct SigningSessionFull {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -52,10 +55,11 @@ impl From<SigningCollectingParticipants> for SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message_hash,
+            message: collecting.encrypted_message,
+            message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
-            aggregate_public_key: None,
+            aggregate_public_key: None, // Will be set during processing
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
             encrypted_session_secret: collecting.encrypted_session_secret,
             created_at: collecting.created_at,
@@ -74,7 +78,8 @@ impl SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message_hash,
+            message: collecting.encrypted_message,
+            message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: Some(aggregate_public_key),
@@ -94,6 +99,7 @@ pub struct SigningGeneratingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -110,6 +116,7 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
             signing_session_id: full.signing_session_id,
             keygen_session_id: full.keygen_session_id,
             message: full.message,
+            message_hash: full.message_hash,
             expected_participants: full.expected_participants,
             registered_participants: full.registered_participants,
             aggregate_public_key: full.aggregate_public_key,
@@ -128,6 +135,7 @@ pub struct SigningCollectingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -143,6 +151,7 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
             message: generating.message,
+            message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
             aggregate_public_key: generating.aggregate_public_key,
@@ -160,6 +169,7 @@ pub struct SigningAggregatingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -175,6 +185,7 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
             message: collecting.message,
+            message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: collecting.aggregate_public_key,
@@ -192,6 +203,7 @@ pub struct SigningGeneratingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -211,6 +223,7 @@ impl SigningGeneratingPartialSignatures {
             signing_session_id: aggregating.signing_session_id,
             keygen_session_id: aggregating.keygen_session_id,
             message: aggregating.message,
+            message_hash: aggregating.message_hash,
             expected_participants: aggregating.expected_participants,
             registered_participants: aggregating.registered_participants,
             aggregate_public_key: aggregating.aggregate_public_key,
@@ -229,6 +242,7 @@ pub struct SigningCollectingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -244,6 +258,7 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
             message: generating.message,
+            message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
             aggregate_public_key: generating.aggregate_public_key,
@@ -261,6 +276,7 @@ pub struct SigningFinalizingSignature {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -276,6 +292,7 @@ impl From<SigningCollectingPartialSignatures> for SigningFinalizingSignature {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
             message: collecting.message,
+            message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: collecting.aggregate_public_key,
@@ -352,6 +369,38 @@ pub enum SigningSessionStatus {
 }
 
 impl SigningSessionStatus {
+    pub fn get_message(&self) -> Option<&Vec<u8>> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(_) => None, // Only has message_hash, not raw message
+            SigningSessionStatus::SessionFull(ref status) => Some(&status.message),
+            SigningSessionStatus::GeneratingNonces(ref status) => Some(&status.message),
+            SigningSessionStatus::CollectingNonces(ref status) => Some(&status.message),
+            SigningSessionStatus::AggregatingNonces(ref status) => Some(&status.message),
+            SigningSessionStatus::GeneratingPartialSignatures(ref status) => Some(&status.message),
+            SigningSessionStatus::CollectingPartialSignatures(ref status) => Some(&status.message),
+            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.message),
+            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+        }
+    }
+
+    pub fn get_message_hash(&self) -> Option<&Vec<u8>> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::SessionFull(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::GeneratingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::CollectingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::AggregatingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::GeneratingPartialSignatures(ref status) => {
+                Some(&status.message_hash)
+            }
+            SigningSessionStatus::CollectingPartialSignatures(ref status) => {
+                Some(&status.message_hash)
+            }
+            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+        }
+    }
+
     pub fn extract_status_info(&self) -> (SigningStatusKind, usize, Option<String>, u64) {
         match self {
             SigningSessionStatus::CollectingParticipants(ref status) => (

@@ -5,6 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -58,7 +59,8 @@ pub struct RegisterKeygenParticipantRequest {
     pub user_id: UserId,
     pub encrypted_private_key: String,
     pub public_key: Vec<u8>,
-    pub session_hmac: String,
+    #[serde(default)]
+    pub require_signing_approval: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -71,6 +73,8 @@ pub struct RegisterKeygenParticipantResponse {
     pub expected_participants: usize,
     pub signer_index: usize,
     pub assigned_enclave_id: EnclaveId,
+    #[serde(default)]
+    pub require_signing_approval: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -118,13 +122,6 @@ pub struct SigningSessionStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct EnclaveAssignmentRequest {
-    pub user_id: UserId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub struct EnclaveAssignmentResponse {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
@@ -144,34 +141,11 @@ pub struct AvailableUserSlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct GetAvailableSlotsRequest {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub struct GetAvailableSlotsResponse {
     pub session_id: SessionId,
     pub available_slots: Vec<AvailableUserSlot>,
     pub total_slots: usize,
     pub claimed_slots: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct ClaimUserSlotRequest {
-    pub session_id: SessionId,
-    pub user_id: UserId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct ClaimUserSlotResponse {
-    pub session_id: SessionId,
-    pub user_id: UserId,
-    pub enclave_id: EnclaveId,
-    pub signer_index: usize,
-    pub enclave_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -183,12 +157,6 @@ pub struct EnclavePublicKeyResponse {
     pub pcr_measurements: HashMap<String, String>,
     pub timestamp: u64,
     pub healthy: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct SetCoordinatorKeyRequest {
-    pub encrypted_private_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -211,14 +179,6 @@ pub struct ListEnclavesResponse {
     pub enclaves: Vec<EnclaveHealthResponse>,
     pub total_enclaves: u32,
     pub healthy_enclaves: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct SetCoordinatorKeyResponse {
-    pub session_id: SessionId,
-    pub status: String,
-    pub coordinator_enclave_id: EnclaveId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -383,6 +343,28 @@ pub mod validation {
         session_secret: &str,
     ) -> Result<String, KeyMeldError> {
         SecureCrypto::generate_registration_hmac(data, session_secret)
+    }
+
+    pub fn validate_signing_approval_hmac(
+        signing_session_id: &str,
+        provided_hmac: &str,
+        session_secret: &str,
+        message_hash: &[u8],
+    ) -> Result<String, KeyMeldError> {
+        SecureCrypto::validate_signing_approval_hmac(
+            signing_session_id,
+            provided_hmac,
+            session_secret,
+            message_hash,
+        )
+    }
+
+    pub fn validate_user_hmac(
+        user_id: &str,
+        user_hmac: &str,
+        user_public_key: &[u8],
+    ) -> Result<(), KeyMeldError> {
+        SecureCrypto::validate_user_hmac(user_id, user_hmac, user_public_key)
     }
 
     pub fn validate_create_keygen_session_request(

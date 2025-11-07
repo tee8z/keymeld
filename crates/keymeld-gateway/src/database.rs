@@ -368,8 +368,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO keygen_participants (
                 keygen_session_id, user_id, assigned_enclave_id,
-                private_key_encrypted, public_key, enclave_key_epoch, registered_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                private_key_encrypted, public_key, enclave_key_epoch, registered_at, require_signing_approval
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(keygen_session_id.as_string())
         .bind(request.user_id.as_str())
@@ -378,6 +378,7 @@ impl Database {
         .bind(request.public_key.as_slice())
         .bind(enclave_key_epoch as i64)
         .bind(current_time)
+        .bind(request.require_signing_approval)
         .execute(&self.pool)
         .await?;
 
@@ -520,6 +521,18 @@ impl Database {
         let current_time = DbUtils::current_timestamp();
         let expires_at = current_time + request.timeout_secs as i64;
 
+        let participants_requiring_approval = sqlx::query_scalar(
+            "SELECT user_id FROM keygen_participants
+             WHERE keygen_session_id = ? AND require_signing_approval = true",
+        )
+        .bind(request.keygen_session_id.as_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|user_id_str: String| UserId::parse(&user_id_str))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::database(&format!("Invalid user ID in database: {}", e)))?;
+
         let status = SigningSessionStatus::CollectingParticipants(SigningCollectingParticipants {
             signing_session_id: request.signing_session_id.clone(),
             keygen_session_id: request.keygen_session_id.clone(),
@@ -533,6 +546,8 @@ impl Database {
             created_at: current_time as u64,
             expires_at: expires_at as u64,
             required_enclave_epochs: BTreeMap::new(),
+            participants_requiring_approval,
+            approved_participants: Vec::new(),
         });
 
         let status_json = serde_json::to_string(&status).map_err(|e| {
@@ -608,6 +623,22 @@ impl Database {
                     .collect();
                 if let Err(e) = status.merge_participants_from_keygen(&participants_map) {
                     warn!("Failed to merge participants from keygen: {}", e);
+                }
+
+                // Update approval fields if this is a CollectingParticipants status
+                if let SigningSessionStatus::CollectingParticipants(ref mut collecting) = status {
+                    // Get participants requiring approval from keygen session
+                    let participants_requiring_approval = self
+                        .get_participants_requiring_approval(&collecting.keygen_session_id)
+                        .await?;
+
+                    // Get current approvals for this signing session
+                    let approved_participants = self
+                        .get_signing_session_approvals(signing_session_id)
+                        .await?;
+
+                    collecting.participants_requiring_approval = participants_requiring_approval;
+                    collecting.approved_participants = approved_participants;
                 }
 
                 Ok(Some(status))
@@ -905,6 +936,115 @@ impl Database {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn approve_signing_session(
+        &self,
+        signing_session_id: &SessionId,
+        user_id: &UserId,
+    ) -> Result<(), ApiError> {
+        let current_time = DbUtils::current_timestamp();
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO signing_approvals (
+                signing_session_id, user_id, approved_at, user_hmac_validated, session_hmac_validated
+            ) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(signing_session_id.as_string())
+        .bind(user_id.as_str())
+        .bind(current_time)
+        .bind(true)
+        .bind(true)
+        .execute(&self.pool)
+        .await?;
+
+        let mut session_status = self
+            .get_signing_session_by_id(signing_session_id)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Signing session not found"))?;
+
+        if let SigningSessionStatus::CollectingParticipants(ref mut collecting) = session_status {
+            if !collecting.approved_participants.contains(user_id) {
+                collecting.approved_participants.push(user_id.clone());
+            }
+        }
+
+        self.update_signing_session_status(signing_session_id, &session_status)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_participants_requiring_approval(
+        &self,
+        keygen_session_id: &SessionId,
+    ) -> Result<Vec<UserId>, ApiError> {
+        let rows = sqlx::query(
+            "SELECT user_id FROM keygen_participants
+             WHERE keygen_session_id = ? AND require_signing_approval = true",
+        )
+        .bind(keygen_session_id.as_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut user_ids = Vec::new();
+        for row in rows {
+            let user_id_str: String = row.try_get("user_id")?;
+            user_ids.push(
+                UserId::parse(&user_id_str).map_err(|e| {
+                    ApiError::database(&format!("Invalid user ID in database: {}", e))
+                })?,
+            );
+        }
+
+        Ok(user_ids)
+    }
+
+    pub async fn get_signing_session_approvals(
+        &self,
+        signing_session_id: &SessionId,
+    ) -> Result<Vec<UserId>, ApiError> {
+        let rows = sqlx::query(
+            "SELECT user_id FROM signing_approvals
+             WHERE signing_session_id = ?",
+        )
+        .bind(signing_session_id.as_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut user_ids = Vec::new();
+        for row in rows {
+            let user_id_str: String = row.try_get("user_id")?;
+            user_ids.push(
+                UserId::parse(&user_id_str).map_err(|e| {
+                    ApiError::database(&format!("Invalid user ID in database: {}", e))
+                })?,
+            );
+        }
+
+        Ok(user_ids)
+    }
+
+    pub async fn get_user_public_key_from_keygen(
+        &self,
+        keygen_session_id: &SessionId,
+        user_id: &UserId,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let row = sqlx::query(
+            "SELECT public_key FROM keygen_participants
+             WHERE keygen_session_id = ? AND user_id = ?",
+        )
+        .bind(keygen_session_id.as_string())
+        .bind(user_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let public_key: Vec<u8> = row.try_get("public_key")?;
+            Ok(Some(public_key))
+        } else {
+            Ok(None)
+        }
     }
 }
 
