@@ -12,9 +12,9 @@ pub use protocol::{
     AggregateKeyCompleteResponse, AggregateNonceResponse, AggregatePublicKeyResponse,
     AttestationResponse, ClearSessionCommand, ConfigureCommand, EnclaveCommand, EnclaveError,
     EnclaveResponse, ErrorResponse, FinalSignatureResponse, FinalizeCommand, GenerateNonceCommand,
-    GetAggregateNonceCommand, GetAggregatePublicKeyCommand, InitSessionCommand, NonceResponse,
-    ParitialSignatureCommand, PublicInfoResponse, SessionHmacValidationResponse,
-    ShareAggregateNonceCommand, SignatureResponse, SuccessResponse,
+    GetAggregateNonceCommand, GetAggregatePublicKeyCommand, InitKeygenSessionCommand,
+    InitSigningSessionCommand, NonceResponse, ParitialSignatureCommand, PublicInfoResponse,
+    SessionHmacValidationResponse, ShareAggregateNonceCommand, SignatureResponse, SuccessResponse,
     ValidateKeygenParticipantHmacCommand, ValidateSessionHmacCommand,
 };
 

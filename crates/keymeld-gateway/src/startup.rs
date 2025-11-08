@@ -107,9 +107,36 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
     ),
     servers(
         (url = "/api/v1", description = "KeyMeld Gateway API v1")
-    )
+    ),
+    security(
+        ("SessionHmac" = []),
+        ("SigningHmac" = [])
+    ),
+    modifiers(&SecurityAddon)
 )]
 struct ApiDoc;
+
+use utoipa::Modify;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+
+            components.add_security_scheme(
+                "SessionHmac",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-HMAC"))),
+            );
+
+            components.add_security_scheme(
+                "SigningHmac",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Signing-HMAC"))),
+            );
+        }
+    }
+}
 
 pub struct Application {
     listener: TcpListener,

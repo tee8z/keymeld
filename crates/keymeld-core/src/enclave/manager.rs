@@ -1,8 +1,8 @@
 use crate::{
     api::TaprootTweak,
     enclave::{
-        AddNonceCommand, AddPartialSignatureCommand, GenerateNonceCommand, InitSessionCommand,
-        ParitialSignatureCommand,
+        AddNonceCommand, AddPartialSignatureCommand, GenerateNonceCommand,
+        InitKeygenSessionCommand, InitSigningSessionCommand, ParitialSignatureCommand,
     },
     identifiers::{EnclaveId, SessionId, UserId},
     session::AggregatePublicKey,
@@ -761,10 +761,10 @@ impl EnclaveManager {
 
         // Initialize sessions in all enclaves that have participants
         for (enclave_id, _participants_in_enclave) in &enclave_participants {
-            let init_cmd = InitSessionCommand {
-                keygen_session_id: Some(params.keygen_session_id.clone()),
-                signing_session_id: Some(params.signing_session_id.clone()),
-                message: params.message.clone(),
+            let init_cmd = InitSigningSessionCommand {
+                keygen_session_id: params.keygen_session_id.clone(),
+                signing_session_id: params.signing_session_id.clone(),
+                encrypted_message: params.encrypted_message.clone(),
                 coordinator_encrypted_private_key: if *enclave_id == coordinator_enclave_id {
                     params.coordinator_encrypted_private_key.clone()
                 } else {
@@ -781,7 +781,7 @@ impl EnclaveManager {
                 expected_participant_count: params.participants.len(),
             };
 
-            self.send_command_to_enclave(enclave_id, EnclaveCommand::InitSession(init_cmd))
+            self.send_command_to_enclave(enclave_id, EnclaveCommand::InitSigningSession(init_cmd))
                 .await?;
         }
 
@@ -859,10 +859,8 @@ impl EnclaveManager {
         let enclaves_with_participants = session_assignment.get_all_assigned_enclaves();
 
         for enclave_id in &enclaves_with_participants {
-            let init_cmd = InitSessionCommand {
-                keygen_session_id: Some(keygen_session_id.clone()),
-                signing_session_id: None,
-                message: vec![],
+            let init_cmd = InitKeygenSessionCommand {
+                keygen_session_id: keygen_session_id.clone(),
                 coordinator_encrypted_private_key: if *enclave_id == *coordinator_enclave_id {
                     Some(coordinator_encrypted_private_key.to_string())
                 } else {
@@ -878,7 +876,7 @@ impl EnclaveManager {
                 expected_participant_count: participants.len(),
             };
 
-            self.send_command_to_enclave(enclave_id, EnclaveCommand::InitSession(init_cmd))
+            self.send_command_to_enclave(enclave_id, EnclaveCommand::InitKeygenSession(init_cmd))
                 .await
                 .map_err(|e| {
                     KeyMeldError::EnclaveError(format!(

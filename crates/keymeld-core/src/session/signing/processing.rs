@@ -192,7 +192,7 @@ impl Advanceable<SigningSessionStatus> for SigningSessionFull {
         let init_params = SigningSessionInitParams {
             keygen_session_id: self.keygen_session_id.clone(),
             signing_session_id: self.signing_session_id.clone(),
-            message: self.message.clone(),
+            encrypted_message: self.encrypted_message.clone(),
             participants: self.registered_participants.clone(),
             coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key.clone()),
             encrypted_session_secret: Some(encrypted_session_secret.clone()),

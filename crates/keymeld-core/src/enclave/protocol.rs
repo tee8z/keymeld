@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 pub enum EnclaveCommand {
     Ping,
     Configure(ConfigureCommand),
-    InitSession(InitSessionCommand),
+    InitKeygenSession(InitKeygenSessionCommand),
+    InitSigningSession(InitSigningSessionCommand),
     AddParticipant(AddParticipantCommand),
     GenerateNonce(GenerateNonceCommand),
     AddNonce(AddNonceCommand),
@@ -48,10 +49,20 @@ pub struct ConfigureCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitSessionCommand {
-    pub keygen_session_id: Option<SessionId>,
-    pub signing_session_id: Option<SessionId>,
-    pub message: Vec<u8>,
+pub struct InitKeygenSessionCommand {
+    pub keygen_session_id: SessionId,
+    pub coordinator_encrypted_private_key: Option<String>,
+    pub encrypted_session_secret: Option<String>,
+    pub timeout_secs: u64,
+    pub taproot_tweak: TaprootTweak,
+    pub expected_participant_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitSigningSessionCommand {
+    pub keygen_session_id: SessionId,
+    pub signing_session_id: SessionId,
+    pub encrypted_message: String,
     pub coordinator_encrypted_private_key: Option<String>,
     pub encrypted_session_secret: Option<String>,
     pub timeout_secs: u64,

@@ -297,22 +297,25 @@ impl Database {
 
         sqlx::query(
             "INSERT INTO keygen_sessions (
-                keygen_session_id, coordinator_pubkey, coordinator_encrypted_private_key,
-                coordinator_enclave_id, expected_participants, status, status_name,
-                created_at, expires_at, encrypted_session_secret, max_signing_sessions
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                keygen_session_id, status_name, coordinator_enclave_id, created_at,
+                expires_at, updated_at, retry_count, max_signing_sessions,
+                expected_participants, status, session_coordinator_pubkey,
+                enclave_coordinator_private_key, enclave_session_secret
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request.keygen_session_id.as_string())
-        .bind(request.coordinator_pubkey.to_owned())
-        .bind(request.coordinator_encrypted_private_key.to_owned())
-        .bind(request.coordinator_enclave_id.as_u32() as i64)
-        .bind(serde_json::to_string(&request.expected_participants)?)
-        .bind(status_json)
         .bind(status_name.to_string())
+        .bind(request.coordinator_enclave_id.as_u32() as i64)
         .bind(current_time)
         .bind(expires_at)
-        .bind(request.encrypted_session_secret.clone()) // Store encrypted session secret
+        .bind(current_time)
+        .bind(0) // retry_count
         .bind(request.max_signing_sessions.map(|max| max as i64))
+        .bind(serde_json::to_string(&request.expected_participants)?)
+        .bind(status_json)
+        .bind(request.coordinator_pubkey.to_owned())
+        .bind(request.coordinator_encrypted_private_key.to_owned())
+        .bind(request.encrypted_session_secret.clone())
         .execute(&self.pool)
         .await?;
 
@@ -367,18 +370,18 @@ impl Database {
 
         sqlx::query(
             "INSERT INTO keygen_participants (
-                keygen_session_id, user_id, assigned_enclave_id,
-                private_key_encrypted, public_key, enclave_key_epoch, registered_at, require_signing_approval
+                keygen_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
+                registered_at, require_signing_approval, enclave_private_key, session_public_key
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(keygen_session_id.as_string())
         .bind(request.user_id.as_str())
         .bind(enclave_id.as_u32() as i64)
-        .bind(&request.encrypted_private_key)
-        .bind(request.public_key.as_slice())
         .bind(enclave_key_epoch as i64)
         .bind(current_time)
         .bind(request.require_signing_approval)
+        .bind(&request.encrypted_private_key)
+        .bind(request.public_key.as_slice())
         .execute(&self.pool)
         .await?;
 
@@ -390,7 +393,8 @@ impl Database {
         keygen_session_id: &SessionId,
     ) -> Result<Vec<ParticipantData>, ApiError> {
         let rows = sqlx::query_as::<_, KeygenParticipantRow>(
-            "SELECT user_id, assigned_enclave_id, private_key_encrypted, public_key, enclave_key_epoch
+            "SELECT user_id, assigned_enclave_id, enclave_key_epoch, registered_at,
+                    require_signing_approval, enclave_private_key, session_public_key
              FROM keygen_participants
              WHERE keygen_session_id = ?
              ORDER BY registered_at ASC",
@@ -410,7 +414,9 @@ impl Database {
         signing_session_id: &SessionId,
     ) -> Result<Vec<ParticipantData>, ApiError> {
         let rows = sqlx::query_as::<_, SigningParticipantRow>(
-            "SELECT user_id, assigned_enclave_id, private_key_encrypted, public_key, public_nonces, partial_signature, enclave_key_epoch
+            "SELECT user_id, assigned_enclave_id, enclave_key_epoch, registered_at,
+                    public_nonces, partial_signature, enclave_private_key,
+                    session_public_key, enclave_public_key
              FROM signing_participants
              WHERE signing_session_id = ?
              ORDER BY registered_at ASC",
@@ -443,7 +449,7 @@ impl Database {
         keygen_session_id: &SessionId,
     ) -> Result<Option<String>, ApiError> {
         let encrypted_session_secret: Option<String> = sqlx::query_scalar(
-            "SELECT encrypted_session_secret FROM keygen_sessions WHERE keygen_session_id = ?",
+            "SELECT enclave_session_secret FROM keygen_sessions WHERE keygen_session_id = ?",
         )
         .bind(keygen_session_id.as_string())
         .fetch_optional(&self.pool)
@@ -553,40 +559,48 @@ impl Database {
         let status_json = serde_json::to_string(&status).map_err(|e| {
             ApiError::Serialization(format!("Failed to serialize signing status: {}", e))
         })?;
+        let status_name = status.kind().to_string();
+        let correlation_id_bytes: Option<Vec<u8>> = None; // TODO: Implement correlation ID if needed
+        let participants_user_ids = expected_participants.clone();
 
         sqlx::query(
             "INSERT INTO signing_sessions (
-                signing_session_id, keygen_session_id, message_hash, encrypted_message,
-                expected_participants, status, status_name, created_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        signing_session_id, keygen_session_id, status_name, created_at,
+        expires_at, updated_at, retry_count, correlation_id, message_hash,
+        expected_participants, status, session_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request.signing_session_id.as_string())
         .bind(request.keygen_session_id.as_string())
-        .bind(request.message_hash.as_slice())
-        .bind(request.encrypted_message.as_ref())
-        .bind(serde_json::to_string(&expected_participants)?)
-        .bind(status_json)
-        .bind(status.kind().as_ref())
+        .bind(status_name.to_string())
         .bind(current_time)
         .bind(expires_at)
+        .bind(current_time)
+        .bind(0) // retry_count
+        .bind(correlation_id_bytes)
+        .bind(request.message_hash.as_slice())
+        .bind(serde_json::to_string(&participants_user_ids)?)
+        .bind(status_json)
+        .bind(request.encrypted_message.as_ref())
         .execute(&self.pool)
         .await?;
 
         // Copy participants from keygen to signing session
-        for participant in keygen_participants {
+        for participant in &participants {
             sqlx::query(
                 "INSERT INTO signing_participants (
-                    signing_session_id, user_id, assigned_enclave_id,
-                    private_key_encrypted, public_key, enclave_key_epoch, registered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    signing_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
+                    registered_at, enclave_private_key, session_public_key, enclave_public_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(request.signing_session_id.as_string())
             .bind(participant.user_id.as_str())
             .bind(participant.enclave_id.as_u32() as i64)
-            .bind(participant.encrypted_private_key)
-            .bind(participant.public_key.serialize().to_vec())
             .bind(participant.enclave_key_epoch as i64)
             .bind(current_time)
+            .bind(&participant.encrypted_private_key)
+            .bind(participant.public_key.serialize().to_vec())
+            .bind(participant.public_key.serialize().to_vec()) // Same as session for now
             .execute(&self.pool)
             .await?;
         }
@@ -1031,7 +1045,7 @@ impl Database {
         user_id: &UserId,
     ) -> Result<Option<Vec<u8>>, ApiError> {
         let row = sqlx::query(
-            "SELECT public_key FROM keygen_participants
+            "SELECT session_public_key FROM keygen_participants
              WHERE keygen_session_id = ? AND user_id = ?",
         )
         .bind(keygen_session_id.as_string())
@@ -1040,7 +1054,7 @@ impl Database {
         .await?;
 
         if let Some(row) = row {
-            let public_key: Vec<u8> = row.try_get("public_key")?;
+            let public_key: Vec<u8> = row.get("session_public_key");
             Ok(Some(public_key))
         } else {
             Ok(None)
@@ -1052,9 +1066,11 @@ impl Database {
 pub struct KeygenParticipantRow {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
-    pub encrypted_private_key: String,
-    pub public_key: PublicKey,
     pub enclave_key_epoch: u64,
+    pub registered_at: i64,
+    pub require_signing_approval: bool,
+    pub enclave_private_key: String,
+    pub session_public_key: Vec<u8>,
 }
 
 impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
@@ -1068,33 +1084,37 @@ impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
         let enclave_id_i64: i64 = row.try_get("assigned_enclave_id")?;
         let enclave_id = EnclaveId::new(enclave_id_i64 as u32);
 
-        let encrypted_private_key: String = row.try_get("private_key_encrypted")?;
-        let public_key_bytes: Vec<u8> = row.try_get("public_key")?;
         let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
-
-        let public_key =
-            PublicKey::from_slice(&public_key_bytes).map_err(|e| sqlx::Error::ColumnDecode {
-                index: "public_key".to_string(),
-                source: Box::new(e),
-            })?;
+        let registered_at: i64 = row.try_get("registered_at")?;
+        let require_signing_approval: bool = row.try_get("require_signing_approval")?;
+        let enclave_private_key: String = row.try_get("enclave_private_key")?;
+        let session_public_key: Vec<u8> = row.try_get("session_public_key")?;
 
         Ok(KeygenParticipantRow {
             user_id,
             enclave_id,
-            encrypted_private_key,
-            public_key,
             enclave_key_epoch: enclave_key_epoch_i64 as u64,
+            registered_at,
+            require_signing_approval,
+            enclave_private_key,
+            session_public_key,
         })
     }
 }
 
 impl From<KeygenParticipantRow> for Option<ParticipantData> {
     fn from(row: KeygenParticipantRow) -> Self {
+        // Convert session_public_key bytes to PublicKey
+        let public_key = match musig2::secp256k1::PublicKey::from_slice(&row.session_public_key) {
+            Ok(pk) => pk,
+            Err(_) => return None, // Skip invalid public keys
+        };
+
         Some(ParticipantData {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
-            encrypted_private_key: row.encrypted_private_key,
-            public_key: row.public_key,
+            encrypted_private_key: row.enclave_private_key,
+            public_key,
             public_nonces: None,
             partial_signature: None,
             enclave_key_epoch: row.enclave_key_epoch,
@@ -1106,11 +1126,13 @@ impl From<KeygenParticipantRow> for Option<ParticipantData> {
 pub struct SigningParticipantRow {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
-    pub encrypted_private_key: String,
-    pub public_key: PublicKey,
     pub enclave_key_epoch: u64,
-    pub public_nonces: Option<PubNonce>,
-    pub partial_signature: Option<PartialSignature>,
+    pub registered_at: i64,
+    pub public_nonces: Option<Vec<u8>>,
+    pub partial_signature: Option<Vec<u8>>,
+    pub enclave_private_key: String,
+    pub session_public_key: Vec<u8>,
+    pub enclave_public_key: Vec<u8>,
 }
 
 impl FromRow<'_, SqliteRow> for SigningParticipantRow {
@@ -1124,42 +1146,56 @@ impl FromRow<'_, SqliteRow> for SigningParticipantRow {
         let enclave_id_i64: i64 = row.try_get("assigned_enclave_id")?;
         let enclave_id = EnclaveId::new(enclave_id_i64 as u32);
 
-        let encrypted_private_key: String = row.try_get("private_key_encrypted")?;
-        let public_key_bytes: Vec<u8> = row.try_get("public_key")?;
+        let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
+        let registered_at: i64 = row.try_get("registered_at")?;
         let public_nonces_bytes: Option<Vec<u8>> = row.try_get("public_nonces")?;
         let partial_signature_bytes: Option<Vec<u8>> = row.try_get("partial_signature")?;
-        let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
-
-        let public_key =
-            PublicKey::from_slice(&public_key_bytes).map_err(|e| sqlx::Error::ColumnDecode {
-                index: "public_key".to_string(),
-                source: Box::new(e),
-            })?;
-        let public_nonces = public_nonces_bytes.and_then(|bytes| PubNonce::from_bytes(&bytes).ok());
-        let partial_signature =
-            partial_signature_bytes.and_then(|bytes| PartialSignature::from_slice(&bytes).ok());
+        let enclave_private_key: String = row.try_get("enclave_private_key")?;
+        let session_public_key: Vec<u8> = row.try_get("session_public_key")?;
+        let enclave_public_key: Vec<u8> = row.try_get("enclave_public_key")?;
 
         Ok(SigningParticipantRow {
             user_id,
             enclave_id,
-            encrypted_private_key,
-            public_key,
-            public_nonces,
-            partial_signature,
             enclave_key_epoch: enclave_key_epoch_i64 as u64,
+            registered_at,
+            public_nonces: public_nonces_bytes,
+            partial_signature: partial_signature_bytes,
+            enclave_private_key,
+            session_public_key,
+            enclave_public_key,
         })
     }
 }
 
 impl From<SigningParticipantRow> for ParticipantData {
     fn from(row: SigningParticipantRow) -> Self {
+        // Convert session_public_key bytes to PublicKey (fallback to enclave_public_key if needed)
+        let public_key = musig2::secp256k1::PublicKey::from_slice(&row.session_public_key)
+            .or_else(|_| musig2::secp256k1::PublicKey::from_slice(&row.enclave_public_key))
+            .expect("At least one public key should be valid");
+
+        let public_nonces = row
+            .public_nonces
+            .map(|bytes| musig2::PubNonce::from_slice(&bytes))
+            .transpose()
+            .ok()
+            .flatten();
+
+        let partial_signature = row
+            .partial_signature
+            .map(|bytes| musig2::PartialSignature::from_slice(&bytes))
+            .transpose()
+            .ok()
+            .flatten();
+
         ParticipantData {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
-            encrypted_private_key: row.encrypted_private_key,
-            public_key: row.public_key,
-            public_nonces: row.public_nonces,
-            partial_signature: row.partial_signature,
+            encrypted_private_key: row.enclave_private_key,
+            public_key,
+            public_nonces,
+            partial_signature,
             enclave_key_epoch: row.enclave_key_epoch,
         }
     }

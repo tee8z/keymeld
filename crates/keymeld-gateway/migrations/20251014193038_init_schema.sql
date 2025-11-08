@@ -6,26 +6,26 @@
 -- Keygen sessions for key aggregation phase
 CREATE TABLE keygen_sessions (
     keygen_session_id BLOB PRIMARY KEY,
-    coordinator_pubkey BLOB, -- Public key (safe unencrypted, nullable until set)
-    coordinator_encrypted_private_key TEXT, -- ENCRYPTED: Coordinator's private key encrypted to enclave
-    coordinator_enclave_id INTEGER, -- Enclave assigned to coordinator (nullable until assigned)
-    expected_participants TEXT NOT NULL, -- JSON array of participant user IDs
-    status TEXT NOT NULL, -- JSON serialized KeygenSessionStatus
     status_name TEXT NOT NULL, -- Simple status name for efficient querying
+    coordinator_enclave_id INTEGER, -- Enclave assigned to coordinator (nullable until assigned)
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     collecting_participants_at INTEGER, -- When entered CollectingParticipants state
     completed_at INTEGER, -- Timestamp when keygen completed
     failed_at INTEGER, -- Timestamp when keygen failed
-    error_message TEXT, -- Error message if failed
-    aggregate_pubkey BLOB, -- Aggregated public key (safe to store unencrypted)
-    aggregate_pubkey_hash BLOB, -- Hash of participant keys used in aggregation
-    encrypted_session_secret TEXT, -- Encrypted session secret field for HMAC validation
     processing_started_at INTEGER, -- Timestamp when processing started
     last_processing_attempt INTEGER, -- Timestamp of last processing attempt
     retry_count INTEGER DEFAULT 0, -- Number of processing retry attempts
-    max_signing_sessions INTEGER -- Maximum number of signing sessions allowed (NULL = unlimited)
+    max_signing_sessions INTEGER, -- Maximum number of signing sessions allowed (NULL = unlimited)
+    expected_participants TEXT NOT NULL, -- JSON array of participant user IDs
+    aggregate_pubkey_hash BLOB, -- Hash of participant keys used in aggregation
+    status TEXT NOT NULL, -- JSON serialized KeygenSessionStatus
+    error_message TEXT, -- Error message if failed
+    session_coordinator_pubkey BLOB, -- Public key (encrypted to session secret)
+    session_aggregate_pubkey BLOB, -- Aggregated public key (encrypted to session secret)
+    enclave_coordinator_private_key TEXT, -- ENCRYPTED: Coordinator's private key encrypted to enclave
+    enclave_session_secret TEXT -- Session secret encrypted to coordinator enclave's key, used for validation
 );
 
 CREATE TABLE keygen_participants (
@@ -33,21 +33,18 @@ CREATE TABLE keygen_participants (
     keygen_session_id BLOB NOT NULL,
     user_id BLOB NOT NULL,
     assigned_enclave_id INTEGER, -- Enclave assigned to participant (nullable until assigned)
-    private_key_encrypted TEXT, -- ENCRYPTED: Private key encrypted to enclave's public key
-    public_key BLOB, -- Public key (safe unencrypted, nullable until provided)
     enclave_key_epoch INTEGER, -- Key epoch when participant was registered
     registered_at INTEGER NOT NULL,
+    require_signing_approval BOOLEAN NOT NULL DEFAULT FALSE,
+    enclave_private_key TEXT, -- ENCRYPTED: Private key encrypted to enclave's public key
+    session_public_key TEXT, -- Public key (encrypted to session secret, nullable until provided)
     FOREIGN KEY (keygen_session_id) REFERENCES keygen_sessions (keygen_session_id) ON DELETE CASCADE,
     UNIQUE(keygen_session_id, user_id)
 );
 
 CREATE TABLE signing_sessions (
     signing_session_id BLOB PRIMARY KEY,
-    keygen_session_id BLOB NOT NULL, -- Reference to the keygen session
-    message_hash BLOB NOT NULL, -- Hash of the message to be signed
-    encrypted_message TEXT, -- Message content encrypted with the session secret (optional)
-    expected_participants TEXT NOT NULL, -- JSON array of participant user IDs (from keygen)
-    status TEXT NOT NULL, -- JSON serialized SigningSessionStatus
+    keygen_session_id BLOB NOT NULL,
     status_name TEXT NOT NULL, -- Simple status name for efficient querying
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
@@ -61,13 +58,16 @@ CREATE TABLE signing_sessions (
     finalizing_signature_at INTEGER, -- When entered FinalizingSignature state
     completed_at INTEGER, -- Timestamp when signing completed
     failed_at INTEGER, -- Timestamp when signing failed
-    error_message TEXT, -- Error message if failed
-    correlation_id BLOB, -- Optional UUID for correlating multiple signing sessions for the same operation (16 bytes)
-    encrypted_signed_message BLOB, -- Final signed message encrypted with session secret
     processing_started_at INTEGER, -- Timestamp when processing started
     last_processing_attempt INTEGER, -- Timestamp of last processing attempt
     retry_count INTEGER DEFAULT 0, -- Number of processing retry attempts
-
+    correlation_id BLOB, -- Optional UUID for correlating multiple signing sessions for the same operation (16 bytes)
+    message_hash BLOB NOT NULL, -- Hash of the message to be signed
+    expected_participants TEXT NOT NULL, -- JSON array of participant user IDs (from keygen)
+    status TEXT NOT NULL, -- JSON serialized SigningSessionStatus
+    error_message TEXT, -- Error message if failed
+    session_message TEXT, -- Message content encrypted with the session secret (optional)
+    session_signed_message BLOB, -- Final signed message encrypted with session secret
     FOREIGN KEY (keygen_session_id) REFERENCES keygen_sessions (keygen_session_id)
 );
 
@@ -76,49 +76,57 @@ CREATE TABLE signing_participants (
     signing_session_id BLOB NOT NULL,
     user_id BLOB NOT NULL,
     assigned_enclave_id INTEGER NOT NULL, -- Inherited from keygen session
-    private_key_encrypted TEXT NOT NULL, -- ENCRYPTED: Private key encrypted to enclave's public key
-    public_key BLOB NOT NULL, -- Public key (from keygen session)
-    public_nonces BLOB, -- Public nonces for MuSig2 (nullable, generated by enclaves)
-    partial_signature BLOB, -- Partial signature for MuSig2 (nullable, generated by enclaves)
     enclave_key_epoch INTEGER NOT NULL, -- Key epoch inherited from keygen session
     registered_at INTEGER NOT NULL,
+    public_nonces BLOB, -- Public nonces for MuSig2 (nullable, generated by enclaves)
+    partial_signature BLOB, -- Partial signature for MuSig2 (nullable, generated by enclaves)
+    enclave_private_key TEXT NOT NULL, -- ENCRYPTED: Private key encrypted to enclave's public key
+    session_public_key TEXT NOT NULL, -- ENCRYPTED: Public key encrypted to session secret (privacy)
+    enclave_public_key TEXT NOT NULL, -- ENCRYPTED: Public key encrypted to enclave's public key (operations)
     FOREIGN KEY (signing_session_id) REFERENCES signing_sessions (signing_session_id) ON DELETE CASCADE,
     UNIQUE(signing_session_id, user_id)
 );
 
--- Indexes for performance
+CREATE TABLE signing_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signing_session_id BLOB NOT NULL,
+    user_id BLOB NOT NULL,
+    approved_at INTEGER NOT NULL,
+    user_hmac_validated BOOLEAN NOT NULL DEFAULT TRUE,
+    session_hmac_validated BOOLEAN NOT NULL DEFAULT TRUE,
+    FOREIGN KEY (signing_session_id) REFERENCES signing_sessions (signing_session_id) ON DELETE CASCADE,
+    UNIQUE(signing_session_id, user_id)
+);
+
+CREATE TABLE enclave_public_keys (
+    enclave_id INTEGER PRIMARY KEY,
+    is_healthy BOOLEAN DEFAULT TRUE, -- Last known health status
+    key_epoch INTEGER DEFAULT 1, -- Enclave key epoch
+    cached_at INTEGER NOT NULL, -- Timestamp when key was cached
+    expires_at INTEGER NOT NULL, -- When cache entry expires
+    key_generation_time INTEGER DEFAULT 0, -- When the key was generated
+    startup_time INTEGER DEFAULT 0, -- When the enclave was started
+    active_sessions INTEGER DEFAULT 0, -- Number of active sessions in this enclave
+    public_key TEXT NOT NULL, -- hex encoded public key
+    attestation_document TEXT DEFAULT '', -- Enclave attestation document
+    UNIQUE(enclave_id)
+);
+
 CREATE INDEX idx_keygen_sessions_status_expires ON keygen_sessions(status_name, expires_at, updated_at);
 CREATE INDEX idx_keygen_participants_session ON keygen_participants(keygen_session_id);
 
 CREATE INDEX idx_signing_sessions_keygen ON signing_sessions(keygen_session_id);
 CREATE INDEX idx_signing_sessions_processing ON signing_sessions(status_name, expires_at, processing_started_at, last_processing_attempt, retry_count, updated_at);
+CREATE INDEX idx_signing_sessions_keygen_count ON signing_sessions(keygen_session_id, status_name);
+CREATE INDEX idx_signing_sessions_correlation_id ON signing_sessions(correlation_id) WHERE correlation_id IS NOT NULL;
+
 CREATE INDEX idx_signing_participants_session ON signing_participants(signing_session_id);
 CREATE INDEX idx_signing_participants_session_user ON signing_participants(signing_session_id, user_id);
 
--- Index for counting signing sessions per keygen session
-CREATE INDEX idx_signing_sessions_keygen_count ON signing_sessions(keygen_session_id, status_name);
+CREATE INDEX idx_signing_approvals_session ON signing_approvals(signing_session_id);
+CREATE INDEX idx_signing_approvals_session_user ON signing_approvals(signing_session_id, user_id);
 
--- Index for correlation ID lookups
-CREATE INDEX idx_signing_sessions_correlation_id ON signing_sessions(correlation_id) WHERE correlation_id IS NOT NULL;
-
-CREATE TABLE enclave_public_keys (
-    enclave_id INTEGER PRIMARY KEY,
-    public_key TEXT NOT NULL, -- hex encoded public key
-    cached_at INTEGER NOT NULL, -- Timestamp when key was cached
-    expires_at INTEGER NOT NULL, -- When cache entry expires
-    is_healthy BOOLEAN DEFAULT TRUE, -- Last known health status
-    attestation_document TEXT DEFAULT '', -- Enclave attestation document
-    key_epoch INTEGER DEFAULT 1, -- Enclave key epoch
-    key_generation_time INTEGER DEFAULT 0, -- When the key was generated
-    startup_time INTEGER DEFAULT 0, -- When the enclave was started
-    active_sessions INTEGER DEFAULT 0, -- Number of active sessions in this enclave
-    UNIQUE(enclave_id)
-);
-
--- Index for cache expiration cleanup
 CREATE INDEX idx_enclave_public_keys_expires_at ON enclave_public_keys(expires_at);
-
--- Index for enclave_id for faster lookups
 CREATE INDEX idx_enclave_public_keys_enclave_id ON enclave_public_keys(enclave_id);
 
 -- Note: With sqlean UUID extension loaded, you can use:

@@ -98,7 +98,8 @@ impl EnclaveOperator {
         match command {
             EnclaveCommand::Ping => Ok(EnclaveResponse::Pong),
             EnclaveCommand::Configure(cmd) => self.handle_configure(cmd).await,
-            EnclaveCommand::InitSession(cmd) => self.handle_init_session(cmd).await,
+            EnclaveCommand::InitKeygenSession(cmd) => self.handle_init_keygen_session(cmd).await,
+            EnclaveCommand::InitSigningSession(cmd) => self.handle_init_keygen_session(cmd).await,
             EnclaveCommand::AddParticipant(cmd) => self.handle_add_participant(cmd).await,
             EnclaveCommand::GenerateNonce(cmd) => self.handle_generate_nonce(cmd).await,
             EnclaveCommand::AddNonce(cmd) => self.handle_add_nonce(cmd).await,

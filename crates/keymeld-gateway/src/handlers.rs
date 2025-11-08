@@ -1,6 +1,7 @@
 use crate::{
     database::Database,
     errors::{ApiError, ApiResult},
+    headers::{SessionHmac, SigningHmac},
     metrics::Metrics,
 };
 use axum::{
@@ -10,6 +11,7 @@ use axum::{
     response::Response,
     Json,
 };
+use axum_extra::TypedHeader;
 use keymeld_core::{
     api::{
         validation::{
@@ -233,7 +235,7 @@ pub async fn create_keygen_session(
 pub async fn register_keygen_participant(
     State(state): State<AppState>,
     Path(keygen_session_id): Path<SessionId>,
-    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(session_hmac): TypedHeader<SessionHmac>,
     Json(request): Json<RegisterKeygenParticipantRequest>,
 ) -> ApiResult<Json<RegisterKeygenParticipantResponse>> {
     debug!(
@@ -241,7 +243,7 @@ pub async fn register_keygen_participant(
         request.user_id, keygen_session_id
     );
 
-    validate_register_keygen_participant_request(&request, &session_hmac)
+    validate_register_keygen_participant_request(&request, session_hmac.value())
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {}", e)))?;
 
     let session_status = state
@@ -273,7 +275,7 @@ pub async fn register_keygen_participant(
             &coordinator_enclave_id,
             &keygen_session_id,
             &request.user_id,
-            &session_hmac,
+            session_hmac.value(),
             &encrypted_session_secret,
         )
         .await
@@ -341,9 +343,9 @@ pub async fn register_keygen_participant(
     path = "/keygen/{keygen_session_id}/status",
     tag = "keygen",
     summary = "Get keygen session status",
-    description = "Retrieves the current status and details of a keygen session. Requires Authorization header with Bearer token containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
+    description = "Retrieves the current status and details of a keygen session. Requires X-Session-HMAC header containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
     security(
-        ("Bearer" = [])
+        ("SessionHmac" = [])
     ),
     params(
         ("keygen_session_id" = SessionId, Path, description = "Keygen session ID")
@@ -351,7 +353,7 @@ pub async fn register_keygen_participant(
     responses(
         (status = 200, description = "Keygen status retrieved successfully", body = KeygenSessionStatusResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed X-Session-HMAC header", body = ErrorResponse),
         (status = 403, description = "Invalid HMAC or user not permitted", body = ErrorResponse),
         (status = 404, description = "Session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -360,7 +362,7 @@ pub async fn register_keygen_participant(
 pub async fn get_keygen_status(
     State(state): State<AppState>,
     Path(keygen_session_id): Path<SessionId>,
-    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(session_hmac): TypedHeader<SessionHmac>,
 ) -> ApiResult<Json<KeygenSessionStatusResponse>> {
     debug!("Getting keygen session status: {}", keygen_session_id);
 
@@ -373,7 +375,7 @@ pub async fn get_keygen_status(
     let _user_id = validate_keygen_session_hmac(
         &state,
         &keygen_session_id,
-        session_hmac,
+        session_hmac.value(),
         &encrypted_session_secret,
     )
     .await?;
@@ -409,15 +411,15 @@ pub async fn get_keygen_status(
     path = "/signing",
     tag = "signing",
     summary = "Create a new signing session",
-    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires Authorization header with Bearer token containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
+    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires X-Session-HMAC header containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
     request_body = CreateSigningSessionRequest,
     security(
-        ("Bearer" = [])
+        ("SessionHmac" = [])
     ),
     responses(
         (status = 200, description = "Signing session created successfully", body = CreateSigningSessionResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed X-Session-HMAC header", body = ErrorResponse),
         (status = 403, description = "Invalid HMAC or user not permitted", body = ErrorResponse),
         (status = 404, description = "Keygen session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -425,7 +427,7 @@ pub async fn get_keygen_status(
 )]
 pub async fn create_signing_session(
     State(state): State<AppState>,
-    TypedHeader(Authorization(session_hmac)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(session_hmac): TypedHeader<SessionHmac>,
     Json(request): Json<CreateSigningSessionRequest>,
 ) -> ApiResult<Json<CreateSigningSessionResponse>> {
     info!("Creating signing session: {}", request.signing_session_id);
@@ -443,7 +445,7 @@ pub async fn create_signing_session(
     let _user_id = validate_keygen_session_hmac(
         &state,
         &request.keygen_session_id,
-        session_hmac,
+        session_hmac.value(),
         &encrypted_session_secret,
     )
     .await?;
@@ -536,14 +538,14 @@ pub async fn create_signing_session(
     path = "/signing/{signing_session_id}",
     tag = "signing",
     summary = "Approve a signing session as a participant",
-    description = "Approve a MuSig2 signing session as a participant. Requires Authorization header with Bearer token containing user_hmac in format 'user_id:nonce:signature' where signature is created with the user's private key.",
+    description = "Approve a MuSig2 signing session as a participant. Requires X-Signing-HMAC header containing user_hmac in format 'user_id:nonce:signature' where signature is created with the user's private key.",
     security(
-        ("Bearer" = [])
+        ("SigningHmac" = [])
     ),
     responses(
         (status = 200, description = "Signing session approved successfully"),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 401, description = "Missing or malformed Authorization header", body = ErrorResponse),
+        (status = 401, description = "Missing or malformed X-Signing-HMAC header", body = ErrorResponse),
         (status = 403, description = "Invalid signature or user not permitted to approve", body = ErrorResponse),
         (status = 404, description = "Signing session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -552,7 +554,7 @@ pub async fn create_signing_session(
 pub async fn approve_signing_session(
     State(state): State<AppState>,
     Path(signing_session_id): Path<SessionId>,
-    TypedHeader(Authorization(user_hmac)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(user_hmac): TypedHeader<SigningHmac>,
 ) -> ApiResult<StatusCode> {
     info!("Approving signing session: {}", signing_session_id);
 
@@ -565,7 +567,7 @@ pub async fn approve_signing_session(
         return Err(ApiError::not_found("Signing session not found"));
     }
 
-    let user_id = extract_user_id_from_hmac(user_hmac)?;
+    let user_id = extract_user_id_from_hmac(user_hmac.value())?;
     let keygen_session_id = state
         .db
         .get_keygen_session_id_from_signing_session(&signing_session_id)
@@ -578,7 +580,7 @@ pub async fn approve_signing_session(
         .await?
         .ok_or_else(|| ApiError::bad_request("User is not a participant in this keygen session"))?;
 
-    validate_user_hmac_against_public_key(&user_id, user_hmac, &user_public_key)?;
+    validate_user_hmac_against_public_key(&user_id, user_hmac.value(), &user_public_key)?;
 
     state
         .db
@@ -683,9 +685,9 @@ async fn validate_keygen_session_hmac(
     path = "/signing/{signing_session_id}/status",
     tag = "signing",
     summary = "Get signing session status",
-    description = "Retrieves the current status and details of a signing session. Requires Authorization header with Bearer token containing user HMAC in format 'user_id:nonce:signature' signed with user's private key.",
+    description = "Retrieves the current status and details of a signing session. Requires X-Signing-HMAC header containing user HMAC in format 'user_id:nonce:signature' signed with user's private key.",
     security(
-        ("Bearer" = [])
+        ("SigningHmac" = [])
     ),
     params(
         ("signing_session_id" = SessionId, Path, description = "Signing session ID")
@@ -702,11 +704,11 @@ async fn validate_keygen_session_hmac(
 pub async fn get_signing_status(
     State(state): State<AppState>,
     Path(signing_session_id): Path<SessionId>,
-    TypedHeader(Authorization(user_hmac)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(user_hmac): TypedHeader<SigningHmac>,
 ) -> ApiResult<Json<SigningSessionStatusResponse>> {
     debug!("Getting signing session status: {}", signing_session_id);
 
-    let user_id = extract_user_id_from_hmac(user_hmac)?;
+    let user_id = extract_user_id_from_hmac(user_hmac.value())?;
 
     let session_status = state
         .db
@@ -728,7 +730,7 @@ pub async fn get_signing_status(
             ApiError::bad_request("User is not a participant in this signing session")
         })?;
 
-    validate_user_hmac_against_public_key(&user_id, user_hmac, &user_public_key)?;
+    validate_user_hmac_against_public_key(&user_id, user_hmac.value(), &user_public_key)?;
 
     let participant_count = state
         .db
