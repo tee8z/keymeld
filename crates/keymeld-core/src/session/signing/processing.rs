@@ -9,20 +9,16 @@ use crate::{
         },
         types::AggregatePublicKey,
     },
-    Advanceable, DatabaseTrait, KeyMeldError,
+    Advanceable, KeyMeldError,
 };
 use tracing::{debug, info};
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningSessionStatus {
-    async fn process<D>(
+    async fn process(
         self,
         enclave_manager: &EnclaveManager,
-        database: &D,
-    ) -> Result<SigningSessionStatus, KeyMeldError>
-    where
-        D: DatabaseTrait + Send + Sync,
-    {
+    ) -> Result<SigningSessionStatus, KeyMeldError> {
         match self {
             SigningSessionStatus::CollectingParticipants(state) => {
                 state.process(enclave_manager).await
@@ -48,14 +44,10 @@ impl Advanceable<SigningSessionStatus> for SigningSessionStatus {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
-    async fn process<D>(
+    async fn process(
         self,
         enclave_manager: &EnclaveManager,
-        database: &D,
-    ) -> Result<SigningSessionStatus, KeyMeldError>
-    where
-        D: DatabaseTrait + Send + Sync,
-    {
+    ) -> Result<SigningSessionStatus, KeyMeldError> {
         info!(
             "Processing SigningCollectingParticipants for session {}",
             self.signing_session_id
@@ -177,14 +169,10 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningSessionFull {
-    async fn process<D>(
+    async fn process(
         self,
         enclave_manager: &EnclaveManager,
-        _database: &D,
-    ) -> Result<SigningSessionStatus, KeyMeldError>
-    where
-        D: DatabaseTrait + Send + Sync,
-    {
+    ) -> Result<SigningSessionStatus, KeyMeldError> {
         info!(
             "Initializing MuSig2 session {} with {} participants",
             self.signing_session_id,
@@ -248,14 +236,10 @@ impl Advanceable<SigningSessionStatus> for SigningSessionFull {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
-    async fn process<D>(
+    async fn process(
         mut self,
         enclave_manager: &EnclaveManager,
-        _database: &D,
-    ) -> Result<SigningSessionStatus, KeyMeldError>
-    where
-        D: DatabaseTrait + Send + Sync,
-    {
+    ) -> Result<SigningSessionStatus, KeyMeldError> {
         info!(
             "Generating nonces for signing session {} with {} participants",
             self.signing_session_id,
@@ -292,14 +276,10 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
 
 #[async_trait::async_trait]
 impl Advanceable<SigningSessionStatus> for SigningCollectingNonces {
-    async fn process<D>(
+    async fn process(
         self,
         _enclave_manager: &EnclaveManager,
-        _database: &D,
-    ) -> Result<SigningSessionStatus, KeyMeldError>
-    where
-        D: DatabaseTrait + Send + Sync,
-    {
+    ) -> Result<SigningSessionStatus, KeyMeldError> {
         info!(
             "Collecting and validating nonces for signing session {}",
             self.signing_session_id

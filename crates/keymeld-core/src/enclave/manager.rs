@@ -42,7 +42,7 @@ pub struct SessionHmacValidationParams {
 pub struct SigningSessionInitParams {
     pub keygen_session_id: SessionId,
     pub signing_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub participants: BTreeMap<UserId, ParticipantData>,
     pub coordinator_encrypted_private_key: Option<String>,
     pub encrypted_session_secret: Option<String>,

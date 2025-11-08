@@ -37,7 +37,7 @@ pub struct SigningCollectingParticipants {
 pub struct SigningSessionFull {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -55,7 +55,7 @@ impl From<SigningCollectingParticipants> for SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.encrypted_message,
+            encrypted_message: collecting.encrypted_message.clone(),
             message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
@@ -78,7 +78,7 @@ impl SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.encrypted_message,
+            encrypted_message: collecting.encrypted_message.clone(),
             message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
@@ -98,7 +98,7 @@ impl SigningSessionFull {
 pub struct SigningGeneratingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -115,7 +115,7 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
         Self {
             signing_session_id: full.signing_session_id,
             keygen_session_id: full.keygen_session_id,
-            message: full.message,
+            encrypted_message: full.encrypted_message,
             message_hash: full.message_hash,
             expected_participants: full.expected_participants,
             registered_participants: full.registered_participants,
@@ -134,7 +134,7 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
 pub struct SigningCollectingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -150,7 +150,7 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
         Self {
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
-            message: generating.message,
+            encrypted_message: generating.encrypted_message,
             message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
@@ -168,7 +168,7 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
 pub struct SigningAggregatingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -184,7 +184,7 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message,
+            encrypted_message: collecting.encrypted_message,
             message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
@@ -202,7 +202,7 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
 pub struct SigningGeneratingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -222,7 +222,7 @@ impl SigningGeneratingPartialSignatures {
         Self {
             signing_session_id: aggregating.signing_session_id,
             keygen_session_id: aggregating.keygen_session_id,
-            message: aggregating.message,
+            encrypted_message: aggregating.encrypted_message,
             message_hash: aggregating.message_hash,
             expected_participants: aggregating.expected_participants,
             registered_participants: aggregating.registered_participants,
@@ -241,7 +241,7 @@ impl SigningGeneratingPartialSignatures {
 pub struct SigningCollectingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -257,7 +257,7 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
         Self {
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
-            message: generating.message,
+            encrypted_message: generating.encrypted_message,
             message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
@@ -275,7 +275,7 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
 pub struct SigningFinalizingSignature {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
     pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -291,7 +291,7 @@ impl From<SigningCollectingPartialSignatures> for SigningFinalizingSignature {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message,
+            encrypted_message: collecting.encrypted_message,
             message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
@@ -369,16 +369,30 @@ pub enum SigningSessionStatus {
 }
 
 impl SigningSessionStatus {
-    pub fn get_message(&self) -> Option<&Vec<u8>> {
+    pub fn get_encrypted_message(&self) -> Option<String> {
         match self {
-            SigningSessionStatus::CollectingParticipants(_) => None, // Only has message_hash, not raw message
-            SigningSessionStatus::SessionFull(ref status) => Some(&status.message),
-            SigningSessionStatus::GeneratingNonces(ref status) => Some(&status.message),
-            SigningSessionStatus::CollectingNonces(ref status) => Some(&status.message),
-            SigningSessionStatus::AggregatingNonces(ref status) => Some(&status.message),
-            SigningSessionStatus::GeneratingPartialSignatures(ref status) => Some(&status.message),
-            SigningSessionStatus::CollectingPartialSignatures(ref status) => Some(&status.message),
-            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.message),
+            SigningSessionStatus::CollectingParticipants(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::SessionFull(ref status) => Some(status.encrypted_message.clone()),
+            SigningSessionStatus::GeneratingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::CollectingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::AggregatingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::GeneratingPartialSignatures(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::CollectingPartialSignatures(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::FinalizingSignature(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
             SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
         }
     }

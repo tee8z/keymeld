@@ -228,6 +228,7 @@ pub struct ErrorResponse {
 }
 
 pub mod validation {
+    use crate::api::{CreateSigningSessionRequest, RegisterKeygenParticipantRequest};
     use crate::{api::CreateKeygenSessionRequest, crypto::SecureCrypto};
     use crate::{EncryptedData, KeyMeldError};
     use serde_json;
@@ -397,19 +398,20 @@ pub mod validation {
     }
 
     pub fn validate_register_keygen_participant_request(
-        request: &crate::api::RegisterKeygenParticipantRequest,
+        request: &RegisterKeygenParticipantRequest,
+        session_hmac: &str,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_non_empty_string(
             &request.encrypted_private_key,
             "Encrypted private key",
         )?;
         Validator::validate_vec_length(&request.public_key, Some(33), Some(65), "Public key")?;
-        Validator::validate_non_empty_string(&request.session_hmac, "Session HMAC")?;
+        Validator::validate_non_empty_string(&session_hmac, "Session HMAC")?;
         Ok(())
     }
 
     pub fn validate_create_signing_session_request(
-        request: &crate::api::CreateSigningSessionRequest,
+        request: &CreateSigningSessionRequest,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_vec_length(&request.message_hash, Some(32), Some(32), "Message hash")?;
         if let Some(encrypted_message) = &request.encrypted_message {

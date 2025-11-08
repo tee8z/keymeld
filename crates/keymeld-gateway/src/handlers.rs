@@ -241,7 +241,7 @@ pub async fn register_keygen_participant(
         request.user_id, keygen_session_id
     );
 
-    validate_register_keygen_participant_request(&request)
+    validate_register_keygen_participant_request(&request, &session_hmac)
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {}", e)))?;
 
     let session_status = state
