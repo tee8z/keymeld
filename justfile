@@ -9,10 +9,13 @@ help:
     @echo ""
     @echo "🚀 Quick Start:"
     @echo "  just quickstart              - Complete setup and run demo"
+    @echo "  just quickstart <amount> true - Quickstart with rebuild"
     @echo "  just demo [amount] [dest]    - Run demo with custom parameters"
     @echo ""
     @echo "🔧 Services:"
     @echo "  just start                   - Start all services"
+    @echo "  just rebuild                 - Rebuild and start all KeyMeld containers"
+    @echo "  just restart                 - Stop and restart all services (no rebuild)"
     @echo "  just stop                    - Stop all services"
     @echo "  just status                  - Check service health"
     @echo "  just logs [service]          - View service logs"
@@ -28,20 +31,27 @@ help:
 # ==================================================================================
 
 # Complete quickstart: build, start services, setup, and run demo
-quickstart amount="50000":
+quickstart amount="50000" rebuild="false":
     #!/usr/bin/env bash
     echo "🚀 KeyMeld Quickstart"
     echo "===================="
-    echo "🗄️ Ensuring database exists..."
-    mkdir -p ./data
-    if [ ! -f "./data/keymeld.db" ]; then
-        cd crates/keymeld-gateway && sqlx database create --database-url sqlite:../../data/keymeld.db
-        cd crates/keymeld-gateway && sqlx migrate run --database-url sqlite:../../data/keymeld.db
-        echo "✅ Database created and migrated"
+
+    if [ "{{rebuild}}" = "true" ]; then
+        echo "🔨 Rebuilding containers..."
+        just rebuild
     else
-        echo "✅ Database already exists"
+        echo "🗄️ Ensuring database exists..."
+        mkdir -p ./data
+        if [ ! -f "./data/keymeld.db" ]; then
+            cd crates/keymeld-gateway && sqlx database create --database-url sqlite:../../data/keymeld.db
+            cd crates/keymeld-gateway && sqlx migrate run --database-url sqlite:../../data/keymeld.db
+            echo "✅ Database created and migrated"
+        else
+            echo "✅ Database already exists"
+        fi
+        just start
     fi
-    just start
+
     just setup-regtest
     just fund-coordinator
     just _demo-no-deps {{amount}}
@@ -80,6 +90,55 @@ start:
     done
 
     echo "✅ All services started and ready!"
+
+# Rebuild all KeyMeld containers (gateway and enclaves) and start services
+rebuild:
+    #!/usr/bin/env bash
+    echo "🔨 Rebuilding all KeyMeld containers..."
+    echo "🗄️ Ensuring database exists..."
+    mkdir -p ./data
+    if [ ! -f "./data/keymeld.db" ]; then
+        cd crates/keymeld-gateway && sqlx database create --database-url sqlite:../../data/keymeld.db
+        cd crates/keymeld-gateway && sqlx migrate run --database-url sqlite:../../data/keymeld.db
+        echo "✅ Database created and migrated"
+    else
+        echo "✅ Database already exists"
+    fi
+
+    echo "🛑 Stopping existing services..."
+    docker compose down
+
+    echo "🔨 Building KeyMeld containers with --no-cache..."
+    KEYMELD_ENV=dev docker compose build --no-cache gateway enclave-0 enclave-1 enclave-2
+
+    echo "🐳 Starting services..."
+    KEYMELD_ENV=dev docker compose up -d
+
+    echo "⏳ Waiting for gateway to be ready..."
+    for i in {1..60}; do
+        if curl -sf http://localhost:8080/api/v1/health >/dev/null 2>&1; then
+            echo "✅ KeyMeld Gateway ready!"
+            break
+        fi
+        if [ $i -eq 60 ]; then
+            echo "❌ Gateway not ready after 60 attempts"
+            echo "Check logs with: just logs gateway"
+            exit 1
+        fi
+        sleep 2
+    done
+
+    echo "✅ All services rebuilt and ready!"
+
+# Stop and restart all services without rebuilding
+restart:
+    #!/usr/bin/env bash
+    echo "🔄 Restarting KeyMeld services..."
+    echo "🛑 Stopping services..."
+    docker compose down
+    echo "🐳 Starting services..."
+    just start
+    echo "✅ All services restarted!"
 
 # Stop all services
 stop:

@@ -1,10 +1,11 @@
 use anyhow::Result;
-use keymeld_core::EnclaveId;
-use std::sync::Once;
-use tracing::{info, subscriber};
+use keymeld_core::{
+    logging::{init_logging, LoggingConfig},
+    EnclaveId,
+};
+use tracing::info;
 
 pub mod attestation;
-
 pub mod operator;
 pub mod server;
 pub mod state;
@@ -13,27 +14,15 @@ pub use operator::EnclaveOperator;
 pub use server::run_vsock_server;
 pub use state::OperationState;
 
-pub fn init_logging() {
-    static INIT: Once = Once::new();
-
-    INIT.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_level(true)
-            .with_ansi(false) // VSock doesn't support ANSI colors
-            .finish();
-
-        if let Err(e) = subscriber::set_global_default(subscriber) {
-            eprintln!("Failed to set global tracing subscriber: {}", e);
-        }
-    });
+pub fn init_enclave_logging() {
+    let config = LoggingConfig::enclave_default();
+    init_logging(&config);
 }
 
 pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator> {
     info!("Creating enclave operator for enclave {}", enclave_id);
     EnclaveOperator::new(enclave_id)
+        .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {}", e))
 }
 
 #[cfg(test)]
@@ -62,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_logging_initialization() {
-        init_logging();
-        init_logging();
+        init_enclave_logging();
+        init_enclave_logging();
     }
 }

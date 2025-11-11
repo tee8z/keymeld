@@ -1,13 +1,10 @@
 use crate::{
-    enclave::{manager::SigningSessionInitParams, EnclaveManager},
-    session::{
-        signing::{
-            SigningAggregatingNonces, SigningCollectingNonces, SigningCollectingPartialSignatures,
-            SigningCollectingParticipants, SigningCompleted, SigningFinalizingSignature,
-            SigningGeneratingNonces, SigningGeneratingPartialSignatures, SigningSessionFull,
-            SigningSessionStatus,
-        },
-        types::AggregatePublicKey,
+    enclave::EnclaveManager,
+    session::signing::{
+        SigningAggregatingNonces, SigningCollectingNonces, SigningCollectingPartialSignatures,
+        SigningCollectingParticipants, SigningCompleted, SigningFinalizingSignature,
+        SigningGeneratingNonces, SigningGeneratingPartialSignatures, SigningSessionFull,
+        SigningSessionStatus,
     },
     Advanceable, KeyMeldError,
 };
@@ -64,26 +61,24 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             return Ok(SigningSessionStatus::CollectingParticipants(self));
         }
 
-        // Check if all required participants have approved before transitioning to SessionFull
         if !self.participants_requiring_approval.is_empty() {
-            let mut all_approved = true;
-            for required_participant in &self.participants_requiring_approval {
-                if !self.approved_participants.contains(required_participant) {
-                    all_approved = false;
-                    break;
-                }
-            }
+            let all_approved = self
+                .participants_requiring_approval
+                .iter()
+                .all(|user_id| self.approved_participants.contains(user_id));
 
             if !all_approved {
-                info!(
-                    "Signing session {} waiting for approvals before transitioning to SessionFull. Required: {:?}, Approved: {:?}",
-                    self.signing_session_id, self.participants_requiring_approval, self.approved_participants
+                debug!(
+                    "Signing session {} waiting for approvals. Required: {:?}, Approved: {:?}",
+                    self.signing_session_id,
+                    self.participants_requiring_approval,
+                    self.approved_participants
                 );
                 return Ok(SigningSessionStatus::CollectingParticipants(self));
             }
 
             info!(
-                "All required participants have approved signing session {}, ready to transition to SessionFull",
+                "All required participants have approved signing session {}",
                 self.signing_session_id
             );
         }
@@ -93,53 +88,6 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             self.signing_session_id
         );
 
-        // Check if any participants require signing approval
-        let participants_requiring_approval = database
-            .get_participants_requiring_approval(&self.keygen_session_id)
-            .await
-            .map_err(|e| {
-                KeyMeldError::ValidationError(format!(
-                    "Failed to get participants requiring approval: {}",
-                    e
-                ))
-            })?;
-
-        // If any participants require approval, check if all have approved
-        if !participants_requiring_approval.is_empty() {
-            let approved_participants = database
-                .get_signing_session_approvals(&self.signing_session_id)
-                .await
-                .map_err(|e| {
-                    KeyMeldError::ValidationError(format!(
-                        "Failed to get signing session approvals: {}",
-                        e
-                    ))
-                })?;
-
-            // Check if all required participants have approved
-            for required_participant in &participants_requiring_approval {
-                if !approved_participants.contains(required_participant) {
-                    debug!(
-                        "Signing session {} waiting for approval from user {}. Required: {:?}, Approved: {:?}",
-                        self.signing_session_id, required_participant, participants_requiring_approval, approved_participants
-                    );
-                    // Stay in CollectingParticipants state until all approvals received
-                    return Ok(SigningSessionStatus::CollectingParticipants(self));
-                }
-            }
-
-            info!(
-                "All required participants have approved signing session {}, proceeding to SessionFull",
-                self.signing_session_id
-            );
-        } else {
-            info!(
-                "No approval requirements for signing session {}, transitioning to SessionFull",
-                self.signing_session_id
-            );
-        }
-
-        // Copy exact session assignment from keygen session (same enclave assignments)
         enclave_manager.copy_session_assignment_for_signing(
             &self.keygen_session_id,
             self.signing_session_id.clone(),
@@ -150,16 +98,49 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             self.signing_session_id, self.keygen_session_id
         );
 
-        // Get the aggregate public key from the keygen session
+        // Initialize signing session on enclaves immediately to prevent race conditions
+        let (coordinator_encrypted_private_key, encrypted_session_secret) =
+            match &self.coordinator_encrypted_private_key {
+                Some(key) => (
+                    key.clone(),
+                    self.encrypted_session_secret.clone().unwrap_or_default(),
+                ),
+                None => return Err(KeyMeldError::EnclaveError(
+                    "Coordinator encrypted private key required for signing session initialization"
+                        .to_string(),
+                )),
+            };
+
+        let init_params = crate::enclave::manager::SigningSessionInitParams {
+            keygen_session_id: self.keygen_session_id.clone(),
+            signing_session_id: self.signing_session_id.clone(),
+            encrypted_message: self.encrypted_message.clone(),
+            participants: self.registered_participants.clone(),
+            coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key),
+            encrypted_session_secret: Some(encrypted_session_secret),
+            taproot_tweak: self.taproot_tweak.clone().unwrap_or_default(),
+        };
+
+        enclave_manager
+            .orchestrate_signing_session_initialization(init_params)
+            .await
+            .map_err(|e| {
+                KeyMeldError::EnclaveError(format!(
+                    "Failed to initialize signing session during transition to SessionFull: {}",
+                    e
+                ))
+            })?;
+
+        info!(
+            "✅ Signing session {} initialized on all enclaves during SessionFull transition",
+            self.signing_session_id
+        );
+
         let aggregate_public_key_bytes = enclave_manager
             .get_aggregate_public_key(&self.keygen_session_id)
             .await?;
 
-        let aggregate_public_key = AggregatePublicKey::new(
-            aggregate_public_key_bytes,
-            self.expected_participants.clone(),
-            vec![],
-        );
+        let aggregate_public_key = aggregate_public_key_bytes;
 
         Ok(SigningSessionStatus::SessionFull(
             SigningSessionFull::from_collecting_with_aggregate_key(self, aggregate_public_key),
@@ -179,38 +160,8 @@ impl Advanceable<SigningSessionStatus> for SigningSessionFull {
             self.registered_participants.len()
         );
 
-        let (Some(coordinator_encrypted_private_key), Some(encrypted_session_secret)) = (
-            self.coordinator_encrypted_private_key.clone(),
-            self.encrypted_session_secret.clone(),
-        ) else {
-            return Err(KeyMeldError::EnclaveError(
-                "Failed to orchestrate signing session missing session information".to_string(),
-            ));
-        };
-
-        // Use the orchestration function to initialize the signing session
-        let init_params = SigningSessionInitParams {
-            keygen_session_id: self.keygen_session_id.clone(),
-            signing_session_id: self.signing_session_id.clone(),
-            encrypted_message: self.encrypted_message.clone(),
-            participants: self.registered_participants.clone(),
-            coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key.clone()),
-            encrypted_session_secret: Some(encrypted_session_secret.clone()),
-            taproot_tweak: self.taproot_tweak.clone().unwrap_or_default(),
-        };
-
-        enclave_manager
-            .orchestrate_signing_session_initialization(init_params)
-            .await
-            .map_err(|e| {
-                KeyMeldError::EnclaveError(format!(
-                    "Failed to orchestrate signing session initialization: {}",
-                    e
-                ))
-            })?;
-
         info!(
-            "Session {} has all participants registered, proceeding to nonce generation",
+            "Session {} has all participants registered and is already initialized, proceeding to nonce generation",
             self.signing_session_id
         );
 

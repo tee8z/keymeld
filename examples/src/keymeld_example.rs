@@ -36,11 +36,9 @@ use keymeld_core::{
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json;
 
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::secp256k1::ecdsa::Signature as EcdsaSignature;
-use bitcoin::secp256k1::{Message, Secp256k1, Signature};
+use bitcoin::secp256k1::Message;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::read_to_string;
@@ -48,22 +46,9 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::fmt::init;
 use uuid::Uuid;
-
-fn generate_session_hmac(session_secret: &str, session_id: &str, user_id: &str) -> Result<String> {
-    let mut rng = rand::rng();
-    let mut nonce_bytes = [0u8; 16];
-    rng.fill_bytes(&mut nonce_bytes);
-    let nonce = hex::encode(nonce_bytes);
-
-    let data = format!("{}:{}:{}", session_id, user_id, nonce);
-    let hmac = validation::generate_registration_hmac(&data, session_secret)
-        .map_err(|e| anyhow!("Failed to generate registration HMAC: {}", e))?;
-
-    Ok(format!("{}:{}", nonce, hmac))
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -143,7 +128,7 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
     test.approve_signing_session(
         &signing_session_id,
         &test.coordinator_user_id.as_str(),
-        &test.coordinator_private_key,
+        &test.coordinator_derived_private_key,
     )
     .await?;
 
@@ -151,7 +136,7 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
     test.approve_signing_session(
         &signing_session_id,
         &test.participant_user_ids[0].as_str(),
-        &test.participant_private_keys[0],
+        &test.participants[0].derived_private_key,
     )
     .await?;
     info!("✅ All required approvals completed - signing can now proceed");
@@ -1039,15 +1024,27 @@ impl KeyMeldE2ETest {
             ));
         }
 
+        // Register coordinator first
+        info!("📝 Registering coordinator...");
         self.register_keygen_coordinator(keygen_session_id, &slots)
             .await?;
 
+        // Register all participants
         for i in 0..self.participants.len() {
+            info!("📝 Registering participant {}...", i);
             self.register_keygen_participant(keygen_session_id, i, &slots)
                 .await?;
         }
 
-        info!("✅ All participants registered for keygen");
+        info!("✅ All {} participants registered for keygen", total_needed);
+
+        // Add a small delay to allow for processing
+        sleep(Duration::from_secs(1)).await;
+
+        // Verify all participants are registered by checking status
+        self.verify_keygen_participants_registered(keygen_session_id)
+            .await?;
+
         Ok(())
     }
 
@@ -1086,20 +1083,21 @@ impl KeyMeldE2ETest {
             user_id: self.coordinator_user_id.clone(),
             encrypted_private_key,
             public_key: self.coordinator_public_key.serialize().to_vec(),
-            session_hmac: {
-                let session_secret = self
-                    .session_secrets
-                    .get(keygen_session_id)
-                    .ok_or_else(|| anyhow!("Session secret not found for keygen session"))?;
-                generate_session_hmac(
-                    session_secret,
-                    keygen_session_id,
-                    &self.coordinator_user_id.as_str(),
-                )?
-            },
+
             // Coordinator also requires approval for demonstration
             require_signing_approval: true,
         };
+
+        // Generate session HMAC for header
+        let session_secret = self
+            .session_secrets
+            .get(keygen_session_id)
+            .ok_or_else(|| anyhow!("Session secret not found for keygen session"))?;
+        let session_hmac = self.generate_session_hmac(
+            keygen_session_id,
+            &self.coordinator_user_id.as_str(),
+            session_secret,
+        )?;
 
         let response = self
             .client
@@ -1107,6 +1105,7 @@ impl KeyMeldE2ETest {
                 "{}/api/v1/keygen/{}/participants",
                 self.config.gateway_url, keygen_session_id
             ))
+            .header("X-Session-HMAC", session_hmac)
             .json(&request)
             .send()
             .await?;
@@ -1159,20 +1158,20 @@ impl KeyMeldE2ETest {
             user_id: self.participant_user_ids[participant_index].clone(),
             encrypted_private_key,
             public_key: participant.public_key.serialize().to_vec(),
-            session_hmac: {
-                let session_secret = self
-                    .session_secrets
-                    .get(keygen_session_id)
-                    .ok_or_else(|| anyhow!("Session secret not found for keygen session"))?;
-                generate_session_hmac(
-                    session_secret,
-                    keygen_session_id,
-                    &self.participant_user_ids[participant_index].as_str(),
-                )?
-            },
             // Make the first participant require approval for demonstration
             require_signing_approval: participant_index == 0,
         };
+
+        // Generate session HMAC for header
+        let session_secret = self
+            .session_secrets
+            .get(keygen_session_id)
+            .ok_or_else(|| anyhow!("Session secret not found for keygen session"))?;
+        let session_hmac = self.generate_session_hmac(
+            keygen_session_id,
+            &self.participant_user_ids[participant_index].as_str(),
+            session_secret,
+        )?;
 
         let response = self
             .client
@@ -1180,6 +1179,7 @@ impl KeyMeldE2ETest {
                 "{}/api/v1/keygen/{}/participants",
                 self.config.gateway_url, keygen_session_id
             ))
+            .header("X-Session-HMAC", session_hmac)
             .json(&request)
             .send()
             .await?;
@@ -1192,14 +1192,82 @@ impl KeyMeldE2ETest {
             ));
         }
 
-        info!("✅ Participant {} registered for keygen", participant_index);
+        let response_text = response.text().await?;
+        info!(
+            "✅ Participant {} registered for keygen: {}",
+            participant_index, response_text
+        );
+        Ok(())
+    }
+
+    async fn verify_keygen_participants_registered(
+        &mut self,
+        keygen_session_id: &str,
+    ) -> Result<()> {
+        info!("🔍 Verifying all participants are properly registered...");
+
+        // Generate session HMAC for status check
+        let session_secret = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
+            anyhow!(
+                "Session secret not found for keygen session {}",
+                keygen_session_id
+            )
+        })?;
+
+        let session_hmac = self.generate_session_hmac(
+            keygen_session_id,
+            &self.coordinator_user_id.as_str(),
+            session_secret,
+        )?;
+
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/keygen/{}/status",
+                self.config.gateway_url, keygen_session_id
+            ))
+            .header("X-Session-HMAC", session_hmac)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Failed to get keygen status for verification: {}",
+                response.text().await?
+            ));
+        }
+
+        let status: KeygenSessionStatusResponse = response.json().await?;
+
+        info!("📊 Keygen session status: {:?}", status.status);
+        info!(
+            "📊 Registered participants: {}",
+            status.registered_participants
+        );
+        info!("📊 Expected participants: {}", status.expected_participants);
+
+        let total_expected = 1 + self.participants.len();
+        if status.registered_participants != total_expected {
+            warn!(
+                "⚠️  Participant count mismatch: expected {}, got {}",
+                total_expected, status.registered_participants
+            );
+        } else {
+            info!("✅ All {} participants properly registered", total_expected);
+        }
+
         Ok(())
     }
 
     async fn wait_for_keygen_completion(&mut self, keygen_session_id: &str) -> Result<String> {
         info!("⏳ Waiting for keygen completion...");
 
+        let mut attempts = 0;
+        let max_attempts = 60; // Wait up to 2 minutes
+
         loop {
+            attempts += 1;
+
             // Generate session HMAC for keygen status check
             let session_secret = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
                 anyhow!(
@@ -1220,7 +1288,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
-                .header("Authorization", format!("Bearer {}", session_hmac))
+                .header("X-Session-HMAC", session_hmac)
                 .send()
                 .await?;
 
@@ -1233,21 +1301,47 @@ impl KeyMeldE2ETest {
 
             let status: KeygenSessionStatusResponse = response.json().await?;
 
+            info!(
+                "⏳ Keygen attempt {}/{} - Status: {:?}, Registered: {}/{}",
+                attempts,
+                max_attempts,
+                status.status,
+                status.registered_participants,
+                status.expected_participants
+            );
+
             match status.status {
                 KeygenStatusKind::Completed => {
                     if let Some(agg_key) = status.aggregate_public_key {
-                        let key_hex = hex::encode(agg_key.key_bytes);
+                        let key_hex = hex::encode(agg_key);
+                        info!(
+                            "🎉 Keygen completed successfully after {} attempts",
+                            attempts
+                        );
                         return Ok(key_hex);
                     } else {
                         return Err(anyhow!("Keygen completed but no aggregate key found"));
                     }
                 }
                 KeygenStatusKind::Failed => {
-                    return Err(anyhow!("Keygen session failed"));
+                    return Err(anyhow!("Keygen session failed after {} attempts", attempts));
                 }
                 KeygenStatusKind::CollectingParticipants => {
-                    info!("Keygen still collecting participants...");
+                    if attempts % 5 == 0 {
+                        info!(
+                            "🔄 Still collecting participants... ({}/{} registered)",
+                            status.registered_participants, status.expected_participants
+                        );
+                    }
                 }
+            }
+
+            if attempts >= max_attempts {
+                return Err(anyhow!(
+                    "Keygen session timed out after {} attempts. Current status: {:?}",
+                    max_attempts,
+                    status.status
+                ));
             }
 
             sleep(Duration::from_secs(2)).await;
@@ -1265,12 +1359,16 @@ impl KeyMeldE2ETest {
 
         let sighash = self.calculate_taproot_sighash(psbt, 0)?;
 
-        let session_secret = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
-            anyhow!(
-                "Session secret not found for keygen session {}",
-                keygen_session_id
-            )
-        })?;
+        let session_secret = self
+            .session_secrets
+            .get(keygen_session_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Session secret not found for keygen session {}",
+                    keygen_session_id
+                )
+            })?
+            .clone();
 
         self.session_secrets
             .insert(signing_session_id.clone(), session_secret.clone());
@@ -1279,21 +1377,21 @@ impl KeyMeldE2ETest {
             signing_session_id: signing_session_id.clone().try_into().unwrap(),
             keygen_session_id: keygen_session_id.try_into().unwrap(),
             message_hash: sighash.to_vec(),
-            encrypted_message: Some("transaction_to_sign".to_string()),
+            encrypted_message: Some(hex::encode(&sighash[..])),
             timeout_secs: 1800,
         };
 
-        // Generate session HMAC for authorization
+        // Generate session HMAC for authorization (use keygen session ID, not signing session ID)
         let session_hmac = self.generate_session_hmac(
             keygen_session_id,
             &self.coordinator_user_id.as_str(),
-            session_secret,
+            &session_secret,
         )?;
 
         let response = self
             .client
             .post(format!("{}/api/v1/signing", self.config.gateway_url))
-            .header("Authorization", format!("Bearer {}", session_hmac))
+            .header("X-Session-HMAC", session_hmac)
             .json(&request)
             .send()
             .await?;
@@ -1320,7 +1418,7 @@ impl KeyMeldE2ETest {
             // Generate user HMAC for signing status check (use coordinator credentials)
             let user_hmac = self.generate_user_hmac(
                 &self.coordinator_user_id.as_str(),
-                &self.coordinator_private_key,
+                &self.coordinator_derived_private_key,
             )?;
 
             let response = self
@@ -1329,7 +1427,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/signing/{}/status",
                     self.config.gateway_url, signing_session_id
                 ))
-                .header("Authorization", format!("Bearer {}", user_hmac))
+                .header("X-Signing-HMAC", user_hmac)
                 .send()
                 .await?;
 
@@ -1425,7 +1523,12 @@ impl KeyMeldE2ETest {
         };
 
         psbt.inputs[0].tap_key_sig = Some(taproot_sig);
-        psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[signature_bytes]));
+
+        // For taproot key-path spending, witness should contain just the signature
+        // Create witness with a single stack item containing the 64-byte signature
+        let mut witness = Witness::new();
+        witness.push(signature_bytes);
+        psbt.inputs[0].final_script_witness = Some(witness);
 
         let signed_tx = psbt
             .extract_tx()
@@ -1497,7 +1600,7 @@ impl KeyMeldE2ETest {
 
         // Generate a random nonce
         let mut nonce_bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
 
         // Create message: session_id:user_id:nonce
@@ -1507,8 +1610,8 @@ impl KeyMeldE2ETest {
         let hmac = validation::generate_registration_hmac(&message, session_secret)
             .map_err(|e| anyhow!("Failed to generate session HMAC: {}", e))?;
 
-        // Return format: user_id:nonce:hmac
-        Ok(format!("{}:{}:{}", user_id, nonce, hmac))
+        // Return format: nonce:hmac
+        Ok(format!("{}:{}", nonce, hmac))
     }
 
     /// Generate user HMAC signature for signing operations (format: user_id:nonce:signature)
@@ -1517,7 +1620,7 @@ impl KeyMeldE2ETest {
 
         // Generate a random nonce
         let mut nonce_bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
 
         // Create message to sign: user_id:nonce
@@ -1561,7 +1664,7 @@ impl KeyMeldE2ETest {
                 "{}/api/v1/signing/{}",
                 self.config.gateway_url, signing_session_id
             ))
-            .header("Authorization", format!("Bearer {}", user_hmac))
+            .header("X-Signing-HMAC", user_hmac)
             .send()
             .await?;
 

@@ -67,4 +67,4 @@ RUN chmod +x /usr/local/bin/example-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/example-entrypoint.sh"]
 
-CMD ["--config", "/app/config/config.yaml", "--amount", "50000", "--destination", "bcrt1qw2c3lxufxqe2x9s4rdzh65tpf4d7fssjgh8nv6"]
+CMD ["--config", "/app/config/config.yaml", "--amount", "50000", "--destination", "bcrt1qh3qhjhd7s0p2vu257k3zjtgjxuy5jy0c4pn6wz"]

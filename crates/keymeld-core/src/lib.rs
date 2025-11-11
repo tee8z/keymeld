@@ -4,15 +4,21 @@ use thiserror::Error;
 pub use tracing::{debug, error, info, warn};
 
 pub use musig2::{
-    AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext, PartialSignature,
-    PubNonce, SecNonce, SecondRound,
+    secp256k1::PublicKey, AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext,
+    PartialSignature, PubNonce, SecNonce, SecondRound,
 };
+
+// Type alias for cleaner API - aggregate public key as raw bytes for serialization
+pub type AggregatePublicKey = Vec<u8>;
 
 pub mod api;
 pub mod crypto;
 pub mod enclave;
+pub mod encrypted_data;
 pub mod identifiers;
+pub mod logging;
 pub mod musig;
+pub mod resilience;
 pub mod session;
 
 use musig::MusigError;
@@ -41,6 +47,28 @@ pub enum KeyMeldError {
     SessionTooLarge(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    // Specific crypto errors
+    #[error("Random number generation failed")]
+    RandomGenerationError(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Time operation failed")]
+    TimeError(#[source] std::time::SystemTimeError),
+    #[error("HKDF key derivation failed: {0}")]
+    HkdfError(String),
+    #[error("AES-GCM encryption failed: {0}")]
+    EncryptionError(String),
+    #[error("AES-GCM decryption failed: {0}")]
+    DecryptionError(String),
+    #[error("Hex decoding failed")]
+    HexDecodeError(#[source] hex::FromHexError),
+    #[error("Invalid cryptographic key")]
+    InvalidKey(#[source] secp256k1::Error),
+    #[error("HMAC operation failed: {0}")]
+    HmacError(String),
+    #[error("Attestation verification failed: {0}")]
+    AttestationError(String),
+
+    // Generic fallback for other crypto errors
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
     #[error("Invalid state: {0}")]
@@ -55,8 +83,10 @@ impl From<MusigError> for KeyMeldError {
     }
 }
 #[async_trait::async_trait]
-pub trait Advanceable<T> {
-    async fn process(self, enclave_manager: &EnclaveManager) -> Result<T, KeyMeldError>;
+pub trait Advanceable<T>: Send {
+    async fn process(self, enclave_manager: &EnclaveManager) -> Result<T, KeyMeldError>
+    where
+        Self: 'async_trait;
 }
 
 #[derive(Debug, Serialize, Deserialize)]

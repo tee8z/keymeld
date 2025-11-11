@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use keymeld_core::resilience::{RetryConfig, TimeoutConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -33,8 +34,8 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub enclaves: EnclaveConfig,
-    pub coordinator: Option<CoordinatorConfig>,
-    pub logging: Option<LoggingConfig>,
+    pub coordinator: CoordinatorConfig,
+    pub logging: LoggingConfig,
     pub security: SecurityConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub development: Option<DevelopmentConfig>,
@@ -63,7 +64,70 @@ pub struct DatabaseConfig {
 pub struct EnclaveConfig {
     pub enclaves: Vec<EnclaveInfo>,
     pub max_users_per_enclave: Option<u32>,
+    pub max_connections_per_enclave: Option<u32>,
     pub enclave_timeout_secs: Option<u64>,
+    // Timeout configurations
+    pub vsock_timeout_secs: Option<u64>,
+    pub nonce_generation_timeout_secs: Option<u64>,
+    pub session_init_timeout_secs: Option<u64>,
+    pub signing_timeout_secs: Option<u64>,
+    pub network_write_timeout_secs: Option<u64>,
+    pub network_read_timeout_secs: Option<u64>,
+    pub max_message_size_bytes: Option<usize>,
+    // Retry configurations
+    pub max_retry_attempts: Option<u32>,
+    pub initial_retry_delay_ms: Option<u64>,
+    pub max_retry_delay_ms: Option<u64>,
+    pub retry_backoff_multiplier: Option<f64>,
+    pub connection_retry_delay_ms: Option<u64>,
+}
+
+impl From<&EnclaveConfig> for TimeoutConfig {
+    fn from(config: &EnclaveConfig) -> Self {
+        let defaults = TimeoutConfig::default();
+        TimeoutConfig {
+            vsock_timeout_secs: config
+                .vsock_timeout_secs
+                .unwrap_or(defaults.vsock_timeout_secs),
+            nonce_generation_timeout_secs: config
+                .nonce_generation_timeout_secs
+                .unwrap_or(defaults.nonce_generation_timeout_secs),
+            session_init_timeout_secs: config
+                .session_init_timeout_secs
+                .unwrap_or(defaults.session_init_timeout_secs),
+            signing_timeout_secs: config
+                .signing_timeout_secs
+                .unwrap_or(defaults.signing_timeout_secs),
+            network_write_timeout_secs: config
+                .network_write_timeout_secs
+                .unwrap_or(defaults.network_write_timeout_secs),
+            network_read_timeout_secs: config
+                .network_read_timeout_secs
+                .unwrap_or(defaults.network_read_timeout_secs),
+            connection_retry_delay_ms: config
+                .connection_retry_delay_ms
+                .unwrap_or(defaults.connection_retry_delay_ms),
+            max_message_size_bytes: config
+                .max_message_size_bytes
+                .unwrap_or(defaults.max_message_size_bytes),
+        }
+    }
+}
+
+impl From<&EnclaveConfig> for RetryConfig {
+    fn from(config: &EnclaveConfig) -> Self {
+        let defaults = RetryConfig::default();
+        RetryConfig {
+            max_attempts: config.max_retry_attempts.unwrap_or(defaults.max_attempts),
+            initial_delay_ms: config
+                .initial_retry_delay_ms
+                .unwrap_or(defaults.initial_delay_ms),
+            max_delay_ms: config.max_retry_delay_ms.unwrap_or(defaults.max_delay_ms),
+            backoff_multiplier: config
+                .retry_backoff_multiplier
+                .unwrap_or(defaults.backoff_multiplier),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,14 +163,7 @@ impl Default for CoordinatorConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub format: Option<String>,
-    pub enable_json: Option<bool>,
-    pub enable_file_output: Option<bool>,
-    pub file_path: Option<String>,
-}
+pub use keymeld_core::logging::LoggingConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
@@ -269,12 +326,7 @@ impl Config {
         }
 
         if let Ok(log_level) = std::env::var("RUST_LOG") {
-            if self.logging.is_none() {
-                self.logging = Some(LoggingConfig::default());
-            }
-            if let Some(logging) = self.logging.as_mut() {
-                logging.level = log_level;
-            }
+            self.logging.level = log_level;
         }
     }
 
@@ -427,8 +479,8 @@ impl Default for Config {
             server: ServerConfig::default(),
             database: DatabaseConfig::default(),
             enclaves: EnclaveConfig::default(),
-            coordinator: Some(CoordinatorConfig::default()),
-            logging: Some(LoggingConfig::default()),
+            coordinator: CoordinatorConfig::default(),
+            logging: LoggingConfig::gateway_default(),
             security: SecurityConfig::default(),
             development: Some(DevelopmentConfig::default()),
         }
@@ -467,34 +519,34 @@ impl Default for EnclaveConfig {
                 EnclaveInfo {
                     id: 0,
                     cid: 3,
-                    port: 5000,
+                    port: 8000,
                 },
                 EnclaveInfo {
                     id: 1,
                     cid: 4,
-                    port: 5001,
+                    port: 8000,
                 },
                 EnclaveInfo {
                     id: 2,
                     cid: 5,
-                    port: 5002,
+                    port: 8000,
                 },
             ],
             max_users_per_enclave: Some(100),
+            max_connections_per_enclave: Some(50),
             enclave_timeout_secs: Some(30),
-            // AWS region removed
-        }
-    }
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            format: Some("pretty".to_string()),
-            enable_json: Some(false),
-            enable_file_output: Some(false),
-            file_path: None,
+            vsock_timeout_secs: Some(30),
+            nonce_generation_timeout_secs: Some(10),
+            session_init_timeout_secs: Some(15),
+            signing_timeout_secs: Some(20),
+            network_write_timeout_secs: Some(5),
+            network_read_timeout_secs: Some(300),
+            max_message_size_bytes: Some(1024 * 1024),
+            max_retry_attempts: Some(3),
+            initial_retry_delay_ms: Some(100),
+            max_retry_delay_ms: Some(5000),
+            retry_backoff_multiplier: Some(2.0),
+            connection_retry_delay_ms: Some(100),
         }
     }
 }

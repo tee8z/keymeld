@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::Response,
     Json,
 };
@@ -15,7 +15,8 @@ use axum_extra::TypedHeader;
 use keymeld_core::{
     api::{
         validation::{
-            validate_create_keygen_session_request, validate_register_keygen_participant_request,
+            validate_create_keygen_session_request, validate_create_signing_session_request,
+            validate_register_keygen_participant_request, validate_user_hmac,
         },
         ApiFeatures, ApiVersionResponse, AvailableUserSlot, CreateKeygenSessionRequest,
         CreateKeygenSessionResponse, CreateSigningSessionRequest, CreateSigningSessionResponse,
@@ -24,8 +25,11 @@ use keymeld_core::{
         ListEnclavesResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
         SigningSessionStatusResponse,
     },
-    enclave::{AttestationResponse, EnclaveManager},
+    crypto::SecureCrypto,
+    enclave::{AttestationResponse, EnclaveManager, InitKeygenSessionCommand},
+    encrypted_data::{KeygenParticipantEnclaveData, KeygenParticipantSessionData},
     identifiers::{SessionId, UserId},
+    resilience::GatewayLimits,
     session::{KeygenSessionStatus, KeygenStatusKind, SigningStatusKind},
 };
 use prometheus::Encoder;
@@ -42,6 +46,7 @@ pub struct AppState {
     pub db: Database,
     pub enclave_manager: Arc<EnclaveManager>,
     pub metrics: Arc<Metrics>,
+    pub gateway_limits: GatewayLimits,
 }
 
 #[utoipa::path(
@@ -56,11 +61,13 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Response<Body>, Ap
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.metrics.export_metrics()?;
     let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    Ok(Response::builder()
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .map_err(|e| ApiError::Internal(format!("Failed to encode metrics: {}", e)))?;
+    Response::builder()
         .header("Content-Type", encoder.format_type())
         .body(Body::from(buffer))
-        .unwrap())
+        .map_err(|e| ApiError::Internal(format!("Failed to build response: {}", e)))
 }
 
 #[utoipa::path(
@@ -130,7 +137,7 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
         let uptime_seconds = if health_info.startup_time > 0 {
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .map_err(|e| ApiError::Internal(format!("System time error: {}", e)))?
                 .as_secs();
             if current_time > health_info.startup_time {
                 current_time.saturating_sub(health_info.startup_time)
@@ -157,7 +164,9 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
 
     let response = ListEnclavesResponse {
         enclaves,
-        total_enclaves,
+        total_enclaves: total_enclaves
+            .try_into()
+            .map_err(|e| ApiError::Internal(format!("Invalid enclave count: {}", e)))?,
         healthy_enclaves: healthy_count,
     };
 
@@ -196,10 +205,62 @@ pub async fn create_keygen_session(
     }
 
     let session_secret = state.db.create_keygen_session(&request).await?;
+    let session_assignment = state
+        .enclave_manager
+        .create_session_assignment_with_coordinator(
+            request.keygen_session_id.clone(),
+            &request.expected_participants,
+            request.coordinator_enclave_id,
+        )
+        .map_err(|e| {
+            ApiError::enclave_communication(format!("Failed to create session assignment: {}", e))
+        })?;
+
+    let assigned_enclaves = session_assignment.get_all_assigned_enclaves();
+    for enclave_id in &assigned_enclaves {
+        let is_coordinator = *enclave_id == request.coordinator_enclave_id;
+
+        let init_cmd = InitKeygenSessionCommand {
+            keygen_session_id: request.keygen_session_id.clone(),
+            coordinator_encrypted_private_key: if is_coordinator {
+                Some(request.coordinator_encrypted_private_key.clone())
+            } else {
+                None
+            },
+            encrypted_session_secret: if is_coordinator {
+                Some(request.encrypted_session_secret.clone())
+            } else {
+                None
+            },
+            timeout_secs: request.timeout_secs,
+            taproot_tweak: request.taproot_tweak_config.clone(),
+            expected_participant_count: request.expected_participants.len(),
+            enclave_public_keys: vec![],
+        };
+
+        state
+            .enclave_manager
+            .send_command_to_enclave(
+                enclave_id,
+                keymeld_core::enclave::EnclaveCommand::InitKeygenSession(init_cmd),
+            )
+            .await
+            .map_err(|e| {
+                ApiError::enclave_communication(format!(
+                    "Failed to initialize keygen session on enclave {}: {}",
+                    enclave_id, e
+                ))
+            })?;
+
+        info!(
+            "✅ Keygen session {} initialized on enclave {} (coordinator: {})",
+            request.keygen_session_id, enclave_id, is_coordinator
+        );
+    }
 
     let current_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .map_err(|e| ApiError::Internal(format!("System time error: {}", e)))?
         .as_secs();
 
     let response = CreateKeygenSessionResponse {
@@ -208,7 +269,7 @@ pub async fn create_keygen_session(
         status: KeygenStatusKind::CollectingParticipants,
         expected_participants: request.expected_participants.len(),
         expires_at: current_time + request.timeout_secs,
-        enclave_epochs: std::collections::HashMap::new(),
+        enclave_epochs: HashMap::new(),
         session_secret,
     };
 
@@ -312,13 +373,39 @@ pub async fn register_keygen_participant(
             ))
         })?;
 
+    let enclave_public_key = state
+        .enclave_manager
+        .get_enclave_public_key(&assigned_enclave)
+        .await
+        .map_err(|e| {
+            ApiError::enclave_communication(format!("Failed to get enclave public key: {}", e))
+        })?;
+
+    let session_data = KeygenParticipantSessionData::new(request.public_key.clone());
+    let session_encrypted_json = serde_json::to_string(&session_data)
+        .map_err(|e| ApiError::Serialization(format!("Failed to serialize session data: {}", e)))?;
+
+    let enclave_data = KeygenParticipantEnclaveData::new(request.encrypted_private_key.clone());
+    let enclave_json = serde_json::to_string(&enclave_data)
+        .map_err(|e| ApiError::Serialization(format!("Failed to serialize enclave data: {}", e)))?;
+
+    let encrypted_enclave_data =
+        SecureCrypto::ecies_encrypt_from_hex(&enclave_public_key, enclave_json.as_bytes())
+            .map_err(|e| {
+                ApiError::Serialization(format!("Failed to encrypt enclave data: {}", e))
+            })?;
+
+    let enclave_encrypted_hex = hex::encode(encrypted_enclave_data);
+
     state
         .db
-        .register_keygen_participant(
+        .register_keygen_participant_with_encrypted_data(
             &keygen_session_id,
             &request,
             assigned_enclave,
             enclave_key_epoch,
+            session_encrypted_json,
+            enclave_encrypted_hex,
         )
         .await?;
 
@@ -343,7 +430,7 @@ pub async fn register_keygen_participant(
     path = "/keygen/{keygen_session_id}/status",
     tag = "keygen",
     summary = "Get keygen session status",
-    description = "Retrieves the current status and details of a keygen session. Requires X-Session-HMAC header containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
+    description = "Retrieves the current status and details of a keygen session. Requires X-Session-HMAC header containing session HMAC in format 'nonce:hmac' using session secret.",
     security(
         ("SessionHmac" = [])
     ),
@@ -372,13 +459,45 @@ pub async fn get_keygen_status(
         .await?
         .ok_or_else(|| ApiError::not_found("Session secret not found"))?;
 
-    let _user_id = validate_keygen_session_hmac(
-        &state,
-        &keygen_session_id,
-        session_hmac.value(),
-        &encrypted_session_secret,
-    )
-    .await?;
+    debug!(
+        "Keygen status check - HMAC value: '{}'",
+        session_hmac.value()
+    );
+    let participants = state.db.get_keygen_participants(&keygen_session_id).await?;
+    debug!("Found {} participants for validation", participants.len());
+
+    let mut validation_successful = false;
+    for participant in &participants {
+        debug!("Trying validation for participant: {}", participant.user_id);
+        match validate_keygen_session_hmac(
+            &state,
+            &keygen_session_id,
+            &participant.user_id,
+            session_hmac.value(),
+            &encrypted_session_secret,
+        )
+        .await
+        {
+            Ok(()) => {
+                debug!(
+                    "Validation successful for participant: {}",
+                    participant.user_id
+                );
+                validation_successful = true;
+                break;
+            }
+            Err(e) => {
+                debug!(
+                    "Validation failed for participant {}: {}",
+                    participant.user_id, e
+                );
+            }
+        }
+    }
+
+    if !validation_successful {
+        return Err(ApiError::bad_request("Session HMAC validation failed"));
+    }
 
     let session_status = state
         .db
@@ -411,7 +530,7 @@ pub async fn get_keygen_status(
     path = "/signing",
     tag = "signing",
     summary = "Create a new signing session",
-    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires X-Session-HMAC header containing session HMAC in format 'user_id:nonce:hmac' using session secret.",
+    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires X-Session-HMAC header containing session HMAC in format 'nonce:hmac' using session secret.",
     request_body = CreateSigningSessionRequest,
     security(
         ("SessionHmac" = [])
@@ -435,20 +554,37 @@ pub async fn create_signing_session(
     validate_create_signing_session_request(&request)
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {}", e)))?;
 
-    // Validate session HMAC against the keygen session
     let encrypted_session_secret = state
         .db
         .get_keygen_encrypted_session_secret(&request.keygen_session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Keygen session secret not found"))?;
 
-    let _user_id = validate_keygen_session_hmac(
-        &state,
-        &request.keygen_session_id,
-        session_hmac.value(),
-        &encrypted_session_secret,
-    )
-    .await?;
+    let participants = state
+        .db
+        .get_keygen_participants(&request.keygen_session_id)
+        .await?;
+
+    let mut validation_successful = false;
+    for participant in &participants {
+        if validate_keygen_session_hmac(
+            &state,
+            &request.keygen_session_id,
+            &participant.user_id,
+            session_hmac.value(),
+            &encrypted_session_secret,
+        )
+        .await
+        .is_ok()
+        {
+            validation_successful = true;
+            break;
+        }
+    }
+
+    if !validation_successful {
+        return Err(ApiError::bad_request("Session HMAC validation failed"));
+    }
 
     if state
         .db
@@ -459,22 +595,18 @@ pub async fn create_signing_session(
         return Err(ApiError::bad_request("Signing session already exists"));
     }
 
-    // Get the keygen session first to check its status and quota limits
     let keygen_session_record = state
         .db
         .get_keygen_session_by_id(&request.keygen_session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Keygen session not found"))?;
 
-    // Get the max_signing_sessions from the keygen session record
     let max_signing_sessions = state
         .db
         .get_keygen_session_max_signing_sessions(&request.keygen_session_id)
         .await?
-        //TODO(@tee8z): make Listing all enclaves"
-        .unwrap_or(100); // Default to 100 if not specified
+        .unwrap_or(state.gateway_limits.default_max_signing_sessions as i64);
 
-    // Check quota: count existing signing sessions for this keygen session
     let existing_signing_sessions_count = state
         .db
         .count_signing_sessions_for_keygen(&request.keygen_session_id)
@@ -487,7 +619,6 @@ pub async fn create_signing_session(
             request.keygen_session_id, existing_signing_sessions_count, max_signing_sessions
         );
 
-        // Record quota violation metric
         state
             .metrics
             .record_quota_violation(&request.keygen_session_id);
@@ -516,7 +647,6 @@ pub async fn create_signing_session(
         .expect("Time went backwards")
         .as_secs();
 
-    // Get participant count from the associated keygen session
     let participants_count = state
         .db
         .get_keygen_participant_count(&request.keygen_session_id)
@@ -596,7 +726,6 @@ pub async fn approve_signing_session(
 }
 
 fn extract_user_id_from_hmac(user_hmac: &str) -> Result<UserId, ApiError> {
-    // Parse user_hmac format: user_id:nonce:signature
     let parts: Vec<&str> = user_hmac.split(':').collect();
     if parts.len() != 3 {
         return Err(ApiError::bad_request(
@@ -613,9 +742,6 @@ fn validate_user_hmac_against_public_key(
     user_hmac: &str,
     user_public_key: &[u8],
 ) -> Result<(), ApiError> {
-    use keymeld_core::api::validation::validate_user_hmac;
-
-    // Validate that the HMAC format is correct and extract user_id for verification
     let parts: Vec<&str> = user_hmac.split(':').collect();
     if parts.len() != 3 {
         return Err(ApiError::bad_request(
@@ -631,7 +757,7 @@ fn validate_user_hmac_against_public_key(
     }
 
     validate_user_hmac(&expected_user_id.as_str(), user_hmac, user_public_key)
-        .map_err(|e| ApiError::bad_request(&format!("User HMAC validation failed: {}", e)))?;
+        .map_err(|e| ApiError::bad_request(format!("User HMAC validation failed: {}", e)))?;
 
     info!("User HMAC validated for user: {}", expected_user_id);
     Ok(())
@@ -640,44 +766,31 @@ fn validate_user_hmac_against_public_key(
 async fn validate_keygen_session_hmac(
     state: &AppState,
     keygen_session_id: &SessionId,
+    user_id: &UserId,
     session_hmac: &str,
     encrypted_session_secret: &str,
-) -> Result<UserId, ApiError> {
-    // Parse session_hmac format: user_id:nonce:hmac
-    let parts: Vec<&str> = session_hmac.split(':').collect();
-    if parts.len() != 3 {
-        return Err(ApiError::bad_request(
-            "Invalid session HMAC format, expected 'user_id:nonce:hmac'",
-        ));
-    }
-
-    let user_id_str = parts[0];
-    let user_id = UserId::parse(user_id_str)
-        .map_err(|_| ApiError::bad_request("Invalid user ID in session HMAC"))?;
-
-    // Get the participant's assigned enclave ID from the keygen session
+) -> Result<(), ApiError> {
     let participants = state.db.get_keygen_participants(keygen_session_id).await?;
 
     let participant_enclave = participants
         .iter()
-        .find(|p| p.user_id == user_id)
+        .find(|p| p.user_id == *user_id)
         .ok_or_else(|| ApiError::bad_request("User is not a participant in this keygen session"))?
         .enclave_id;
 
-    // Route validation to the appropriate enclave
     state
         .enclave_manager
         .validate_keygen_participant_hmac(
             &participant_enclave,
             keygen_session_id,
-            &user_id,
+            user_id,
             session_hmac,
             encrypted_session_secret,
         )
         .await
-        .map_err(|e| ApiError::bad_request(&format!("Session HMAC validation failed: {}", e)))?;
+        .map_err(|e| ApiError::bad_request(format!("Session HMAC validation failed: {}", e)))?;
 
-    Ok(user_id)
+    Ok(())
 }
 
 #[utoipa::path(
@@ -685,7 +798,7 @@ async fn validate_keygen_session_hmac(
     path = "/signing/{signing_session_id}/status",
     tag = "signing",
     summary = "Get signing session status",
-    description = "Retrieves the current status and details of a signing session. Requires X-Signing-HMAC header containing user HMAC in format 'user_id:nonce:signature' signed with user's private key.",
+    description = "Retrieves the current status and details of a signing session, including approval information when in collecting_participants status. Requires X-Signing-HMAC header containing user HMAC in format 'user_id:nonce:signature' signed with user's private key.",
     security(
         ("SigningHmac" = [])
     ),
@@ -743,8 +856,14 @@ pub async fn get_signing_status(
         .await?
         .ok_or_else(|| ApiError::not_found("Signing session not found"))?;
 
-    let (status, expected_participants, final_signature, expires_at) =
-        session_status.extract_status_info();
+    let (
+        status,
+        expected_participants,
+        final_signature,
+        expires_at,
+        participants_requiring_approval,
+        approved_participants,
+    ) = session_status.extract_status_info();
 
     let response = SigningSessionStatusResponse {
         signing_session_id,
@@ -754,6 +873,8 @@ pub async fn get_signing_status(
         expected_participants,
         final_signature,
         expires_at,
+        participants_requiring_approval,
+        approved_participants,
     };
 
     Ok(Json(response))
@@ -907,7 +1028,10 @@ pub async fn get_available_slots(
     }
 
     let response = GetAvailableSlotsResponse {
-        session_id: keygen_session_id.to_string().try_into().unwrap(),
+        session_id: keygen_session_id
+            .to_string()
+            .try_into()
+            .map_err(|e| ApiError::Internal(format!("Invalid session ID format: {}", e)))?,
         available_slots,
         total_slots: expected_participants,
         claimed_slots: current_count,

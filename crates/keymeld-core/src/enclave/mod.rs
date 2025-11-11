@@ -45,7 +45,7 @@ mod tests {
             },
         ];
 
-        let manager = EnclaveManager::new(configs);
+        let manager = EnclaveManager::new(configs).unwrap();
         assert_eq!(manager.list_enclaves().len(), 2);
         assert!(!manager.is_configured());
     }

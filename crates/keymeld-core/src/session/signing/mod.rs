@@ -2,8 +2,8 @@ use crate::{
     api::TaprootTweak,
     enclave::EnclaveManager,
     identifiers::{EnclaveId, SessionId, UserId},
-    session::types::{AggregatePublicKey, ParticipantData},
-    KeyMeldError,
+    session::types::ParticipantData,
+    AggregatePublicKey, KeyMeldError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 pub mod processing;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingParticipants {
     pub signing_session_id: SessionId,
@@ -32,7 +32,7 @@ pub struct SigningCollectingParticipants {
     pub approved_participants: Vec<UserId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningSessionFull {
     pub signing_session_id: SessionId,
@@ -93,7 +93,7 @@ impl SigningSessionFull {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningGeneratingNonces {
     pub signing_session_id: SessionId,
@@ -129,7 +129,7 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingNonces {
     pub signing_session_id: SessionId,
@@ -163,7 +163,7 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningAggregatingNonces {
     pub signing_session_id: SessionId,
@@ -197,7 +197,7 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningGeneratingPartialSignatures {
     pub signing_session_id: SessionId,
@@ -236,7 +236,7 @@ impl SigningGeneratingPartialSignatures {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingPartialSignatures {
     pub signing_session_id: SessionId,
@@ -270,7 +270,7 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningFinalizingSignature {
     pub signing_session_id: SessionId,
@@ -304,7 +304,7 @@ impl From<SigningCollectingPartialSignatures> for SigningFinalizingSignature {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCompleted {
     pub signing_session_id: SessionId,
@@ -339,7 +339,7 @@ impl SigningCompleted {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningFailed {
     pub signing_session_id: SessionId,
@@ -353,7 +353,7 @@ pub struct SigningFailed {
     pub inherited_enclave_epochs: BTreeMap<EnclaveId, u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "detail", rename_all = "snake_case")]
 pub enum SigningSessionStatus {
     CollectingParticipants(SigningCollectingParticipants),
@@ -415,63 +415,97 @@ impl SigningSessionStatus {
         }
     }
 
-    pub fn extract_status_info(&self) -> (SigningStatusKind, usize, Option<String>, u64) {
+    pub fn extract_status_info(
+        &self,
+    ) -> (
+        SigningStatusKind,
+        usize,
+        Option<String>,
+        u64,
+        Vec<UserId>,
+        Vec<UserId>,
+    ) {
         match self {
             SigningSessionStatus::CollectingParticipants(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                status.participants_requiring_approval.clone(),
+                status.approved_participants.clone(),
             ),
             SigningSessionStatus::SessionFull(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(), // No pending approvals in SessionFull
+                Vec::new(), // Approval data not tracked beyond CollectingParticipants
             ),
             SigningSessionStatus::GeneratingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::CollectingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::AggregatingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::GeneratingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::CollectingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::FinalizingSignature(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::Completed(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 Some(status.final_signature.clone()),
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
-            SigningSessionStatus::Failed(_) => (SigningStatusKind::from(self), 0, None, 0),
+            SigningSessionStatus::Failed(_) => (
+                SigningStatusKind::from(self),
+                0,
+                None,
+                0,
+                Vec::new(),
+                Vec::new(),
+            ),
         }
     }
 

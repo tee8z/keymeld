@@ -1,10 +1,12 @@
 use crate::{
     api::TaprootTweak,
     identifiers::{EnclaveId, SessionId, UserId},
+    KeyMeldError,
 };
 use musig2::{PartialSignature, PubNonce};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -24,6 +26,8 @@ pub enum EnclaveCommand {
     AddPartialSignature(AddPartialSignatureCommand),
     Finalize(FinalizeCommand),
     ClearSession(ClearSessionCommand),
+    DistributeSessionSecret(DistributeSessionSecretCommand),
+    BatchDistributeSessionSecrets(BatchDistributeSessionSecretsCommand),
     GetPublicInfo,
 }
 
@@ -39,6 +43,10 @@ pub enum EnclaveResponse {
     AggregateNonce(AggregateNonceResponse),
     PublicInfo(PublicInfoResponse),
     Attestation(AttestationResponse),
+    BatchSessionSecrets(BatchSessionSecretsResponse),
+    EnclavePublicKeys(EnclavePublicKeysResponse),
+    KeygenInitialized(KeygenInitializedResponse),
+    SessionSecret(SessionSecretResponse),
     Error(ErrorResponse),
 }
 
@@ -56,6 +64,7 @@ pub struct InitKeygenSessionCommand {
     pub timeout_secs: u64,
     pub taproot_tweak: TaprootTweak,
     pub expected_participant_count: usize,
+    pub enclave_public_keys: Vec<EnclavePublicKeyInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,8 +84,8 @@ pub struct AddParticipantCommand {
     pub keygen_session_id: Option<SessionId>,
     pub signing_session_id: Option<SessionId>,
     pub user_id: UserId,
-    pub public_key: Vec<u8>,
-    pub encrypted_private_key: Option<String>,
+    pub session_encrypted_data: String,
+    pub enclave_encrypted_data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +93,6 @@ pub struct GenerateNonceCommand {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
-    pub encrypted_private_key: Option<String>,
     pub signer_index: usize,
 }
 
@@ -103,7 +111,6 @@ pub struct ParitialSignatureCommand {
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
     pub aggregate_nonce: PubNonce,
-    pub encrypted_private_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,8 +171,31 @@ pub struct ClearSessionCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributeSessionSecretCommand {
+    pub keygen_session_id: SessionId,
+    pub encrypted_session_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchDistributeSessionSecretsCommand {
+    pub keygen_session_id: SessionId,
+    pub target_enclaves: Vec<EnclaveId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetEnclavePublicKeysCommand {
+    pub enclave_ids: Vec<EnclaveId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuccessResponse {
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeygenInitializedResponse {
+    pub keygen_session_id: SessionId,
+    pub encrypted_session_secrets: Vec<EncryptedSessionSecret>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +260,8 @@ pub struct AttestationResponse {
     pub timestamp: u64,
     pub certificate: Vec<u8>,
     pub signature: Vec<u8>,
-    pub user_data: Vec<u8>,
+    pub user_data: Option<Vec<u8>>,
+    pub public_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,48 +279,122 @@ pub struct PublicKeyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedSessionSecret {
+    pub target_enclave_id: EnclaveId,
+    pub encrypted_session_secret: String, // Session secret encrypted with target enclave's public key
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSessionSecretsResponse {
+    pub keygen_session_id: SessionId,
+    pub encrypted_secrets: Vec<EncryptedSessionSecret>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSecretResponse {
+    pub keygen_session_id: SessionId,
+    pub session_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclavePublicKeyInfo {
+    pub enclave_id: EnclaveId,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclavePublicKeysResponse {
+    pub enclave_keys: Vec<EnclavePublicKeyInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: EnclaveError,
-    pub message: String,
 }
 
 impl std::fmt::Display for ErrorResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.error, self.message)
+        write!(f, "{}", self.error)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnclaveError {
+    #[error("Enclave not configured")]
     NotConfigured,
+    #[error("Enclave already configured")]
     AlreadyConfigured,
-    InvalidPrivateKey,
-    SessionNotFound,
-    WrongPhase,
+    #[error("Invalid private key: {0}")]
+    InvalidPrivateKey(String),
+    #[error("Session not found: {0}")]
+    SessionNotFound(String),
+    #[error("Wrong phase: {0}")]
+    WrongPhase(String),
+    #[error("MuSig error: {0}")]
     MuSigError(String),
-    HmacInvalid,
+    #[error("HMAC invalid: {0}")]
+    HmacInvalid(String),
+    #[error("Memory exhausted")]
     MemoryExhausted,
+    #[error("Session limit exceeded")]
     SessionLimitExceeded,
+    #[error("Timeout")]
     Timeout,
+    #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Cryptographic error: {0}")]
+    CryptographicError(String),
+    #[error("Data decoding error: {0}")]
+    DataDecodingError(String),
+    #[error("Decryption failed: {0}")]
+    DecryptionFailed(String),
+    #[error("Session initialization failed: {0}")]
+    SessionInitializationFailed(String),
+    #[error("Participant error: {0}")]
+    ParticipantError(String),
+    #[error("Invalid session ID: {0}")]
+    InvalidSessionId(String),
+    #[error("Invalid session secret: {0}")]
+    InvalidSessionSecret(String),
+    #[error("Invalid public key: {0}")]
+    InvalidPublicKey(String),
+    #[error("Signature error: {0}")]
+    SignatureError(String),
+    #[error("Nonce error: {0}")]
+    NonceError(String),
+    #[error("Nonce generation failed: {0}")]
+    NonceGenerationFailed(String),
+    #[error("Aggregate key error: {0}")]
+    AggregateKeyError(String),
+    #[error("Signing failed: {0}")]
+    SigningFailed(String),
+    #[error("Finalization failed: {0}")]
+    FinalizationFailed(String),
+    #[error("Validation failed: {0}")]
+    ValidationFailed(String),
+    #[error("Operation failed: {0}")]
+    OperationFailed(String),
+    #[error("KeyMeld error: {0}")]
+    KeyMeldError(String),
+    #[error("Invalid attestation: {0}")]
+    InvalidAttestation(String),
 }
 
-impl std::fmt::Display for EnclaveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnclaveError::NotConfigured => write!(f, "Enclave not configured"),
-            EnclaveError::AlreadyConfigured => write!(f, "Enclave already configured"),
-            EnclaveError::InvalidPrivateKey => write!(f, "Invalid private key"),
-            EnclaveError::SessionNotFound => write!(f, "Session not found"),
-            EnclaveError::WrongPhase => write!(f, "Wrong phase"),
-            EnclaveError::MuSigError(msg) => write!(f, "MuSig error: {}", msg),
-            EnclaveError::HmacInvalid => write!(f, "HMAC invalid"),
-            EnclaveError::MemoryExhausted => write!(f, "Memory exhausted"),
-            EnclaveError::SessionLimitExceeded => write!(f, "Session limit exceeded"),
-            EnclaveError::Timeout => write!(f, "Timeout"),
-            EnclaveError::Internal(msg) => write!(f, "Internal error: {}", msg),
-        }
+// Implement From conversions to preserve error details
+impl From<hex::FromHexError> for EnclaveError {
+    fn from(err: hex::FromHexError) -> Self {
+        EnclaveError::DataDecodingError(err.to_string())
     }
 }
 
-impl std::error::Error for EnclaveError {}
+impl From<musig2::secp256k1::Error> for EnclaveError {
+    fn from(err: musig2::secp256k1::Error) -> Self {
+        EnclaveError::InvalidPublicKey(err.to_string())
+    }
+}
+
+impl From<KeyMeldError> for EnclaveError {
+    fn from(err: KeyMeldError) -> Self {
+        EnclaveError::KeyMeldError(err.to_string())
+    }
+}

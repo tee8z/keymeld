@@ -1,88 +1,168 @@
-use crate::{
-    attestation::AttestationManager,
-    state::{OperationCompleted, OperationInitData, OperationInitialized, OperationState},
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use anyhow::{anyhow, Result};
+
+use anyhow::Result;
+use dashmap::DashMap;
 use hmac::{Hmac, Mac};
-use keymeld_core::enclave::protocol::PublicInfoResponse;
 use keymeld_core::{
     crypto::{SecureCrypto, SessionSecret},
     enclave::{
-        AddNonceCommand, AddPartialSignatureCommand, AddParticipantCommand, AggregateNonceResponse,
-        AggregatePublicKeyResponse, AttestationResponse, ConfigureCommand, EnclaveCommand,
-        EnclaveError, EnclaveResponse, ErrorResponse, FinalSignatureResponse, FinalizeCommand,
-        GenerateNonceCommand, GetAggregateNonceCommand, GetAggregatePublicKeyCommand,
-        InitSessionCommand, NonceResponse, SignatureResponse, SuccessResponse,
-        ValidateKeygenParticipantHmacCommand, ValidateSessionHmacCommand,
+        protocol::{
+            BatchDistributeSessionSecretsCommand, DistributeSessionSecretCommand,
+            EnclavePublicKeyInfo, EncryptedSessionSecret, KeygenInitializedResponse,
+        },
+        AddParticipantCommand, AttestationResponse, ConfigureCommand, EnclaveCommand, EnclaveError,
+        EnclaveResponse, ErrorResponse, InitKeygenSessionCommand, InitSigningSessionCommand,
+        PublicInfoResponse, SuccessResponse, ValidateKeygenParticipantHmacCommand,
+        ValidateSessionHmacCommand,
     },
-    identifiers::UserId,
-    musig::{MusigError, MusigProcessor},
-    session::AggregatePublicKey,
-    EnclaveId, KeyMaterial, PartialSignature, PubNonce, SessionId,
+    encrypted_data::{
+        KeygenParticipantEnclaveData, SigningParticipantEnclaveData, SigningParticipantSessionData,
+    },
+    identifiers::{EnclaveId, SessionId, UserId},
+    musig::MusigProcessor,
+    KeyMaterial,
 };
-use musig2::secp256k1::{schnorr::Signature, PublicKey, SecretKey};
-use sha2::Sha256;
-use std::collections::BTreeMap;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Zeroize, ZeroizeOnDrop)]
-struct SecurePrivateKey {
-    key: Vec<u8>,
+use musig2::secp256k1::SecretKey;
+
+use sha2::{Digest, Sha256};
+use tracing::{debug, error, info, trace, warn};
+use zeroize::Zeroize;
+
+use crate::{
+    attestation::AttestationManager,
+    state::{OperationInitData, OperationInitialized, OperationState},
+};
+
+#[derive(Debug, Clone)]
+pub struct SecurePrivateKey {
+    pub session_id: SessionId,
+    pub user_id: UserId,
+    pub encrypted_key: Vec<u8>,
+    pub created_at: u64,
+    pub key: Vec<u8>,
+}
+
+pub struct SessionState {
+    pub session_id: SessionId,
+    pub operation_state: OperationState,
+    pub musig_processor: MusigProcessor,
+    pub private_keys: BTreeMap<UserId, SecurePrivateKey>,
 }
 
 pub struct EnclaveOperator {
     pub enclave_id: EnclaveId,
-    pub operations: RwLock<BTreeMap<SessionId, OperationState>>,
-    /// MuSig2 processor for cryptographic operations
-    pub musig_processor: RwLock<MusigProcessor>,
+    pub sessions: DashMap<SessionId, Arc<Mutex<SessionState>>>,
     /// Attestation manager for generating attestations
     pub attestation_manager: Option<AttestationManager>,
     /// Enclave public key
     pub public_key: Vec<u8>,
     /// Enclave private key (zeroized on drop)
     pub private_key: Vec<u8>,
-    /// Securely stored private keys for participants
-    private_keys: RwLock<BTreeMap<(SessionId, UserId), SecurePrivateKey>>,
+    /// Stored public keys of other enclaves for session secret distribution
+    pub enclave_public_keys: DashMap<EnclaveId, String>,
     /// Enclave startup time
     startup_time: u64,
     /// Key generation time
     key_generation_time: u64,
     /// Key epoch (incremented on key rotation)
-    key_epoch: u64,
+    key_epoch: u32,
 }
 
-type HmacSha256 = Hmac<Sha256>;
-impl EnclaveOperator {
-    pub fn new(enclave_id: EnclaveId) -> Result<Self> {
-        let musig_processor = MusigProcessor::new();
-        let keypair = SecureCrypto::generate_enclave_keypair()?;
+type HmacSha256 = Hmac<sha2::Sha256>;
 
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+impl From<crate::attestation::AttestationDocument> for AttestationResponse {
+    fn from(doc: crate::attestation::AttestationDocument) -> Self {
+        Self {
+            pcrs: doc.pcrs,
+            timestamp: doc.timestamp,
+            certificate: doc.certificate,
+            signature: doc.signature,
+            user_data: doc.user_data,
+            public_key: doc.public_key,
+        }
+    }
+}
+
+impl EnclaveOperator {
+    /// Helper function to hash a message using SHA256
+    fn hash_message(message: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(message);
+        hasher.finalize().to_vec()
+    }
+
+    /// Helper function to extract session secret bytes from a session
+    fn get_session_secret_bytes(&self, session_id: &SessionId) -> Result<Vec<u8>, EnclaveError> {
+        let session_state_ref = self.sessions.get(session_id).ok_or_else(|| {
+            error!("Session {} not found", session_id);
+            EnclaveError::SessionNotFound(session_id.to_string())
+        })?;
+
+        let session_state = session_state_ref
+            .lock()
+            .map_err(|_| EnclaveError::Internal("Session lock poisoned".to_string()))?;
+
+        let session_secret = session_state
+            .operation_state
+            .get_session_secret()
+            .ok_or_else(|| {
+                error!("Session secret not available for session {}", session_id);
+                EnclaveError::InvalidSessionSecret(format!(
+                    "Session secret not available for session {}",
+                    session_id
+                ))
+            })?;
+
+        Ok(session_secret.as_bytes().to_vec())
+    }
+
+    /// Helper function to encrypt session secret for a target enclave
+    fn encrypt_session_secret_for_enclave(
+        &self,
+        target_public_key: &str,
+        session_secret_bytes: &[u8],
+    ) -> Result<String, EnclaveError> {
+        let encrypted_bytes = SecureCrypto::ecies_encrypt_from_hex(
+            target_public_key,
+            session_secret_bytes,
+        )
+        .map_err(|e| {
+            EnclaveError::CryptographicError(format!("Failed to encrypt session secret: {}", e))
+        })?;
+
+        Ok(hex::encode(encrypted_bytes))
+    }
+    pub fn new(enclave_id: EnclaveId) -> Result<Self, EnclaveError> {
+        let keypair = SecureCrypto::generate_enclave_keypair().map_err(|e| {
+            EnclaveError::CryptographicError(format!("Failed to generate keypair: {}", e))
+        })?;
+        let startup_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| {
+                error!("Failed to get system time: {}", e);
+                EnclaveError::Internal("System time error during startup".to_string())
+            })?
             .as_secs();
 
-        Ok(Self {
+        Ok(EnclaveOperator {
             enclave_id,
-            operations: RwLock::new(BTreeMap::new()),
-            musig_processor: RwLock::new(musig_processor),
+            sessions: DashMap::new(),
             attestation_manager: None,
             public_key: keypair.1.serialize().to_vec(),
             private_key: keypair.0.secret_bytes().to_vec(),
-            private_keys: RwLock::new(BTreeMap::new()),
-            startup_time: current_time,
-            key_generation_time: current_time,
+            enclave_public_keys: DashMap::new(),
+            startup_time,
+            key_generation_time: startup_time,
             key_epoch: 1,
         })
     }
 
     pub fn initialize_attestation(&mut self, attestation_manager: AttestationManager) {
-        info!(
-            "Initializing attestation manager for enclave {}",
-            self.enclave_id
-        );
         self.attestation_manager = Some(attestation_manager);
     }
 
@@ -90,27 +170,36 @@ impl EnclaveOperator {
         self.attestation_manager.as_ref()
     }
 
-    pub fn get_public_key(&self) -> Vec<u8> {
-        self.public_key.clone()
+    pub fn get_public_key(&self) -> &[u8] {
+        &self.public_key
     }
 
-    pub async fn handle_command(&self, command: EnclaveCommand) -> Result<EnclaveResponse> {
+    pub async fn handle_command(
+        &self,
+        command: EnclaveCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
         match command {
             EnclaveCommand::Ping => Ok(EnclaveResponse::Pong),
             EnclaveCommand::Configure(cmd) => self.handle_configure(cmd).await,
             EnclaveCommand::InitKeygenSession(cmd) => self.handle_init_keygen_session(cmd).await,
-            EnclaveCommand::InitSigningSession(cmd) => self.handle_init_keygen_session(cmd).await,
+            EnclaveCommand::InitSigningSession(cmd) => self.handle_init_signing_session(cmd).await,
             EnclaveCommand::AddParticipant(cmd) => self.handle_add_participant(cmd).await,
+            EnclaveCommand::DistributeSessionSecret(cmd) => {
+                self.handle_distribute_session_secret(cmd).await
+            }
+            EnclaveCommand::BatchDistributeSessionSecrets(cmd) => {
+                self.handle_batch_distribute_session_secrets(cmd).await
+            }
             EnclaveCommand::GenerateNonce(cmd) => self.handle_generate_nonce(cmd).await,
             EnclaveCommand::AddNonce(cmd) => self.handle_add_nonce(cmd).await,
-            EnclaveCommand::GetAggregatePublicKey(cmd) => {
-                self.handle_get_aggregate_public_key(cmd).await
-            }
             EnclaveCommand::SignPartialSignature(cmd) => {
                 self.handle_sign_partial_signature(cmd).await
             }
             EnclaveCommand::AddPartialSignature(cmd) => {
                 self.handle_add_partial_signature(cmd).await
+            }
+            EnclaveCommand::GetAggregatePublicKey(cmd) => {
+                self.handle_get_aggregate_public_key(cmd).await
             }
             EnclaveCommand::Finalize(cmd) => self.handle_finalize(cmd).await,
             EnclaveCommand::GetAggregateNonce(cmd) => self.handle_get_aggregate_nonce(cmd).await,
@@ -125,36 +214,31 @@ impl EnclaveOperator {
                     .keygen_session_id
                     .or(cmd.signing_session_id)
                     .ok_or_else(|| {
-                        anyhow!("Either keygen_session_id or signing_session_id must be provided")
+                        EnclaveError::InvalidSessionId(
+                            "Either keygen_session_id or signing_session_id must be provided"
+                                .to_string(),
+                        )
                     })?;
 
-                self.clear_session(session_id)
-                    .await
-                    .map_err(|_| anyhow!("Clear session failed"))?;
+                self.clear_session(session_id).await?;
                 Ok(EnclaveResponse::Success(SuccessResponse {
                     message: "Session cleared".to_string(),
                 }))
             }
             EnclaveCommand::GetPublicInfo => {
+                let active_sessions_count = self.sessions.iter().count() as u32;
                 let attestation_document =
                     if let Some(attestation_manager) = &self.attestation_manager {
                         match attestation_manager
-                            .get_identity_attestation_with_data(Some(&self.get_public_key()))
+                            .get_identity_attestation_with_data(Some(self.get_public_key()))
                         {
-                            Ok(Some(attestation_doc)) => Some(AttestationResponse {
-                                pcrs: attestation_doc.pcrs,
-                                timestamp: attestation_doc.timestamp,
-                                certificate: attestation_doc.certificate,
-                                signature: attestation_doc.signature,
-                                user_data: self.get_public_key(),
-                            }),
-                            Ok(None) => {
-                                warn!("Attestation generation is disabled");
-                                None
-                            }
+                            Ok(Some(attestation_doc)) => Some(attestation_doc.into()),
+                            Ok(None) => None,
                             Err(e) => {
-                                warn!("Failed to generate attestation: {}", e);
-                                None
+                                return Err(EnclaveError::InvalidAttestation(format!(
+                                    "Failed to generate attestation: {}",
+                                    e
+                                )));
                             }
                         }
                     } else {
@@ -164,88 +248,81 @@ impl EnclaveOperator {
                 Ok(EnclaveResponse::PublicInfo(PublicInfoResponse {
                     public_key: hex::encode(&self.public_key),
                     attestation_document,
-                    active_sessions: self.get_active_sessions_count().await,
+                    active_sessions: active_sessions_count,
                     uptime_seconds: self.get_uptime_seconds(),
-                    key_epoch: self.get_key_epoch(),
-                    key_generation_time: self.get_key_generation_time(),
+                    key_epoch: self.key_epoch as u64,
+                    key_generation_time: self.key_generation_time,
                 }))
             }
         }
     }
 
-    async fn handle_configure(&self, cmd: ConfigureCommand) -> Result<EnclaveResponse> {
-        info!("Configuring enclave {}", cmd.enclave_id);
+    async fn handle_configure(
+        &self,
+        _cmd: ConfigureCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
         Ok(EnclaveResponse::Success(SuccessResponse {
-            message: format!("Enclave {} configured", cmd.enclave_id),
+            message: "Enclave configured".to_string(),
         }))
     }
 
-    async fn handle_init_session(&self, cmd: InitSessionCommand) -> Result<EnclaveResponse> {
-        // Determine session type and ID based on which fields are present
-        let (session_id, session_type) = match (&cmd.keygen_session_id, &cmd.signing_session_id) {
-            (Some(keygen_id), None) => (keygen_id.clone(), "keygen"),
-            (Some(_keygen_id), Some(signing_id)) => (signing_id.clone(), "signing"),
-            (None, Some(signing_id)) => (signing_id.clone(), "signing"),
-            (None, None) => {
-                return Err(anyhow!(
-                    "Either keygen_session_id or signing_session_id must be provided"
-                ))
-            }
-        };
-
-        info!("Initializing {} session: {}", session_type, session_id);
+    async fn handle_init_keygen_session(
+        &self,
+        cmd: InitKeygenSessionCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_id = cmd.keygen_session_id.clone();
 
         // Decrypt the session secret if provided (only for coordinator enclave)
         let session_secret = if let Some(encrypted_secret) = &cmd.encrypted_session_secret {
-            // Decrypt the session secret using ECIES with our private key
-            let private_key_array: [u8; 32] = self.private_key[..32]
-                .try_into()
-                .map_err(|_| anyhow!("Private key must be exactly 32 bytes"))?;
-            let secret_key = SecretKey::from_byte_array(private_key_array)
-                .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+            let private_key_array: [u8; 32] = self.private_key[..32].try_into().map_err(|_| {
+                EnclaveError::CryptographicError("Private key must be exactly 32 bytes".to_string())
+            })?;
+            let secret_key = SecretKey::from_byte_array(private_key_array).map_err(|e| {
+                EnclaveError::CryptographicError(format!("Invalid private key: {}", e))
+            })?;
 
-            let decoded_bytes =
-                hex::decode(encrypted_secret).map_err(|e| anyhow!("Hex decode failed: {}", e))?;
+            let decoded_bytes = hex::decode(encrypted_secret).map_err(|e| {
+                EnclaveError::DataDecodingError(format!("Hex decode failed: {}", e))
+            })?;
+            let decrypted_secret_bytes = SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes)
+                .map_err(|e| {
+                EnclaveError::DecryptionFailed(format!("Failed to decrypt session secret: {}", e))
+            })?;
 
-            let decrypted_secret_bytes =
-                SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes)
-                    .map_err(|e| anyhow!("Failed to decrypt session secret: {}", e))?;
-
-            // The decrypted data should be a hex-encoded string representing 32 bytes
-            // Convert to string and then hex-decode to get the actual secret bytes
             let session_secret_str = String::from_utf8_lossy(&decrypted_secret_bytes);
-            let secret_bytes = hex::decode(session_secret_str.as_ref())
-                .map_err(|e| anyhow!("Failed to decode hex session secret: {}", e))?;
+            let secret_bytes = hex::decode(session_secret_str.as_ref()).map_err(|e| {
+                EnclaveError::DataDecodingError(format!("Hex decode failed: {}", e))
+            })?;
 
             if secret_bytes.len() != 32 {
-                return Err(anyhow!(
-                    "Invalid session secret length: expected 32 bytes, got {}",
+                return Err(EnclaveError::InvalidSessionSecret(format!(
+                    "Invalid length: expected 32 bytes, got {}",
                     secret_bytes.len()
-                ));
+                )));
             }
             let mut secret_array = [0u8; 32];
             secret_array.copy_from_slice(&secret_bytes);
             Some(SessionSecret::from_bytes(secret_array))
         } else {
-            // No session secret provided - this is expected for non-coordinator enclaves
             None
         };
 
-        // Initialize session without participant pubkeys - they will be added during nonce collection
-        let mut processor = self.musig_processor.write().await;
-        processor
+        // Create a new MuSig processor for this session
+        let mut musig_processor = MusigProcessor::new();
+        musig_processor
             .init_session(
                 &session_id,
-                cmd.message.clone(),
+                vec![], // Keygen sessions don't have a message
                 cmd.taproot_tweak,
                 Vec::new(),
                 Some(cmd.expected_participant_count),
             )
-            .map_err(|e| anyhow!("Failed to initialize MuSig2: {}", e))?;
-
-        let message_hash = SessionSecret::hash_message(
-            &String::from_utf8(cmd.message.clone()).unwrap_or_default(),
-        );
+            .map_err(|e| {
+                EnclaveError::SessionInitializationFailed(format!(
+                    "Failed to initialize MuSig2: {}",
+                    e
+                ))
+            })?;
 
         // Decrypt coordinator private key if provided
         let coordinator_private_key =
@@ -257,10 +334,185 @@ impl EnclaveOperator {
                     Ok(key) => Some(key),
                     Err(e) => {
                         warn!(
-                            "Failed to decrypt coordinator private key during init: {}",
+                        "Failed to decrypt coordinator private key during init for session {}: {}",
+                        session_id, e
+                    );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Store enclave public keys if this is the coordinator
+        if cmd.coordinator_encrypted_private_key.is_some() {
+            for enclave_key in &cmd.enclave_public_keys {
+                self.enclave_public_keys
+                    .insert(enclave_key.enclave_id, enclave_key.public_key.clone());
+            }
+        }
+
+        let init_data = OperationInitData {
+            session_id: session_id.clone(),
+            session_secret,
+            message: vec![],
+            message_hash: vec![],
+            participant_keys: vec![],
+            aggregate_public_key: vec![],
+            is_coordinator: cmd.coordinator_encrypted_private_key.is_some(),
+            coordinator_private_key,
+            session_encrypted_data: None,
+            enclave_encrypted_data: None,
+        };
+
+        // Clone session secret before moving init_data
+        let session_secret_for_distribution = init_data.session_secret.clone();
+        let is_coordinator = cmd.coordinator_encrypted_private_key.is_some();
+
+        let operation: OperationInitialized = init_data.into();
+
+        // Create the session state with its own MuSig processor
+        let session_state = SessionState {
+            session_id: session_id.clone(),
+            operation_state: OperationState::from(operation),
+            musig_processor,
+            private_keys: BTreeMap::new(),
+        };
+
+        // Use concurrent map for lock-free insertion
+        self.sessions.insert(
+            session_id.clone(),
+            Arc::new(std::sync::Mutex::new(session_state)),
+        );
+
+        // If this is the coordinator and has session secret, encrypt it for other enclaves
+        if is_coordinator {
+            if let Some(session_secret) = session_secret_for_distribution.as_ref() {
+                match self
+                    .encrypt_session_secret_for_other_enclaves(
+                        session_secret,
+                        &cmd.enclave_public_keys,
+                    )
+                    .await
+                {
+                    Ok(encrypted_secrets) => {
+                        return Ok(EnclaveResponse::KeygenInitialized(
+                            KeygenInitializedResponse {
+                                keygen_session_id: session_id,
+                                encrypted_session_secrets: encrypted_secrets,
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to encrypt session secrets for other enclaves: {}",
                             e
                         );
-                        None // Continue without coordinator key for now
+                        // Continue with normal response if encryption fails
+                    }
+                }
+            }
+        }
+
+        Ok(EnclaveResponse::Success(SuccessResponse {
+            message: "Session initialized".to_string(),
+        }))
+    }
+
+    async fn handle_init_signing_session(
+        &self,
+        cmd: InitSigningSessionCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_id = cmd.signing_session_id.clone();
+
+        // Clear any existing session state first (important for retries)
+        if let Err(e) = self.clear_session(session_id.clone()).await {
+            warn!("Failed to clear existing session state: {}", e);
+        }
+
+        // Validate message hash length
+        if cmd.encrypted_message.is_empty() {
+            return Err(EnclaveError::ValidationFailed(
+                "Message cannot be empty".to_string(),
+            ));
+        }
+
+        // Get participants and session secret from the completed keygen session
+        let (keygen_participants, session_secret) = {
+            let keygen_session_arc =
+                self.sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
+                    EnclaveError::SessionNotFound(format!(
+                        "Keygen session {} not found for signing session {}",
+                        cmd.keygen_session_id, session_id
+                    ))
+                })?;
+
+            let keygen_session = keygen_session_arc.lock().map_err(|e| {
+                error!("Failed to acquire keygen session lock: {}", e);
+                EnclaveError::Internal("Keygen session lock poisoned".to_string())
+            })?;
+            let session_metadata = keygen_session
+                .musig_processor
+                .get_session_metadata_public(&cmd.keygen_session_id)
+                .ok_or_else(|| {
+                    EnclaveError::SessionInitializationFailed(format!(
+                        "No metadata found for keygen session {}",
+                        cmd.keygen_session_id
+                    ))
+                })?;
+
+            let participants = session_metadata.get_all_participants();
+
+            // Inherit session secret from keygen session
+            let inherited_session_secret = keygen_session
+                .operation_state
+                .get_session_secret()
+                .ok_or_else(|| {
+                    EnclaveError::InvalidSessionSecret(format!(
+                        "No session secret available in keygen session {}",
+                        cmd.keygen_session_id
+                    ))
+                })?
+                .clone();
+
+            (participants, inherited_session_secret)
+        };
+
+        let mut musig_processor = MusigProcessor::new();
+        let message = hex::decode(&cmd.encrypted_message)
+            .map_err(|e| EnclaveError::DataDecodingError(format!("Hex decode failed: {}", e)))?;
+
+        let message_hash = Self::hash_message(&message);
+
+        musig_processor
+            .init_session(
+                &session_id,
+                message.clone(),
+                cmd.taproot_tweak,
+                keygen_participants, // Use participants from completed keygen session
+                Some(cmd.expected_participant_count),
+            )
+            .map_err(|e| {
+                EnclaveError::SessionInitializationFailed(format!(
+                    "Failed to initialize MuSig2: {}",
+                    e
+                ))
+            })?;
+
+        // Decrypt coordinator private key if provided
+        let coordinator_private_key =
+            if let Some(encrypted_key) = &cmd.coordinator_encrypted_private_key {
+                match self
+                    .decrypt_private_key_from_coordinator(encrypted_key)
+                    .await
+                {
+                    Ok(key) => Some(key),
+                    Err(e) => {
+                        warn!(
+                        "Failed to decrypt coordinator private key during init for session {}: {}",
+                        session_id, e
+                    );
+                        None
                     }
                 }
             } else {
@@ -269,492 +521,435 @@ impl EnclaveOperator {
 
         let init_data = OperationInitData {
             session_id: session_id.clone(),
-            session_secret,
-            message: cmd.message,
-            message_hash,
+            session_secret: Some(session_secret),
+            message,      // The actual sighash to sign
+            message_hash, // Hash of the sighash for validation
             participant_keys: vec![],
             aggregate_public_key: vec![],
             is_coordinator: cmd.coordinator_encrypted_private_key.is_some(),
             coordinator_private_key,
+            session_encrypted_data: None,
+            enclave_encrypted_data: None,
         };
-        let operation = OperationInitialized::new(init_data);
 
-        let mut operations = self.operations.write().await;
-        operations.insert(session_id.clone(), OperationState::from(operation));
+        let operation: OperationInitialized = init_data.into();
 
-        info!("Session {} initialized with session secret", session_id);
+        // Create the session state
+        let session_state = SessionState {
+            session_id: session_id.clone(),
+            operation_state: OperationState::from(operation),
+            musig_processor,
+            private_keys: BTreeMap::new(),
+        };
+
+        // Use concurrent map for lock-free insertion
+        self.sessions.insert(
+            session_id.clone(),
+            Arc::new(std::sync::Mutex::new(session_state)),
+        );
         Ok(EnclaveResponse::Success(SuccessResponse {
-            message: "Session initialized".to_string(),
+            message: "Signing session initialized".to_string(),
         }))
     }
 
-    async fn handle_add_participant(&self, cmd: AddParticipantCommand) -> Result<EnclaveResponse> {
-        let session_id = cmd
-            .signing_session_id
-            .or(cmd.keygen_session_id)
-            .ok_or_else(|| {
-                anyhow!("Either keygen_session_id or signing_session_id must be provided")
+    async fn handle_add_participant(
+        &self,
+        cmd: AddParticipantCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_id = cmd.signing_session_id.or(cmd.keygen_session_id).ok_or(
+            EnclaveError::InvalidSessionId(
+                "Either keygen_session_id or signing_session_id must be provided".to_string(),
+            ),
+        )?;
+
+        // Get session state from concurrent map
+        let session_arc = self.sessions.get(&session_id).ok_or_else(|| {
+            error!("Session {} not found", session_id);
+            EnclaveError::SessionNotFound(session_id.to_string())
+        })?;
+
+        // First, validate session secret and deserialize data without holding the lock
+        let (participant_public_key, encrypted_private_key_hex) = {
+            let session_state = session_arc.lock().map_err(|e| {
+                error!(
+                    "Failed to acquire session lock for participant validation: {}",
+                    e
+                );
+                EnclaveError::Internal(
+                    "Session lock poisoned during participant validation".to_string(),
+                )
             })?;
 
-        info!(
-            "Adding participant {} to session {} (private_key: {})",
-            cmd.user_id,
-            session_id,
-            if cmd.encrypted_private_key.is_some() {
-                "included"
+            let _session_secret = session_state
+                .operation_state
+                .get_session_secret()
+                .ok_or_else(|| {
+                    error!("Session secret not available for session {}", session_id);
+                    EnclaveError::InvalidSessionSecret(format!(
+                        "Session secret not available for session {}",
+                        session_id
+                    ))
+                })?;
+
+            // Deserialize participant session data
+            let participant_session_data = if !cmd.session_encrypted_data.is_empty() {
+                if let Ok(signing_data) = serde_json::from_str::<SigningParticipantSessionData>(
+                    &cmd.session_encrypted_data,
+                ) {
+                    Some(signing_data)
+                } else if let Ok(keygen_data) = serde_json::from_str::<
+                    keymeld_core::encrypted_data::KeygenParticipantSessionData,
+                >(&cmd.session_encrypted_data)
+                {
+                    Some(SigningParticipantSessionData {
+                        public_key: keygen_data.public_key,
+                    })
+                } else {
+                    error!(
+                        "Failed to deserialize session data for participant {} - unrecognized format",
+                        cmd.user_id
+                    );
+                    None
+                }
             } else {
-                "omitted"
-            }
-        );
-
-        // Parse the participant's public key
-        let public_key = PublicKey::from_slice(&cmd.public_key)
-            .map_err(|e| anyhow!("Invalid participant public key: {}", e))?;
-
-        // If encrypted private key is provided, decrypt and store it
-        if let Some(encrypted_private_key) = &cmd.encrypted_private_key {
-            info!(
-                "Decrypting and storing private key for participant {} in session {}",
-                cmd.user_id, session_id
-            );
-
-            // Decrypt the private key using the enclave's private key
-            let private_key_array: [u8; 32] = self.private_key[..32]
-                .try_into()
-                .map_err(|_| anyhow!("Private key must be exactly 32 bytes"))?;
-
-            let secret_key = SecretKey::from_byte_array(private_key_array)
-                .map_err(|e| anyhow!("Invalid enclave private key: {}", e))?;
-
-            let decoded_bytes = hex::decode(encrypted_private_key)
-                .map_err(|e| anyhow!("Hex decode failed: {}", e))?;
-
-            let decrypted_private_key = SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes)
-                .map_err(|e| anyhow!("Failed to decrypt participant private key: {}", e))?;
-
-            // Store the decrypted private key securely
-            let key_storage = SecurePrivateKey {
-                key: decrypted_private_key.clone(),
+                None
             };
 
-            let session_key = (session_id.clone(), cmd.user_id.clone());
-            {
-                let mut keys = self.private_keys.write().await;
-                keys.insert(session_key, key_storage);
-            }
+            // Extract public key from decrypted session data
+            let participant_public_key = if let Some(session_data) = participant_session_data {
+                session_data.public_key
+            } else {
+                warn!("No session data provided for participant {}", cmd.user_id);
+                vec![]
+            };
 
-            info!(
-                "Successfully decrypted and stored private key for participant {} in session {}",
-                cmd.user_id, session_id
-            );
-        }
+            // Parse private key from enclave data if provided
+            let encrypted_private_key_hex = if !cmd.enclave_encrypted_data.is_empty() {
+                // First, decrypt the hex-encoded encrypted structured data
+                let encrypted_bytes = hex::decode(&cmd.enclave_encrypted_data).map_err(|e| {
+                    EnclaveError::DataDecodingError(format!("Failed to decode hex data: {}", e))
+                })?;
 
-        // Add participant to the MuSig session
-        let mut processor = self.musig_processor.write().await;
+                let private_key_array: [u8; 32] =
+                    self.private_key[..32].try_into().map_err(|_| {
+                        EnclaveError::CryptographicError(
+                            "Private key must be exactly 32 bytes".to_string(),
+                        )
+                    })?;
+                let secret_key = SecretKey::from_byte_array(private_key_array).map_err(|e| {
+                    EnclaveError::CryptographicError(format!("Invalid private key: {}", e))
+                })?;
 
-        // Log current state before adding participant
-        if let Some(session_meta) = processor.get_session_metadata_public(&session_id) {
-            info!(
-                "Before adding participant {}: session {} has {} participants, phase={:?}",
-                cmd.user_id,
-                session_id,
-                session_meta.expected_participants.len(),
-                session_meta.phase
-            );
-        }
+                let decrypted_json = SecureCrypto::ecies_decrypt(&secret_key, &encrypted_bytes)
+                    .map_err(|e| {
+                        EnclaveError::DecryptionFailed(format!(
+                            "Failed to decrypt enclave data: {}",
+                            e
+                        ))
+                    })?;
 
-        match processor.add_participant(&session_id, cmd.user_id.clone(), public_key) {
-            Ok(()) => {
-                // Log state after successful addition
-                if let Some(session_meta) = processor.get_session_metadata_public(&session_id) {
-                    info!(
-                        "Successfully added participant {} to session {}: now has {} participants, phase={:?}",
-                        cmd.user_id, session_id, session_meta.expected_participants.len(), session_meta.phase
+                let decrypted_str = String::from_utf8(decrypted_json).map_err(|e| {
+                    EnclaveError::DataDecodingError(format!(
+                        "Failed to convert decrypted data to string: {}",
+                        e
+                    ))
+                })?;
+
+                // Parse the decrypted JSON and extract the encrypted private key field
+                if let Ok(keygen_data) =
+                    serde_json::from_str::<KeygenParticipantEnclaveData>(&decrypted_str)
+                {
+                    Some(keygen_data.private_key)
+                } else if let Ok(signing_data) =
+                    serde_json::from_str::<SigningParticipantEnclaveData>(&decrypted_str)
+                {
+                    Some(signing_data.private_key)
+                } else {
+                    warn!(
+                        "Failed to deserialize decrypted enclave data for participant {} - unrecognized format",
+                        cmd.user_id
                     );
+                    None
                 }
-            }
-            Err(MusigError::DuplicateParticipant(_)) => {
-                info!(
-                    "Participant {} already exists in session {} - ignoring duplicate",
-                    cmd.user_id, session_id
+            } else {
+                debug!(
+                    "No enclave encrypted data provided for participant {} - participant assigned to different enclave",
+                    cmd.user_id
                 );
-                // Return success for idempotent operation
-                return Ok(EnclaveResponse::Success(SuccessResponse {
-                    message: format!(
-                        "Participant {} already exists in session {}",
-                        cmd.user_id, session_id
-                    ),
-                }));
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "Failed to add participant to MuSig2 session: {}",
-                    e
-                ));
-            }
-        }
+                None
+            };
 
-        // Also add participant to the session state (only if not already present)
-        let mut operations = self.operations.write().await;
-        if let Some(session_state) = operations.get_mut(&session_id) {
-            match session_state {
-                OperationState::Initialized(ref mut session) => {
-                    // Check if participant key already exists to avoid duplicates
-                    if !session.participant_keys.contains(&cmd.public_key) {
-                        session.participant_keys.push(cmd.public_key.clone());
+            (participant_public_key, encrypted_private_key_hex)
+        }; // Lock is released here
 
-                        if let Some(_encrypted_private_key) = &cmd.encrypted_private_key {
-                            info!(
-                                "Validated encrypted private key for participant {} in session {}",
-                                cmd.user_id, session_id
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    warn!("Session {} is not in initialized state", session_id);
-                }
-            }
+        // Decrypt private key if provided (async call outside of lock)
+        let decrypted_private_key = if let Some(encrypted_hex) = encrypted_private_key_hex {
+            Some(
+                self.decrypt_private_key_from_coordinator(&encrypted_hex)
+                    .await?,
+            )
         } else {
-            warn!("Session {} not found in session states", session_id);
-        }
+            None
+        };
+
+        // Re-acquire lock to store the results
+        {
+            let mut session_state = session_arc.lock().map_err(|e| {
+                error!(
+                    "Failed to acquire session lock for participant storage: {}",
+                    e
+                );
+                EnclaveError::Internal(
+                    "Session lock poisoned during participant storage".to_string(),
+                )
+            })?;
+
+            // Store private key if we decrypted one
+            if let Some(private_key) = decrypted_private_key {
+                let secure_key = SecurePrivateKey {
+                    session_id: session_id.clone(),
+                    user_id: cmd.user_id.clone(),
+                    encrypted_key: private_key.clone(),
+                    created_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| {
+                            error!("Failed to get system time: {}", e);
+                            EnclaveError::Internal(
+                                "System time error during key storage".to_string(),
+                            )
+                        })?
+                        .as_secs(),
+                    key: private_key,
+                };
+                session_state
+                    .private_keys
+                    .insert(cmd.user_id.clone(), secure_key);
+            }
+
+            // Add participant to MuSig processor
+            let public_key = musig2::secp256k1::PublicKey::from_slice(&participant_public_key)
+                .map_err(|e| {
+                    EnclaveError::InvalidPublicKey(format!("Invalid public key: {}", e))
+                })?;
+
+            session_state
+                .musig_processor
+                .add_participant(&session_id, cmd.user_id.clone(), public_key)
+                .map_err(|e| {
+                    EnclaveError::ParticipantError(format!(
+                        "Failed to add participant to MuSig2: {}",
+                        e
+                    ))
+                })?;
+
+            // Force phase transition check to ensure we move to NonceGeneration when ready
+            if let Err(e) = session_state
+                .musig_processor
+                .check_and_force_phase_transition(&session_id)
+            {
+                warn!(
+                    "Failed to check phase transition for session {}: {}",
+                    session_id, e
+                );
+            }
+        } // Lock is released here
 
         info!(
-            "Successfully added participant {} to session {}",
+            "✅ Participant {} added to session {} successfully",
             cmd.user_id, session_id
         );
 
         Ok(EnclaveResponse::Success(SuccessResponse {
-            message: format!(
-                "Participant {} added to session {}",
-                cmd.user_id, session_id
-            ),
+            message: format!("Participant {} added to session", cmd.user_id),
         }))
     }
 
-    async fn handle_generate_nonce(&self, cmd: GenerateNonceCommand) -> Result<EnclaveResponse> {
-        info!(
-            "Generating nonce for signing session {} (keygen: {}) user {} signer_index {}",
-            cmd.signing_session_id, cmd.keygen_session_id, cmd.user_id, cmd.signer_index
-        );
+    async fn handle_distribute_session_secret(
+        &self,
+        cmd: DistributeSessionSecretCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_arc = self.sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
+            error!("Session {} not found", cmd.keygen_session_id);
+            EnclaveError::SessionNotFound(cmd.keygen_session_id.to_string())
+        })?;
 
-        // Check current session state in MuSig processor
-        {
-            let processor = self.musig_processor.read().await;
-            if let Some(session_meta) =
-                processor.get_session_metadata_public(&cmd.signing_session_id)
-            {
-                info!(
-                    "Session {} MuSig state: phase={:?}, participant_count={}",
-                    cmd.signing_session_id,
-                    session_meta.phase,
-                    session_meta.expected_participants.len()
-                );
-            } else {
-                warn!(
-                    "Session {} not found in MuSig processor",
-                    cmd.signing_session_id
-                );
-            }
+        let private_key_array: [u8; 32] = self.private_key[..32].try_into().map_err(|_| {
+            EnclaveError::CryptographicError("Private key must be exactly 32 bytes".to_string())
+        })?;
+        let secret_key = SecretKey::from_byte_array(private_key_array)
+            .map_err(|e| EnclaveError::CryptographicError(format!("Invalid private key: {}", e)))?;
+
+        let encrypted_bytes = hex::decode(&cmd.encrypted_session_secret).map_err(|e| {
+            EnclaveError::DataDecodingError(format!("Failed to decode session secret hex: {}", e))
+        })?;
+
+        let decrypted_bytes =
+            SecureCrypto::ecies_decrypt(&secret_key, &encrypted_bytes).map_err(|e| {
+                EnclaveError::DecryptionFailed(format!("Failed to decrypt session secret: {}", e))
+            })?;
+
+        let session_secret_str = String::from_utf8(decrypted_bytes).map_err(|e| {
+            EnclaveError::DataDecodingError(format!(
+                "Failed to convert session secret to string: {}",
+                e
+            ))
+        })?;
+
+        let secret_bytes = hex::decode(&session_secret_str).map_err(|e| {
+            EnclaveError::DataDecodingError(format!("Failed to decode session secret hex: {}", e))
+        })?;
+
+        if secret_bytes.len() != 32 {
+            return Err(EnclaveError::InvalidSessionSecret(format!(
+                "Invalid length: expected 32 bytes, got {}",
+                secret_bytes.len()
+            )));
         }
 
-        let private_key = if cmd.encrypted_private_key.is_none()
-            || cmd
-                .encrypted_private_key
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
+        let mut secret_array = [0u8; 32];
+        secret_array.copy_from_slice(&secret_bytes);
+        let session_secret = SessionSecret::from_bytes(secret_array);
+
+        // Update the session with the distributed session secret
         {
-            info!("Using coordinator private key for user {}", cmd.user_id);
-            self.get_coordinator_private_key(&cmd.signing_session_id)
-                .await
-                .ok_or_else(|| anyhow!("No private key available"))?
-        } else {
-            info!(
-                "Decrypting participant private key for user {}, enclave_id: {}",
-                cmd.user_id, self.enclave_id
-            );
-            self.decrypt_private_key_from_coordinator(cmd.encrypted_private_key.as_ref().unwrap())
-                .await
-                .map_err(|e| {
-                    error!(
-                        "Failed to decrypt private key for user {}: {}",
-                        cmd.user_id, e
-                    );
-                    anyhow!("Failed to decrypt private key: {}", e)
-                })?
-        };
-
-        let key_material = KeyMaterial::new(private_key);
-        let mut processor = self.musig_processor.write().await;
-
-        let pub_nonce = processor
-            .generate_nonce(
-                &cmd.signing_session_id,
-                &cmd.user_id,
-                cmd.signer_index,
-                &key_material,
-            )
-            .map_err(|e| anyhow!("Failed to generate nonce: {}", e))?;
-
-        info!(
-            "Successfully generated nonce for signing session {} user {} signer_index {}",
-            cmd.signing_session_id, cmd.user_id, cmd.signer_index
-        );
-        Ok(EnclaveResponse::Nonce(NonceResponse {
-            signing_session_id: cmd.signing_session_id,
-            keygen_session_id: cmd.keygen_session_id,
-            user_id: cmd.user_id,
-            public_nonce: pub_nonce,
-        }))
-    }
-
-    async fn handle_add_nonce(&self, cmd: AddNonceCommand) -> Result<EnclaveResponse> {
-        let mut processor = self.musig_processor.write().await;
-
-        processor
-            .add_nonce(
-                &cmd.signing_session_id,
-                &cmd.user_id,
-                cmd.signer_index,
-                cmd.nonce,
-            )
-            .map_err(|e| anyhow!("Failed to add nonce: {}", e))?;
-
-        Ok(EnclaveResponse::Success(SuccessResponse {
-            message: "Nonce added".to_string(),
-        }))
-    }
-
-    async fn handle_sign_partial_signature(
-        &self,
-        cmd: keymeld_core::enclave::ParitialSignatureCommand,
-    ) -> Result<EnclaveResponse> {
-        info!(
-            "Signing partial signature for signing session {} (keygen: {}) user {}",
-            cmd.signing_session_id, cmd.keygen_session_id, cmd.user_id
-        );
-
-        // Use the stored private key for this user and session
-        let session_key = (cmd.keygen_session_id.clone(), cmd.user_id.clone());
-        let private_key = {
-            let keys = self.private_keys.read().await;
-            keys.get(&session_key)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Private key not found for user {} in session {}",
-                        cmd.user_id,
-                        cmd.keygen_session_id
-                    )
-                })?
-                .key
-                .clone()
-        };
-
-        let key_material = keymeld_core::KeyMaterial::new(private_key);
-        let mut processor = self.musig_processor.write().await;
-
-        let (partial_sig_bytes, pub_nonce_bytes) = processor
-            .sign_for_aggregator(
-                &cmd.signing_session_id,
-                &cmd.user_id,
-                &key_material,
-                &cmd.aggregate_nonce.serialize(),
-            )
-            .map_err(|e| anyhow!("Failed to generate partial signature: {}", e))?;
-
-        let partial_signature = PartialSignature::try_from(partial_sig_bytes.as_slice())
-            .map_err(|e| anyhow!("Failed to parse partial signature: {}", e))?;
-        let public_nonce = PubNonce::try_from(pub_nonce_bytes.as_slice())
-            .map_err(|e| anyhow!("Failed to parse public nonce: {}", e))?;
-
-        info!(
-            "Successfully generated partial signature for signing session {} user {}",
-            cmd.signing_session_id, cmd.user_id
-        );
-
-        Ok(EnclaveResponse::Signature(SignatureResponse {
-            signing_session_id: cmd.signing_session_id,
-            keygen_session_id: cmd.keygen_session_id,
-            user_id: cmd.user_id,
-            partial_signature,
-            public_nonce,
-        }))
-    }
-
-    async fn handle_add_partial_signature(
-        &self,
-        cmd: AddPartialSignatureCommand,
-    ) -> Result<EnclaveResponse> {
-        let mut processor = self.musig_processor.write().await;
-        processor
-            .add_partial_signature(&cmd.signing_session_id, cmd.signer_index, cmd.signature)
-            .map_err(|e| anyhow!("Failed to add partial signature: {}", e))?;
-        Ok(EnclaveResponse::Success(SuccessResponse {
-            message: "Partial signature added".to_string(),
-        }))
-    }
-
-    async fn handle_get_aggregate_public_key(
-        &self,
-        cmd: GetAggregatePublicKeyCommand,
-    ) -> Result<EnclaveResponse> {
-        info!(
-            "Getting aggregate public key for keygen session {}",
-            cmd.keygen_session_id
-        );
-
-        let processor = self.musig_processor.read().await;
-        match processor.get_aggregate_pubkey(&cmd.keygen_session_id) {
-            Ok(aggregate_key_bytes) => {
-                let participant_count = processor
-                    .get_session_metadata_public(&cmd.keygen_session_id)
-                    .map(|meta| meta.expected_participants.len())
-                    .unwrap_or(0);
-
-                info!(
-                    "Successfully retrieved aggregate public key for keygen session {} ({} participants)",
-                    cmd.keygen_session_id, participant_count
+            let mut session_state = session_arc.lock().map_err(|e| {
+                error!(
+                    "Failed to acquire session lock for secret distribution: {}",
+                    e
                 );
-
-                // Create AggregatePublicKey from bytes
-                let aggregate_public_key = AggregatePublicKey::new(
-                    aggregate_key_bytes,
-                    vec![], // participant_ids will be filled by the caller
-                    vec![], // participant_keys_hash will be filled by the caller
-                );
-
-                Ok(EnclaveResponse::AggregatePublicKey(
-                    AggregatePublicKeyResponse {
-                        keygen_session_id: cmd.keygen_session_id,
-                        aggregate_public_key: aggregate_public_key.key_bytes,
-                        participant_count,
-                    },
-                ))
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to get aggregate public key for keygen session {}: {}",
-                    cmd.keygen_session_id, e
-                );
-                Err(anyhow!("Failed to get aggregate public key: {}", e))
-            }
-        }
-    }
-
-    async fn handle_finalize(&self, cmd: FinalizeCommand) -> Result<EnclaveResponse> {
-        info!(
-            "Finalizing signature for signing session {} (keygen: {})",
-            cmd.signing_session_id, cmd.keygen_session_id
-        );
-
-        // Aggregate signatures using the MuSig processor
-        let mut processor = self.musig_processor.write().await;
-        let final_signature_bytes = processor
-            .aggregate_signatures(&cmd.signing_session_id)
-            .map_err(|e| anyhow!("Failed to aggregate signatures: {e}"))?;
-
-        // Convert Vec<u8> to Signature
-        let signature_array: [u8; 64] = final_signature_bytes
-            .try_into()
-            .map_err(|_| anyhow!("Final signature must be exactly 64 bytes"))?;
-        let final_signature = Signature::from_byte_array(signature_array);
-
-        let participant_count = processor
-            .get_session_metadata_public(&cmd.signing_session_id)
-            .map(|s| s.expected_participants.len())
-            .unwrap_or(0);
-
-        // Release the processor lock before accessing sessions
-        drop(processor);
-
-        // Get session for encryption - only need the session secret
-        let operations = self.operations.read().await;
-        let session_state = operations
-            .get(&cmd.signing_session_id)
-            .ok_or_else(|| anyhow!("Session {} not found", cmd.signing_session_id))?;
-
-        // Extract session secret for encryption
-        let session_secret = session_state
-            .get_session_secret()
-            .ok_or_else(|| {
-                anyhow!(
-                    "No session secret available for session {}",
-                    cmd.signing_session_id
+                EnclaveError::Internal(
+                    "Session lock poisoned during secret distribution".to_string(),
                 )
-            })?
-            .clone();
+            })?;
+            match &mut session_state.operation_state {
+                OperationState::Initialized(ref mut op) => {
+                    if let Some(existing_secret) = &op.session_secret {
+                        let existing_bytes = existing_secret.as_bytes();
+                        let new_bytes = session_secret.as_bytes();
 
-        // Encrypt only the final signature (without the message)
-        let final_signature_bytes = final_signature.to_byte_array();
-        let encrypted_signed_message = session_secret
-            .encrypt_signature(&final_signature_bytes)
-            .map_err(|e| anyhow!("Failed to encrypt signature: {e:?}"))?
-            .to_hex_json()
-            .map_err(|e| anyhow!("Failed to serialize encrypted signature: {e:?}"))?;
+                        if existing_bytes != new_bytes {
+                            error!(
+                                "Session secret mismatch for session {}: attempting to overwrite existing secret with different value",
+                                cmd.keygen_session_id
+                            );
+                            return Err(EnclaveError::InvalidSessionSecret(
+                                "Cannot overwrite existing session secret with different value"
+                                    .to_string(),
+                            ));
+                        }
 
-        // Release read lock and update session to completed
-        drop(operations);
-        let mut operations = self.operations.write().await;
+                        debug!(
+                            "Session secret matches existing secret for session {}",
+                            cmd.keygen_session_id
+                        );
+                    } else {
+                        // No existing secret, safe to set
+                        op.session_secret = Some(session_secret);
+                        debug!(
+                            "Successfully set session secret for session {}",
+                            cmd.keygen_session_id
+                        );
+                    }
+                }
+                _ => {
+                    return Err(EnclaveError::Internal(
+                        "Session not in initialized state for secret distribution".to_string(),
+                    ));
+                }
+            }
+        }
 
-        let completed_session = OperationCompleted {
-            session_id: cmd.signing_session_id.clone(),
-            session_secret: Some(session_secret),
-            encrypted_signed_message: encrypted_signed_message.clone().into_bytes(),
-            participant_count: participant_count as u32,
-        };
-
-        operations.insert(
-            cmd.signing_session_id.clone(),
-            OperationState::Completed(completed_session),
-        );
-
-        info!(
-            "Signing session {} finalized and encrypted signature stored",
-            cmd.signing_session_id
-        );
-
-        Ok(EnclaveResponse::FinalSignature(FinalSignatureResponse {
-            signing_session_id: cmd.signing_session_id,
-            keygen_session_id: cmd.keygen_session_id,
-            final_signature: encrypted_signed_message.into_bytes(),
-            participant_count,
+        Ok(EnclaveResponse::Success(SuccessResponse {
+            message: "Session secret distributed successfully".to_string(),
         }))
     }
 
-    async fn handle_get_aggregate_nonce(
+    async fn handle_batch_distribute_session_secrets(
         &self,
-        cmd: GetAggregateNonceCommand,
-    ) -> Result<EnclaveResponse> {
-        let processor = self.musig_processor.read().await;
-        match processor.get_aggregate_nonce(&cmd.signing_session_id) {
-            Ok(aggregated_nonce) => {
-                let serialized = aggregated_nonce.serialize();
-                let pubnonce = PubNonce::from_bytes(&serialized)
-                    .map_err(|e| anyhow!("Failed to convert AggNonce to PubNonce: {}", e))?;
-                Ok(EnclaveResponse::AggregateNonce(AggregateNonceResponse {
-                    signing_session_id: cmd.signing_session_id,
-                    keygen_session_id: cmd.keygen_session_id,
-                    aggregate_nonce: pubnonce,
-                }))
-            }
-            Err(e) => Ok(EnclaveResponse::Error(ErrorResponse {
-                error: EnclaveError::MuSigError("Conversion error".to_string()),
-                message: format!("Failed to get aggregate nonce: {}", e),
-            })),
+        cmd: BatchDistributeSessionSecretsCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_secret_bytes = self.get_session_secret_bytes(&cmd.keygen_session_id)?;
+
+        let mut encrypted_secrets = Vec::new();
+
+        // Step 1: Coordinator encrypts session secret for each target enclave using stored public keys
+        for target_enclave_id in &cmd.target_enclaves {
+            // Get the public key for the target enclave
+            let target_public_key = self
+                .enclave_public_keys
+                .get(target_enclave_id)
+                .ok_or_else(|| {
+                    EnclaveError::CryptographicError(format!(
+                        "No public key available for target enclave {}",
+                        target_enclave_id
+                    ))
+                })?
+                .clone();
+
+            let encrypted_session_secret =
+                self.encrypt_session_secret_for_enclave(&target_public_key, &session_secret_bytes)?;
+
+            encrypted_secrets.push(EncryptedSessionSecret {
+                target_enclave_id: *target_enclave_id,
+                encrypted_session_secret,
+            });
         }
+
+        Ok(EnclaveResponse::BatchSessionSecrets(
+            keymeld_core::enclave::protocol::BatchSessionSecretsResponse {
+                keygen_session_id: cmd.keygen_session_id,
+                encrypted_secrets,
+            },
+        ))
+    }
+
+    async fn encrypt_session_secret_for_other_enclaves(
+        &self,
+        session_secret: &SessionSecret,
+        enclave_public_keys: &[EnclavePublicKeyInfo],
+    ) -> Result<Vec<EncryptedSessionSecret>, EnclaveError> {
+        let session_secret_bytes = session_secret.as_bytes();
+        let session_secret_hex = hex::encode(session_secret_bytes);
+        let mut encrypted_secrets = Vec::new();
+
+        for enclave_key in enclave_public_keys {
+            if enclave_key.enclave_id == self.enclave_id {
+                continue;
+            }
+
+            let encrypted_session_secret = {
+                let encrypted_bytes = SecureCrypto::ecies_encrypt_from_hex(
+                    &enclave_key.public_key,
+                    session_secret_hex.as_bytes(),
+                )
+                .map_err(|e| {
+                    EnclaveError::CryptographicError(format!(
+                        "Failed to encrypt session secret for enclave {}: {}",
+                        enclave_key.enclave_id, e
+                    ))
+                })?;
+
+                hex::encode(encrypted_bytes)
+            };
+
+            encrypted_secrets.push(keymeld_core::enclave::protocol::EncryptedSessionSecret {
+                target_enclave_id: enclave_key.enclave_id,
+                encrypted_session_secret,
+            });
+        }
+
+        Ok(encrypted_secrets)
     }
 
     pub async fn get_status(&self) -> (EnclaveId, bool, Vec<u8>, u32) {
-        let operations = self.operations.read().await;
-        let active_sessions = operations.len() as u32;
-        let ready = true; // Always ready since we don't need KMS
+        let active_sessions_count = self.sessions.iter().count() as u32;
+        let ready = true;
 
         (
             self.enclave_id,
             ready,
             self.public_key.clone(),
-            active_sessions,
+            active_sessions_count,
         )
     }
 
@@ -766,395 +961,751 @@ impl EnclaveOperator {
         self.key_generation_time
     }
 
-    pub fn get_key_epoch(&self) -> u64 {
+    pub fn get_key_epoch(&self) -> u32 {
         self.key_epoch
     }
 
     pub fn get_uptime_seconds(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|e| {
+                error!("Failed to get system time for uptime calculation: {}", e);
+                Duration::from_secs(0)
+            })
             .as_secs()
             - self.startup_time
     }
 
-    pub async fn get_active_sessions_count(&self) -> u32 {
-        let operations = self.operations.read().await;
-        operations.len() as u32
+    pub async fn get_active_sessions_count(&self) -> usize {
+        self.sessions.iter().count()
     }
 
     async fn handle_validate_session_hmac(
         &self,
         cmd: ValidateSessionHmacCommand,
-    ) -> Result<EnclaveResponse> {
-        let session_id = cmd
-            .signing_session_id
-            .or(cmd.keygen_session_id)
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_id = cmd.signing_session_id.or(cmd.keygen_session_id).ok_or(
+            EnclaveError::InvalidSessionId(
+                "Either keygen_session_id or signing_session_id must be provided".to_string(),
+            ),
+        )?;
+
+        let session_arc = self.sessions.get(&session_id).ok_or_else(|| {
+            error!("Session {} not found for HMAC validation", session_id);
+            EnclaveError::SessionNotFound(session_id.to_string())
+        })?;
+
+        let session_state = session_arc.lock().map_err(|e| {
+            error!("Failed to acquire session lock for HMAC validation: {}", e);
+            EnclaveError::Internal("Session lock poisoned during HMAC validation".to_string())
+        })?;
+
+        let session_secret = session_state
+            .operation_state
+            .get_session_secret()
             .ok_or_else(|| {
-                anyhow!("Either keygen_session_id or signing_session_id must be provided")
+                error!("Session secret not found for session {}", session_id);
+                EnclaveError::InvalidSessionSecret(format!(
+                    "Session secret not available for session {}",
+                    session_id
+                ))
             })?;
 
-        info!(
-            "Validating session HMAC for session {} user {}",
-            session_id, cmd.user_id
-        );
+        let expected_session_secret_bytes = session_secret.as_bytes();
+        let mut mac = HmacSha256::new_from_slice(expected_session_secret_bytes.as_slice())
+            .map_err(|e| {
+                EnclaveError::CryptographicError(format!("Failed to create HMAC: {}", e))
+            })?;
 
-        let session_secret = match self.decrypt_session_secret(&cmd.encrypted_session_secret) {
-            Ok(secret) => secret,
-            Err(e) => {
-                warn!("Failed to decrypt session secret: {}", e);
-                return Ok(EnclaveResponse::Error(ErrorResponse {
-                    error: EnclaveError::HmacInvalid,
-                    message: "Failed to decrypt session secret".to_string(),
-                }));
-            }
-        };
+        mac.update(&cmd.message_hash);
+        let expected_hmac = mac.finalize().into_bytes();
+        let expected_hmac_hex = hex::encode(expected_hmac);
 
-        let operations = self.operations.read().await;
-        if let Some(_session) = operations.get(&session_id) {
-            let validation_result = SecureCrypto::validate_signing_hmac(
-                &session_id.as_string(),
-                &cmd.user_id.as_str(),
-                &cmd.session_hmac,
-                &String::from_utf8_lossy(&session_secret),
-                &cmd.message_hash,
-            );
-
-            match validation_result {
-                Ok(()) => {
-                    info!(
-                        "HMAC validation SUCCESS - Session: {}, User: {}",
-                        session_id, cmd.user_id
-                    );
-                    Ok(EnclaveResponse::Success(SuccessResponse {
-                        message: "HMAC validation successful".to_string(),
-                    }))
-                }
-                Err(e) => {
-                    warn!(
-                        "HMAC validation FAILED - Session: {}, User: {}, Error: {}",
-                        session_id, cmd.user_id, e
-                    );
-                    Ok(EnclaveResponse::Error(ErrorResponse {
-                        error: EnclaveError::HmacInvalid,
-                        message: "HMAC validation failed".to_string(),
-                    }))
-                }
-            }
+        let is_valid = expected_hmac_hex == cmd.session_hmac;
+        if is_valid {
+            Ok(EnclaveResponse::Success(SuccessResponse {
+                message: "HMAC validation successful".to_string(),
+            }))
         } else {
-            warn!("Session {} not found for HMAC validation", session_id);
             Ok(EnclaveResponse::Error(ErrorResponse {
-                error: EnclaveError::SessionNotFound,
-                message: "Session not found".to_string(),
+                error: EnclaveError::HmacInvalid("HMAC validation failed".to_string()),
             }))
         }
-    }
-
-    fn decrypt_session_secret(
-        &self,
-        encrypted_session_secret: &str,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        let private_key_array: [u8; 32] = self.private_key[..32]
-            .try_into()
-            .map_err(|_| anyhow!("Private key must be exactly 32 bytes"))?;
-
-        let secret_key = SecretKey::from_byte_array(private_key_array)
-            .map_err(|e| anyhow!("Invalid private key: {}", e))?;
-
-        let decoded_bytes = hex::decode(encrypted_session_secret)
-            .map_err(|e| anyhow!("Hex decode failed: {}", e))?;
-
-        let decrypted_secret = SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes)
-            .map_err(|e| anyhow!("Failed to decrypt session secret: {}", e))?;
-
-        Ok(decrypted_secret)
     }
 
     async fn handle_validate_keygen_participant_hmac(
         &self,
         cmd: ValidateKeygenParticipantHmacCommand,
-    ) -> Result<EnclaveResponse> {
-        info!(
-            "Validating keygen participant HMAC for keygen session {} user {}",
-            cmd.keygen_session_id, cmd.user_id
-        );
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_arc = self
+            .sessions
+            .get(&cmd.keygen_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for keygen participant HMAC validation",
+                    cmd.keygen_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.keygen_session_id.to_string())
+            })?;
 
-        let decrypted_secret = match self.decrypt_session_secret(&cmd.encrypted_session_secret) {
-            Ok(secret) => secret,
-            Err(e) => {
-                warn!("Failed to decrypt session secret: {}", e);
-                return Ok(EnclaveResponse::Error(ErrorResponse {
-                    error: EnclaveError::HmacInvalid,
-                    message: "Failed to decrypt session secret".to_string(),
-                }));
-            }
-        };
+        let session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for keygen participant HMAC validation: {}",
+                e
+            );
+            EnclaveError::Internal(
+                "Session lock poisoned during keygen participant HMAC validation".to_string(),
+            )
+        })?;
+        let session_secret = session_state
+            .operation_state
+            .get_session_secret()
+            .ok_or_else(|| {
+                error!(
+                    "Session secret not found for session {}",
+                    cmd.keygen_session_id
+                );
+                EnclaveError::InvalidSessionSecret(format!(
+                    "Session secret not available for session {}",
+                    cmd.keygen_session_id
+                ))
+            })?;
 
-        // Parse the session_hmac to extract nonce and hmac (format: "nonce:hmac")
-        let (nonce, provided_hmac) = match cmd.session_hmac.split_once(':') {
-            Some((nonce, hmac)) => (nonce, hmac),
-            None => {
-                warn!("Invalid HMAC format, expected 'nonce:hmac'");
-                return Ok(EnclaveResponse::Error(ErrorResponse {
-                    error: EnclaveError::HmacInvalid,
-                    message: "Invalid HMAC format".to_string(),
-                }));
-            }
-        };
+        let (nonce, provided_hmac) = cmd.session_hmac.split_once(':').ok_or_else(|| {
+            EnclaveError::HmacInvalid("Invalid HMAC format, expected 'nonce:hmac'".to_string())
+        })?;
 
-        // For keygen participant validation, generate the message hash internally
-        // using the pattern: "{}:{}:{}" with keygen_session_id, user_id, and nonce
         let message_data = format!(
             "{}:{}:{}",
             cmd.keygen_session_id.as_string(),
             cmd.user_id.as_str(),
             nonce
         );
-        let message_hash = message_data.as_bytes();
 
-        // Decode the hex session secret to get raw bytes for HMAC key
-        let session_secret_str = String::from_utf8_lossy(&decrypted_secret);
-        let secret_bytes = match hex::decode(session_secret_str.as_ref()) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!("Failed to decode hex session secret: {}", e);
-                return Ok(EnclaveResponse::Error(ErrorResponse {
-                    error: EnclaveError::HmacInvalid,
-                    message: "Failed to decrypt session secret".to_string(),
-                }));
-            }
-        };
+        let secret_bytes = session_secret.as_bytes().as_slice();
+        let mut mac = HmacSha256::new_from_slice(secret_bytes).map_err(|e| {
+            EnclaveError::CryptographicError(format!("Failed to create HMAC: {}", e))
+        })?;
 
-        // Create HMAC with the decoded session secret as the key
-        let mut mac = match HmacSha256::new_from_slice(&secret_bytes) {
-            Ok(mac) => mac,
-            Err(e) => {
-                warn!("Failed to create HMAC: {}", e);
-                return Ok(EnclaveResponse::Error(ErrorResponse {
-                    error: EnclaveError::HmacInvalid,
-                    message: "Failed to create HMAC".to_string(),
-                }));
-            }
-        };
-
-        mac.update(message_hash);
+        mac.update(message_data.as_bytes());
         let expected_hmac = hex::encode(mac.finalize().into_bytes());
         let is_valid = expected_hmac == provided_hmac;
-
-        info!(
-            "Keygen participant HMAC validation - Session: {}, User: {}, Nonce: {}, Message: {}, Expected: {}, Provided: {}, Valid: {}",
-            cmd.keygen_session_id,
-            cmd.user_id,
-            nonce,
-            message_data,
-            expected_hmac,
-            provided_hmac,
-            is_valid
-        );
-
         if is_valid {
+            debug!(
+                "✅ Keygen participant HMAC validation successful for session {} and user {}",
+                cmd.keygen_session_id, cmd.user_id
+            );
             Ok(EnclaveResponse::Success(SuccessResponse {
                 message: "Keygen participant HMAC validation successful".to_string(),
             }))
         } else {
+            warn!(
+                "❌ Keygen participant HMAC validation failed for session {} and user {}",
+                cmd.keygen_session_id, cmd.user_id
+            );
             Ok(EnclaveResponse::Error(ErrorResponse {
-                error: EnclaveError::HmacInvalid,
-                message: "Keygen participant HMAC validation failed".to_string(),
+                error: EnclaveError::HmacInvalid(
+                    "Keygen participant HMAC validation failed".to_string(),
+                ),
             }))
         }
     }
 
     pub async fn clear_session(&self, session_id: SessionId) -> Result<(), EnclaveError> {
-        info!("Clearing session {}", session_id);
-
-        let mut operations = self.operations.write().await;
-        operations.remove(&session_id);
-
-        let mut processor = self.musig_processor.write().await;
-        processor.clear_session(&session_id);
-
-        // Clear stored private keys for this session
-        let mut private_keys = self.private_keys.write().await;
-        private_keys.retain(|(stored_session_id, _), _| stored_session_id != &session_id);
-
+        let session_exists_before = self.sessions.contains_key(&session_id);
         info!(
-            "Session {} cleared, including stored private keys",
-            session_id
+            "🗑️ Clearing session {} (exists_before={})",
+            session_id, session_exists_before
         );
+
+        // Clear MuSig processor state first to remove user sessions and nonces
+        if let Some(session_arc) = self.sessions.get(&session_id) {
+            if let Ok(mut session_state) = session_arc.lock() {
+                session_state.musig_processor.clear_session(&session_id);
+                info!(
+                    "🧹 Cleared MuSig processor state for session {}",
+                    session_id
+                );
+            } else {
+                warn!(
+                    "❌ Failed to acquire lock for session {} during clearing",
+                    session_id
+                );
+            }
+        } else {
+            info!(
+                "ℹ️ Session {} not found in sessions map during clear",
+                session_id
+            );
+        }
+
+        // Remove session from concurrent map - this is lock-free!
+        if self.sessions.remove(&session_id).is_some() {
+            info!("✅ Session {} cleared successfully", session_id);
+        } else {
+            warn!("⚠️ Session {} was not found during clear", session_id);
+        }
+
         Ok(())
     }
 
     pub async fn decrypt_private_key_from_coordinator(
         &self,
-        encrypted_data: &str,
-    ) -> Result<Vec<u8>> {
-        // Decrypt the private key using ECIES with our enclave private key
-        let private_key_array: [u8; 32] = self.private_key[..32]
-            .try_into()
-            .map_err(|_| anyhow!("Private key must be exactly 32 bytes"))?;
+        encrypted_private_key: &str,
+    ) -> Result<Vec<u8>, EnclaveError> {
+        let private_key_array: [u8; 32] = self.private_key[..32].try_into().map_err(|_| {
+            EnclaveError::CryptographicError("Private key must be exactly 32 bytes".to_string())
+        })?;
         let secret_key = SecretKey::from_byte_array(private_key_array)
-            .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+            .map_err(|e| EnclaveError::CryptographicError(format!("Invalid private key: {}", e)))?;
 
-        let decoded_bytes =
-            hex::decode(encrypted_data).map_err(|e| anyhow!("Hex decode failed: {}", e))?;
-
-        let decrypted_bytes = SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes)
-            .map_err(|e| anyhow!("Failed to decrypt private key: {}", e))?;
-
-        Ok(decrypted_bytes)
+        let decoded_bytes = hex::decode(encrypted_private_key)
+            .map_err(|e| EnclaveError::DataDecodingError(format!("Hex decode failed: {}", e)))?;
+        SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes).map_err(|e| {
+            EnclaveError::DecryptionFailed(format!("Failed to decrypt private key: {}", e))
+        })
     }
 
-    pub async fn decrypt_private_key(&self, encrypted_data: &[u8]) -> Result<Vec<u8>> {
-        info!(
-            "Decrypting private key, input data length: {}",
-            encrypted_data.len()
+    pub async fn decrypt_private_key(
+        &self,
+        session_id: &SessionId,
+        user_id: &UserId,
+    ) -> Result<Vec<u8>, EnclaveError> {
+        let session_arc = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| EnclaveError::SessionNotFound(session_id.to_string()))?;
+
+        let session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for private key decryption: {}",
+                e
+            );
+            EnclaveError::Internal(
+                "Session lock poisoned during private key decryption".to_string(),
+            )
+        })?;
+        let secure_key = session_state.private_keys.get(user_id).ok_or_else(|| {
+            EnclaveError::InvalidPrivateKey(format!(
+                "Private key not found for user {} in session {}",
+                user_id, session_id
+            ))
+        })?;
+
+        Ok(secure_key.key.clone())
+    }
+
+    pub async fn get_coordinator_private_key(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<u8>>, EnclaveError> {
+        let session_arc = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| EnclaveError::SessionNotFound(session_id.to_string()))?;
+
+        let session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for coordinator private key: {}",
+                e
+            );
+            EnclaveError::Internal(
+                "Session lock poisoned during coordinator private key access".to_string(),
+            )
+        })?;
+        Ok(session_state.operation_state.get_coordinator_private_key())
+    }
+
+    pub async fn is_session_coordinator(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, EnclaveError> {
+        let session_arc = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| EnclaveError::SessionNotFound(session_id.to_string()))?;
+
+        let session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for coordinator check: {}",
+                e
+            );
+            EnclaveError::Internal("Session lock poisoned during coordinator check".to_string())
+        })?;
+        let is_coordinator = session_state.operation_state.is_coordinator();
+        Ok(is_coordinator)
+    }
+
+    pub async fn get_session_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<std::sync::Mutex<SessionState>>> {
+        self.sessions
+            .get(session_id)
+            .map(|guard| guard.value().clone())
+    }
+
+    pub async fn get_session_stats(&self) -> Result<String, EnclaveError> {
+        let total_sessions = self.sessions.iter().count();
+        let mut stats = format!("Total sessions: {}\n", total_sessions);
+
+        for entry in self.sessions.iter() {
+            let (session_id, session_arc) = (entry.key(), entry.value());
+            if let Ok(session_state) = session_arc.lock() {
+                stats.push_str(&format!(
+                    "Session {}: {} participants\n",
+                    session_id,
+                    session_state.private_keys.len()
+                ));
+            }
+        }
+
+        Ok(stats)
+    }
+}
+
+impl EnclaveOperator {
+    async fn handle_generate_nonce(
+        &self,
+        cmd: keymeld_core::enclave::GenerateNonceCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        let session_id = cmd.signing_session_id.clone();
+        trace!(
+            "🎲 Generating nonce for session {} and user {}",
+            session_id,
+            cmd.user_id
         );
 
-        // Convert bytes back to string (they should be Base64 encoded ECIES data)
-        let encrypted_string = String::from_utf8(encrypted_data.to_vec()).map_err(|e| {
-            error!("Failed to convert encrypted data to UTF-8 string: {}", e);
-            anyhow!("Failed to convert encrypted data to string: {}", e)
-        })?;
-
-        info!(
-            "Converted to string, Base64 string length: {}",
-            encrypted_string.len()
-        );
-
-        // Decrypt using ECIES with our enclave private key
-        let private_key_array: [u8; 32] = self.private_key[..32].try_into().map_err(|_| {
-            error!("Enclave private key is not exactly 32 bytes");
-            anyhow!("Private key must be exactly 32 bytes")
-        })?;
-        let secret_key = SecretKey::from_byte_array(private_key_array).map_err(|e| {
-            error!("Failed to create SecretKey from enclave private key: {}", e);
-            anyhow!("Invalid private key: {}", e)
-        })?;
-
-        let decoded_bytes = hex::decode(&encrypted_string).map_err(|e| {
-            error!("Hex decode failed for encrypted string: {}", e);
-            anyhow!("Hex decode failed: {}", e)
-        })?;
-
-        info!("Hex decoded, ciphertext length: {}", decoded_bytes.len());
-
-        let decrypted_bytes =
-            SecureCrypto::ecies_decrypt(&secret_key, &decoded_bytes).map_err(|e| {
-                error!("ECIES decryption failed: {}", e);
-                anyhow!("Failed to decrypt private key: {}", e)
+        let session_arc = self
+            .sessions
+            .get(&session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!("Session {} not found for nonce generation", session_id);
+                EnclaveError::SessionNotFound(session_id.to_string())
             })?;
 
-        info!(
-            "Successfully decrypted private key, length: {}",
-            decrypted_bytes.len()
+        // Extract data we need without holding the lock across await
+        let (has_private_key, coordinator_key) = {
+            let session_state = session_arc.lock().map_err(|e| {
+                error!("Failed to acquire session lock for nonce generation: {}", e);
+                EnclaveError::Internal("Session lock poisoned during nonce generation".to_string())
+            })?;
+            let has_private_key = session_state.private_keys.contains_key(&cmd.user_id);
+            let coordinator_key = session_state.operation_state.get_coordinator_private_key();
+            (has_private_key, coordinator_key)
+        };
+
+        let private_key = if has_private_key {
+            self.decrypt_private_key(&session_id, &cmd.user_id).await?
+        } else if let Some(coordinator_key) = coordinator_key {
+            coordinator_key
+        } else {
+            return Err(EnclaveError::InvalidPrivateKey(format!(
+                "No private key available for user {} in session {}",
+                cmd.user_id, session_id
+            )));
+        };
+
+        let pub_nonce = {
+            let mut session_state = session_arc.lock().map_err(|e| {
+                error!("Failed to acquire session lock for nonce generation: {}", e);
+                EnclaveError::Internal("Session lock poisoned during nonce generation".to_string())
+            })?;
+            let key_material = KeyMaterial::new(private_key);
+            session_state
+                .musig_processor
+                .generate_nonce(&session_id, &cmd.user_id, cmd.signer_index, &key_material)
+                .map_err(|e| {
+                    EnclaveError::NonceGenerationFailed(format!("Failed to generate nonce: {}", e))
+                })?
+        };
+
+        debug!(
+            "✅ Nonce generated successfully for user {} in session {}",
+            cmd.user_id, session_id
         );
-        Ok(decrypted_bytes)
+
+        Ok(EnclaveResponse::Nonce(
+            keymeld_core::enclave::NonceResponse {
+                signing_session_id: session_id,
+                keygen_session_id: cmd.keygen_session_id,
+                user_id: cmd.user_id,
+                public_nonce: pub_nonce,
+            },
+        ))
     }
 
-    pub async fn get_coordinator_private_key(&self, session_id: &SessionId) -> Option<Vec<u8>> {
-        let operations = self.operations.read().await;
-        if let Some(operation_state) = operations.get(session_id) {
-            match operation_state {
-                OperationState::Initialized(s) => s.coordinator_private_key.clone(),
-                OperationState::CollectingNonces(s) => s.coordinator_private_key.clone(),
-                OperationState::GeneratingSignatures(s) => s.coordinator_private_key.clone(),
-                OperationState::Completed(_) | OperationState::Failed(_) => None,
-            }
+    async fn handle_add_nonce(
+        &self,
+        cmd: keymeld_core::enclave::AddNonceCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        info!(
+            "📝 Adding nonce for session {} user {} signer_index {}",
+            cmd.signing_session_id, cmd.user_id, cmd.signer_index
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for adding nonce",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().map_err(|e| {
+            error!("Failed to acquire session lock for adding nonce: {}", e);
+            EnclaveError::Internal("Session lock poisoned during nonce addition".to_string())
+        })?;
+
+        session_state
+            .musig_processor
+            .add_nonce(
+                &cmd.signing_session_id,
+                &cmd.user_id,
+                cmd.signer_index,
+                cmd.nonce,
+            )
+            .map_err(|e| EnclaveError::NonceError(format!("Failed to add nonce: {}", e)))?;
+
+        debug!(
+            "✅ Nonce added successfully for user {} in session {}",
+            cmd.user_id, cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::Success(SuccessResponse {
+            message: "Nonce added successfully".to_string(),
+        }))
+    }
+
+    async fn handle_sign_partial_signature(
+        &self,
+        cmd: keymeld_core::enclave::ParitialSignatureCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        trace!(
+            "✍️ Signing partial signature for session {} and user {}",
+            cmd.signing_session_id,
+            cmd.user_id
+        );
+
+        let signing_session_arc = self.sessions.get(&cmd.signing_session_id).ok_or_else(|| {
+            error!("Signing session {} not found", cmd.signing_session_id);
+            EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+        })?;
+
+        let keygen_session_arc = self.sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
+            error!("Keygen session {} not found", cmd.keygen_session_id);
+            EnclaveError::SessionNotFound(cmd.keygen_session_id.to_string())
+        })?;
+
+        // Extract what we need without holding locks across awaits
+        let (has_keygen_key, has_signing_key, coordinator_key) = {
+            let keygen_session = keygen_session_arc.lock().map_err(|e| {
+                error!("Failed to acquire keygen session lock: {}", e);
+                EnclaveError::Internal("Keygen session lock poisoned".to_string())
+            })?;
+            let signing_session = signing_session_arc.lock().map_err(|e| {
+                error!("Failed to acquire signing session lock: {}", e);
+                EnclaveError::Internal("Signing session lock poisoned".to_string())
+            })?;
+
+            let has_keygen_key = keygen_session.private_keys.contains_key(&cmd.user_id);
+            let has_signing_key = signing_session.private_keys.contains_key(&cmd.user_id);
+            let coordinator_key = signing_session
+                .operation_state
+                .get_coordinator_private_key();
+            (has_keygen_key, has_signing_key, coordinator_key)
+        };
+
+        let private_key = if has_keygen_key {
+            self.decrypt_private_key(&cmd.keygen_session_id, &cmd.user_id)
+                .await?
+        } else if has_signing_key {
+            self.decrypt_private_key(&cmd.signing_session_id, &cmd.user_id)
+                .await?
+        } else if let Some(coordinator_key) = coordinator_key {
+            coordinator_key
         } else {
-            None
-        }
+            return Err(EnclaveError::InvalidPrivateKey(format!(
+                "No private key available for user {} in session {}",
+                cmd.user_id, cmd.signing_session_id
+            )));
+        };
+
+        // Generate partial signature using MuSig processor with minimal lock time
+        let (partial_sig_bytes, pub_nonce_bytes) = {
+            let mut signing_session = signing_session_arc.lock().map_err(|e| {
+                error!(
+                    "Failed to acquire signing session lock for signature generation: {}",
+                    e
+                );
+                EnclaveError::Internal(
+                    "Signing session lock poisoned during signature generation".to_string(),
+                )
+            })?;
+            let key_material = KeyMaterial::new(private_key);
+            signing_session
+                .musig_processor
+                .sign_for_user(&cmd.signing_session_id, &cmd.user_id, &key_material)
+                .map_err(|e| {
+                    EnclaveError::SigningFailed(format!(
+                        "Failed to generate partial signature: {}",
+                        e
+                    ))
+                })?
+        };
+
+        let partial_signature = musig2::PartialSignature::try_from(partial_sig_bytes.as_slice())
+            .map_err(|e| {
+                EnclaveError::SignatureError(format!("Failed to parse partial signature: {}", e))
+            })?;
+        let public_nonce = musig2::PubNonce::try_from(pub_nonce_bytes.as_slice()).map_err(|e| {
+            EnclaveError::NonceError(format!("Failed to parse public nonce: {}", e))
+        })?;
+
+        debug!(
+            "✅ Partial signature generated for user {} in session {}",
+            cmd.user_id, cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::Signature(
+            keymeld_core::enclave::SignatureResponse {
+                signing_session_id: cmd.signing_session_id,
+                keygen_session_id: cmd.keygen_session_id,
+                user_id: cmd.user_id,
+                partial_signature,
+                public_nonce,
+            },
+        ))
     }
 
-    pub async fn is_session_coordinator(&self, session_id: &SessionId) -> bool {
-        let operations = self.operations.read().await;
-        if let Some(operation_state) = operations.get(session_id) {
-            match operation_state {
-                OperationState::Initialized(s) => s.is_coordinator,
-                OperationState::CollectingNonces(s) => s.is_coordinator,
-                OperationState::GeneratingSignatures(s) => s.is_coordinator,
-                OperationState::Completed(_) | OperationState::Failed(_) => false,
-            }
+    async fn handle_add_partial_signature(
+        &self,
+        cmd: keymeld_core::enclave::AddPartialSignatureCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        trace!(
+            "📝 Adding partial signature for session {}",
+            cmd.signing_session_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for adding partial signature",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for adding partial signature: {}",
+                e
+            );
+            EnclaveError::Internal(
+                "Session lock poisoned during partial signature addition".to_string(),
+            )
+        })?;
+
+        session_state
+            .musig_processor
+            .add_partial_signature(&cmd.signing_session_id, cmd.signer_index, cmd.signature)
+            .map_err(|e| {
+                EnclaveError::SignatureError(format!("Failed to add partial signature: {}", e))
+            })?;
+
+        debug!(
+            "✅ Partial signature added successfully for session {}",
+            cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::Success(SuccessResponse {
+            message: "Partial signature added successfully".to_string(),
+        }))
+    }
+
+    async fn handle_get_aggregate_public_key(
+        &self,
+        cmd: keymeld_core::enclave::GetAggregatePublicKeyCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        trace!(
+            "🔑 Getting aggregate public key for session {}",
+            cmd.keygen_session_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.keygen_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for getting aggregate public key",
+                    cmd.keygen_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.keygen_session_id.to_string())
+            })?;
+
+        let session_state = session_arc.lock().map_err(|e| {
+            error!(
+                "Failed to acquire session lock for aggregate public key: {}",
+                e
+            );
+            EnclaveError::Internal(
+                "Session lock poisoned during aggregate public key access".to_string(),
+            )
+        })?;
+
+        let aggregate_public_key = session_state
+            .musig_processor
+            .get_aggregate_pubkey(&cmd.keygen_session_id)
+            .map_err(|e| {
+                EnclaveError::AggregateKeyError(format!(
+                    "Failed to get aggregate public key: {}",
+                    e
+                ))
+            })?;
+
+        let participant_count = session_state.private_keys.len();
+
+        debug!(
+            "✅ Aggregate public key retrieved for session {} with {} participants",
+            cmd.keygen_session_id, participant_count
+        );
+
+        Ok(EnclaveResponse::AggregatePublicKey(
+            keymeld_core::enclave::AggregatePublicKeyResponse {
+                keygen_session_id: cmd.keygen_session_id,
+                aggregate_public_key,
+                participant_count,
+            },
+        ))
+    }
+
+    async fn handle_finalize(
+        &self,
+        cmd: keymeld_core::enclave::FinalizeCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        trace!(
+            "🔒 Finalizing signature for session {} (keygen: {})",
+            cmd.signing_session_id,
+            cmd.keygen_session_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for finalization",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().unwrap();
+
+        let final_signature_bytes = session_state
+            .musig_processor
+            .aggregate_signatures(&cmd.signing_session_id)
+            .map_err(|e| {
+                EnclaveError::FinalizationFailed(format!("Failed to finalize signature: {}", e))
+            })?;
+
+        let participant_count = session_state.private_keys.len();
+
+        let encrypted_signature = if let Some(session_secret) =
+            session_state.operation_state.get_session_secret()
+        {
+            let encrypted = session_secret
+                .encrypt_signature(&final_signature_bytes)
+                .map_err(|e| {
+                    EnclaveError::CryptographicError(format!("Failed to encrypt signature: {}", e))
+                })?;
+
+            encrypted.to_hex_json().map_err(|e| {
+                EnclaveError::Internal(format!("Failed to serialize encrypted signature: {}", e))
+            })?
         } else {
-            false
-        }
+            hex::encode(final_signature_bytes.clone())
+        };
+
+        info!(
+            "✅ Signature finalized successfully for session {} with {} participants",
+            cmd.signing_session_id, participant_count
+        );
+
+        Ok(EnclaveResponse::FinalSignature(
+            keymeld_core::enclave::FinalSignatureResponse {
+                signing_session_id: cmd.signing_session_id,
+                keygen_session_id: cmd.keygen_session_id,
+                final_signature: encrypted_signature.into_bytes(),
+                participant_count,
+            },
+        ))
     }
 
-    pub async fn get_session_state(&self, session_id: &SessionId) -> Option<OperationState> {
-        let operations = self.operations.read().await;
-        operations.get(session_id).cloned()
-    }
+    async fn handle_get_aggregate_nonce(
+        &self,
+        cmd: keymeld_core::enclave::GetAggregateNonceCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        trace!(
+            "🎯 Getting aggregate nonce for session {}",
+            cmd.signing_session_id
+        );
 
-    pub async fn get_session_stats(&self) -> (u32, u32, u32, u32) {
-        let operations = self.operations.read().await;
-        let total = operations.len() as u32;
-        let mut active = 0u32;
-        let mut completed = 0u32;
-        let mut failed = 0u32;
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for getting aggregate nonce",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
 
-        for operation_state in operations.values() {
-            match operation_state {
-                OperationState::Completed(_) => completed += 1,
-                OperationState::Failed(_) => failed += 1,
-                _ => active += 1,
-            }
-        }
+        let session_state = session_arc.lock().unwrap();
 
-        (total, active, completed, failed)
+        let aggregated_nonce = session_state
+            .musig_processor
+            .get_aggregate_nonce(&cmd.signing_session_id)
+            .map_err(|e| {
+                EnclaveError::NonceError(format!("Failed to get aggregate nonce: {}", e))
+            })?;
+
+        let serialized = aggregated_nonce.serialize();
+        let pubnonce = musig2::PubNonce::from_bytes(&serialized).map_err(|e| {
+            EnclaveError::NonceError(format!("Failed to convert AggNonce to PubNonce: {}", e))
+        })?;
+
+        debug!(
+            "✅ Aggregate nonce retrieved for session {}",
+            cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::AggregateNonce(
+            keymeld_core::enclave::AggregateNonceResponse {
+                signing_session_id: cmd.signing_session_id,
+                keygen_session_id: cmd.keygen_session_id,
+                aggregate_nonce: pubnonce,
+            },
+        ))
     }
 }
 
 impl Drop for EnclaveOperator {
     fn drop(&mut self) {
+        info!("🧹 Dropping EnclaveOperator and zeroizing sensitive data");
         self.private_key.zeroize();
-        info!(
-            "EnclaveOperator dropped and zeroized for enclave {}",
-            self.enclave_id
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_enclave_operator_creation() {
-        let enclave_id = EnclaveId::new(1);
-        let operator = EnclaveOperator::new(enclave_id).unwrap();
-        assert_eq!(operator.enclave_id, enclave_id);
-        assert!(!operator.get_public_key().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_enclave_status() {
-        let enclave_id = EnclaveId::new(1);
-        let operator = EnclaveOperator::new(enclave_id).unwrap();
-        let (id, ready, pubkey, sessions) = operator.get_status().await;
-
-        assert_eq!(id, enclave_id);
-        assert!(ready); // Always ready in dev mode
-        assert!(!pubkey.is_empty());
-        assert_eq!(sessions, 0);
-    }
-
-    #[tokio::test]
-    async fn test_session_management() {
-        let enclave_id = EnclaveId::new(1);
-        let operator = EnclaveOperator::new(enclave_id).unwrap();
-
-        let active_sessions = operator.get_active_sessions_count().await;
-        assert_eq!(active_sessions, 0);
-
-        let (total, active, completed, failed) = operator.get_session_stats().await;
-        assert_eq!((total, active, completed, failed), (0, 0, 0, 0));
-    }
-
-    #[tokio::test]
-    async fn test_session_coordinator_check() {
-        let enclave_id = EnclaveId::new(1);
-        let operator = EnclaveOperator::new(enclave_id).unwrap();
-        let session_id = SessionId::new_v7();
-
-        assert!(!operator.is_session_coordinator(&session_id).await);
     }
 }

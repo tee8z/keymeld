@@ -1,28 +1,23 @@
 use anyhow::{Context, Result};
 use config::Config;
+use keymeld_core::logging::{init_logging, LoggingConfig};
 use startup::Application;
 use std::env;
 use tracing::{info, warn};
-use tracing_subscriber::{fmt::layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod coordinator;
 mod database;
 mod errors;
 mod handlers;
+mod headers;
 mod metrics;
 mod middleware;
 mod startup;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "keymeld_gateway=debug,tower_http=debug".into()),
-        )
-        .with(layer())
-        .init();
+    init_logging(&LoggingConfig::gateway_default());
 
     info!(
         "Starting KeyMeld Gateway Service v{}",
@@ -36,6 +31,8 @@ async fn main() -> Result<()> {
             Some(ref path) => format!("Failed to load config from: {path}"),
             None => "Failed to load default config".to_string(),
         })?;
+
+    init_logging(&config.logging);
 
     let security_summary = config.security_summary();
     info!("Configuration loaded: {}", security_summary);

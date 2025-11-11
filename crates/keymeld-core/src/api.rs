@@ -1,11 +1,11 @@
 use crate::{
+    crypto::SecureCrypto,
     identifiers::{EnclaveId, SessionId, UserId},
-    session::AggregatePublicKey,
-    KeygenStatusKind, SigningStatusKind,
+    AggregatePublicKey, EncryptedData, KeyMeldError, KeygenStatusKind, SigningStatusKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
-
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -19,7 +19,6 @@ pub struct CreateKeygenSessionRequest {
     pub timeout_secs: u64,
     pub encrypted_session_secret: String,
     pub max_signing_sessions: Option<u32>,
-    /// Taproot tweaking configuration (defaults to unspendable taproot tweak)
     #[serde(default)]
     pub taproot_tweak_config: TaprootTweak,
 }
@@ -118,6 +117,12 @@ pub struct SigningSessionStatusResponse {
     pub expected_participants: usize,
     pub final_signature: Option<String>,
     pub expires_at: u64,
+    /// Participants that require explicit approval before signing can proceed
+    #[serde(default)]
+    pub participants_requiring_approval: Vec<UserId>,
+    /// Participants who have already provided their approval
+    #[serde(default)]
+    pub approved_participants: Vec<UserId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -228,10 +233,7 @@ pub struct ErrorResponse {
 }
 
 pub mod validation {
-    use crate::api::{CreateSigningSessionRequest, RegisterKeygenParticipantRequest};
-    use crate::{api::CreateKeygenSessionRequest, crypto::SecureCrypto};
-    use crate::{EncryptedData, KeyMeldError};
-    use serde_json;
+    use super::*;
 
     pub struct Validator;
 
@@ -346,20 +348,6 @@ pub mod validation {
         SecureCrypto::generate_registration_hmac(data, session_secret)
     }
 
-    pub fn validate_signing_approval_hmac(
-        signing_session_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
-        message_hash: &[u8],
-    ) -> Result<String, KeyMeldError> {
-        SecureCrypto::validate_signing_approval_hmac(
-            signing_session_id,
-            provided_hmac,
-            session_secret,
-            message_hash,
-        )
-    }
-
     pub fn validate_user_hmac(
         user_id: &str,
         user_hmac: &str,
@@ -406,7 +394,7 @@ pub mod validation {
             "Encrypted private key",
         )?;
         Validator::validate_vec_length(&request.public_key, Some(33), Some(65), "Public key")?;
-        Validator::validate_non_empty_string(&session_hmac, "Session HMAC")?;
+        Validator::validate_non_empty_string(session_hmac, "Session HMAC")?;
         Ok(())
     }
 
