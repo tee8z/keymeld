@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use concurrent_map::Minimum;
+
 #[cfg(feature = "enclave")]
 use alloc::{fmt, string::String, vec::Vec};
 
@@ -243,6 +245,10 @@ impl sqlx::Decode<'_, sqlx::Sqlite> for SessionId {
         let uuid = Uuid::from_slice(&bytes)?;
         Ok(SessionId(uuid))
     }
+}
+
+impl Minimum for SessionId {
+    const MIN: Self = SessionId(Uuid::nil());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]

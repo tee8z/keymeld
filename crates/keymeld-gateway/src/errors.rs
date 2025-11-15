@@ -24,6 +24,8 @@ pub enum ApiError {
     Serialization(String),
     #[error("Enclave communication error: {0}")]
     EnclaveCommunication(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 pub fn is_retryable_error(error: &KeyMeldError) -> bool {
@@ -65,6 +67,7 @@ impl ApiError {
             ApiError::Configuration(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Serialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::EnclaveCommunication(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -77,13 +80,17 @@ impl ApiError {
             ApiError::Configuration(_) => "configuration_error",
             ApiError::Serialization(_) => "serialization_error",
             ApiError::EnclaveCommunication(_) => "enclave_communication_error",
+            ApiError::Internal(_) => "internal_error",
         }
     }
 
     pub fn should_log_as_error(&self) -> bool {
         matches!(
             self,
-            ApiError::Database(_) | ApiError::Configuration(_) | ApiError::EnclaveCommunication(_)
+            ApiError::Database(_)
+                | ApiError::Configuration(_)
+                | ApiError::EnclaveCommunication(_)
+                | ApiError::Internal(_)
         ) || matches!(self, ApiError::KeyMeld(e) if !is_retryable_error(e))
     }
 
@@ -96,6 +103,7 @@ impl ApiError {
             ApiError::Configuration(_) => "Server configuration error".to_string(),
             ApiError::Serialization(_) => "Data serialization error".to_string(),
             ApiError::EnclaveCommunication(_) => "Enclave communication failed".to_string(),
+            ApiError::Internal(_) => "Internal server error".to_string(),
             ApiError::KeyMeld(e) => match e {
                 KeyMeldError::InvalidConfiguration(_) => {
                     "Invalid request configuration".to_string()

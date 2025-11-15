@@ -174,6 +174,7 @@ impl Coordinator {
 
                     let mut batch_processed_count = 0;
                     for session_record in sessions {
+                        let session_id = session_record.session_id.clone();
                         match self.advance_keygen_session(session_record).await {
                             Ok(advanced) => {
                                 if advanced {
@@ -182,7 +183,7 @@ impl Coordinator {
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to advance keygen session: {}", e);
+                                error!("Failed to advance keygen session {}: {}", session_id, e);
                                 self.metrics
                                     .record_session_error("keygen", "advance_failed");
                             }
@@ -212,7 +213,7 @@ impl Coordinator {
         timer.finish();
 
         if total_processed_count > 0 {
-            info!(
+            debug!(
                 "Processed {} keygen sessions across all batches",
                 total_processed_count
             );
@@ -298,7 +299,7 @@ impl Coordinator {
         timer.finish();
 
         if total_processed_count > 0 {
-            info!(
+            debug!(
                 "Processed {} signing sessions across all batches",
                 total_processed_count
             );
@@ -324,11 +325,6 @@ impl Coordinator {
                     "participants",
                     "total",
                     stats.total_participants as f64,
-                );
-
-                debug!(
-                    "Updated session metrics: {} total sessions, {} active sessions, {} participants",
-                    stats.total_sessions, stats.active_sessions, stats.total_participants
                 );
             }
             Err(e) => {
@@ -503,7 +499,7 @@ impl Coordinator {
                 }
             };
 
-        let current_state_name = format!("{:?}", current_status);
+        let current_state_name = current_status.as_ref().to_string();
 
         self.metrics.record_session_state_transition(
             "keygen",
@@ -514,7 +510,7 @@ impl Coordinator {
 
         match current_status.process(&self.enclave_manager).await {
             Ok(next_status) => {
-                let next_state_name = format!("{:?}", next_status);
+                let next_state_name = next_status.as_ref();
 
                 self.metrics.record_musig_operation("keygen_advance", true);
 
@@ -535,7 +531,7 @@ impl Coordinator {
                 self.metrics.record_session_state_transition(
                     "keygen",
                     &current_state_name,
-                    &next_state_name,
+                    next_state_name,
                     true,
                 );
 
@@ -595,7 +591,7 @@ impl Coordinator {
                 }
             };
 
-        let current_state_name = format!("{:?}", current_status);
+        let current_state_name = current_status.as_ref().to_string();
         self.metrics.record_session_state_transition(
             "signing",
             &current_state_name,
@@ -605,7 +601,7 @@ impl Coordinator {
 
         match current_status.process(&self.enclave_manager).await {
             Ok(next_status) => {
-                let next_state_name = format!("{:?}", next_status);
+                let next_state_name = next_status.as_ref();
 
                 self.metrics.record_musig_operation("signing_advance", true);
                 if let Err(e) = self
@@ -657,7 +653,7 @@ impl Coordinator {
                 self.metrics.record_session_state_transition(
                     "signing",
                     &current_state_name,
-                    &next_state_name,
+                    next_state_name,
                     true,
                 );
 

@@ -1,11 +1,8 @@
 use crate::{
     api::TaprootTweak,
     identifiers::{EnclaveId, SessionId, UserId},
-    session::{
-        types::{AggregatePublicKey, ParticipantData},
-        validation,
-    },
-    KeyMeldError,
+    session::{types::ParticipantData, validation},
+    AggregatePublicKey, KeyMeldError,
 };
 use musig2::secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};

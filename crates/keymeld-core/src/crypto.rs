@@ -102,9 +102,9 @@ impl SecureCrypto {
 
     pub fn generate_secure_seed() -> Result<[u8; 32], KeyMeldError> {
         let mut seed = [0u8; 32];
-        RandOsRng.try_fill_bytes(&mut seed).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to generate random seed: {e}"))
-        })?;
+        RandOsRng
+            .try_fill_bytes(&mut seed)
+            .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
         Ok(seed)
     }
 
@@ -113,9 +113,9 @@ impl SecureCrypto {
         user_id: &str,
     ) -> Result<[u8; 32], KeyMeldError> {
         let mut nonce_seed = [0u8; 32];
-        RandOsRng.try_fill_bytes(&mut nonce_seed).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to generate random nonce: {e}"))
-        })?;
+        RandOsRng
+            .try_fill_bytes(&mut nonce_seed)
+            .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
 
         let mut hasher = Sha256::new();
         hasher.update(nonce_seed);
@@ -124,7 +124,7 @@ impl SecureCrypto {
         hasher.update(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| KeyMeldError::CryptoError(format!("Time error: {e}")))?
+                .map_err(KeyMeldError::TimeError)?
                 .as_nanos()
                 .to_le_bytes(),
         );
@@ -149,13 +149,13 @@ impl SecureCrypto {
         let hk = Hkdf::<Sha256>::new(None, shared_secret.as_ref());
         let mut encryption_key = [0u8; 32];
         hk.expand(b"keymeld-ecies-encrypt", &mut encryption_key)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HKDF error: {e}")))?;
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&encryption_key));
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = cipher
             .encrypt(&nonce, plaintext)
-            .map_err(|e| KeyMeldError::CryptoError(format!("AES-GCM encryption error: {e}")))?;
+            .map_err(|e| KeyMeldError::EncryptionError(e.to_string()))?;
         let mut result = Vec::new();
         result.extend_from_slice(&ephemeral_public.serialize());
         result.extend_from_slice(&nonce);
@@ -173,8 +173,8 @@ impl SecureCrypto {
                 "Ciphertext too short".to_string(),
             ));
         }
-        let ephemeral_public = PublicKey::from_slice(&ciphertext[0..33])
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid ephemeral public key: {e}")))?;
+        let ephemeral_public =
+            PublicKey::from_slice(&ciphertext[0..33]).map_err(KeyMeldError::InvalidKey)?;
 
         let nonce = Nonce::from_slice(&ciphertext[33..45]);
         let actual_ciphertext = &ciphertext[45..];
@@ -182,12 +182,12 @@ impl SecureCrypto {
         let hk = Hkdf::<Sha256>::new(None, shared_secret.as_ref());
         let mut decryption_key = [0u8; 32];
         hk.expand(b"keymeld-ecies-encrypt", &mut decryption_key)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HKDF error: {e}")))?;
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&decryption_key));
         let plaintext = cipher
             .decrypt(nonce, actual_ciphertext)
-            .map_err(|e| KeyMeldError::CryptoError(format!("AES-GCM decryption error: {e}")))?;
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
 
         Ok(plaintext)
     }
@@ -196,11 +196,10 @@ impl SecureCrypto {
         public_key_hex: &str,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, KeyMeldError> {
-        let public_key_bytes = hex::decode(public_key_hex)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid public key hex: {e}")))?;
+        let public_key_bytes = hex::decode(public_key_hex).map_err(KeyMeldError::HexDecodeError)?;
 
-        let public_key = PublicKey::from_slice(&public_key_bytes)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid public key: {e}")))?;
+        let public_key =
+            PublicKey::from_slice(&public_key_bytes).map_err(KeyMeldError::InvalidKey)?;
 
         Self::ecies_encrypt(&public_key, plaintext)
     }
@@ -209,8 +208,8 @@ impl SecureCrypto {
         attestation_doc: &str,
         expected_pcr_measurements: &HashMap<String, String>,
     ) -> Result<String, KeyMeldError> {
-        let attestation_bytes = hex::decode(attestation_doc)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid base64 attestation: {e}")))?;
+        let attestation_bytes =
+            hex::decode(attestation_doc).map_err(KeyMeldError::HexDecodeError)?;
 
         let parsed_doc: serde_cbor::Value =
             serde_cbor::from_slice(&attestation_bytes).map_err(|e| {
@@ -298,7 +297,7 @@ impl SecureCrypto {
         let attestation_hex = hex::encode(&attestation_doc);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Time error: {}", e)))?
+            .map_err(KeyMeldError::TimeError)?
             .as_secs();
 
         Ok(AttestedPublicKey {
@@ -326,7 +325,7 @@ impl SecureCrypto {
 
         let mut key = [0u8; 32];
         hk.expand(b"session-secret-key", &mut key)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Key derivation failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
         Ok(key)
     }
@@ -414,7 +413,7 @@ impl SecureCrypto {
         let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
         let mut derived_key = [0u8; 32];
         hk.expand(context.as_bytes(), &mut derived_key)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HKDF expansion failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
         let key = Key::<Aes256Gcm>::from_slice(&derived_key);
         let cipher = Aes256Gcm::new(key);
@@ -422,7 +421,7 @@ impl SecureCrypto {
 
         let decrypted = cipher
             .decrypt(nonce_ref, ciphertext_bytes.as_ref())
-            .map_err(|e| KeyMeldError::CryptoError(format!("Decryption failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
 
         Ok(decrypted)
     }
@@ -481,7 +480,7 @@ impl SecureCrypto {
         let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
         let mut derived_key = [0u8; 32];
         hk.expand(context.as_bytes(), &mut derived_key)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HKDF expansion failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
         let key = Key::<Aes256Gcm>::from_slice(&derived_key);
         let cipher = Aes256Gcm::new(key);
@@ -489,7 +488,7 @@ impl SecureCrypto {
 
         let decrypted = cipher
             .decrypt(nonce_ref, ciphertext_bytes.as_ref())
-            .map_err(|e| KeyMeldError::CryptoError(format!("Decryption failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
 
         Ok(decrypted)
     }
@@ -506,11 +505,10 @@ impl SecureCrypto {
     ) -> Result<String, KeyMeldError> {
         type HmacSha256 = Hmac<Sha256>;
 
-        let secret_bytes = hex::decode(session_secret)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid session secret hex: {}", e)))?;
+        let secret_bytes = hex::decode(session_secret).map_err(KeyMeldError::HexDecodeError)?;
 
         let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&secret_bytes)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HMAC key init failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::HmacError(e.to_string()))?;
 
         mac.update(message_hash);
         let result = mac.finalize();
@@ -538,18 +536,15 @@ impl SecureCrypto {
         }
     }
 
-    /// Validates HMAC for session operations (keygen or signing)
     pub fn validate_session_hmac(
         session_id: &str,
         user_id: &str,
         provided_hmac: &str,
         session_secret: &str,
     ) -> Result<(), KeyMeldError> {
-        // Use consolidated method for keygen operations (no message data)
         Self::validate_consolidated_hmac(session_id, user_id, provided_hmac, session_secret, None)
     }
 
-    /// Validates HMAC for signing operations with message hash
     pub fn validate_signing_hmac(
         session_id: &str,
         user_id: &str,
@@ -557,7 +552,6 @@ impl SecureCrypto {
         session_secret: &str,
         message_hash: &[u8],
     ) -> Result<(), KeyMeldError> {
-        // Use consolidated method for signing operations (with message data)
         Self::validate_consolidated_hmac(
             session_id,
             user_id,
@@ -567,7 +561,6 @@ impl SecureCrypto {
         )
     }
 
-    /// Consolidated HMAC validation method that handles both keygen and signing operations
     pub fn validate_consolidated_hmac(
         session_id: &str,
         user_id: &str,
@@ -578,10 +571,8 @@ impl SecureCrypto {
         trace!("Validating consolidated HMAC");
 
         let (message_to_validate, hmac_value) = if let Some(msg_data) = message_data {
-            // For signing operations: use provided message hash directly, no nonce parsing
             (msg_data.to_vec(), provided_hmac)
         } else {
-            // For keygen operations: parse nonce:hmac format and reconstruct message
             let (nonce, hmac_val) = provided_hmac.split_once(':').ok_or_else(|| {
                 KeyMeldError::ValidationError(
                     "Invalid HMAC format, expected 'nonce:hmac'".to_string(),
@@ -604,15 +595,13 @@ impl SecureCrypto {
         }
     }
 
-    /// Internal helper to generate HMAC for raw data
     fn generate_hmac_for_data(data: &[u8], session_secret: &str) -> Result<String, KeyMeldError> {
         type HmacSha256 = Hmac<Sha256>;
 
-        let secret_bytes = hex::decode(session_secret)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Invalid session secret hex: {}", e)))?;
+        let secret_bytes = hex::decode(session_secret).map_err(KeyMeldError::HexDecodeError)?;
 
         let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&secret_bytes)
-            .map_err(|e| KeyMeldError::CryptoError(format!("HMAC key init failed: {}", e)))?;
+            .map_err(|e| KeyMeldError::HmacError(e.to_string()))?;
 
         mac.update(data);
         let result = mac.finalize();
@@ -620,12 +609,60 @@ impl SecureCrypto {
         Ok(hex::encode(result.into_bytes()))
     }
 
-    /// Generates HMAC for participant registration using session secret
     pub fn generate_registration_hmac(
         data: &str,
         session_secret: &str,
     ) -> Result<String, KeyMeldError> {
         Self::generate_hmac_for_data(data.as_bytes(), session_secret)
+    }
+
+    pub fn validate_user_hmac(
+        expected_user_id: &str,
+        user_hmac: &str,
+        user_public_key: &[u8],
+    ) -> Result<(), KeyMeldError> {
+        trace!("Validating user HMAC for user: {}", expected_user_id);
+        let parts: Vec<&str> = user_hmac.split(':').collect();
+        if parts.len() != 3 {
+            return Err(KeyMeldError::ValidationError(
+                "Invalid user HMAC format, expected 'user_id:nonce:hmac'".to_string(),
+            ));
+        }
+
+        let hmac_user_id = parts[0];
+        let nonce = parts[1];
+        let signature_hex = parts[2];
+        if hmac_user_id != expected_user_id {
+            return Err(KeyMeldError::ValidationError(
+                "User ID in HMAC does not match expected user ID".to_string(),
+            ));
+        }
+        if user_public_key.len() != 33 && user_public_key.len() != 65 {
+            return Err(KeyMeldError::ValidationError(
+                "Invalid public key length".to_string(),
+            ));
+        }
+        let signature_bytes = hex::decode(signature_hex)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {}", e)))?;
+        let message_to_verify = format!("{}:{}", hmac_user_id, nonce);
+        let message_hash = sha2::Sha256::digest(message_to_verify.as_bytes());
+        let public_key = secp256k1::PublicKey::from_slice(user_public_key)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {}", e)))?;
+        let signature =
+            secp256k1::ecdsa::Signature::from_compact(&signature_bytes).map_err(|e| {
+                KeyMeldError::ValidationError(format!("Invalid signature format: {}", e))
+            })?;
+        let message_hash_array: [u8; 32] = message_hash.into();
+        let message = secp256k1::Message::from_digest(message_hash_array);
+        signature.verify(message, &public_key).map_err(|e| {
+            KeyMeldError::ValidationError(format!("Signature verification failed: {}", e))
+        })?;
+
+        trace!(
+            "User HMAC signature verified for user: {}",
+            expected_user_id
+        );
+        Ok(())
     }
 }
 
@@ -681,10 +718,9 @@ mod tests {
         let secret2 = SecureCrypto::generate_session_secret().unwrap();
 
         assert_ne!(secret1, secret2);
-        assert_eq!(secret1.len(), 64); // 32 bytes hex encoded = 64 chars
+        assert_eq!(secret1.len(), 64);
         assert_eq!(secret2.len(), 64);
 
-        // Verify it's valid hex
         hex::decode(&secret1).expect("Generated secret should be valid hex");
         hex::decode(&secret2).expect("Generated secret should be valid hex");
     }
@@ -696,20 +732,16 @@ mod tests {
 
         let hmac = SecureCrypto::generate_message_hmac(&message_hash, &session_secret).unwrap();
 
-        // HMAC should be valid hex
         hex::decode(&hmac).expect("HMAC should be valid hex");
 
-        // Validation should succeed with correct HMAC
         assert!(SecureCrypto::validate_message_hmac(&message_hash, &hmac, &session_secret).is_ok());
 
-        // Validation should fail with wrong HMAC
         let wrong_hmac = "deadbeef";
         assert!(
             SecureCrypto::validate_message_hmac(&message_hash, wrong_hmac, &session_secret)
                 .is_err()
         );
 
-        // Validation should fail with wrong message
         let wrong_message = vec![6, 7, 8, 9, 10];
         assert!(
             SecureCrypto::validate_message_hmac(&wrong_message, &hmac, &session_secret).is_err()
@@ -721,15 +753,12 @@ mod tests {
         let session_secret = SecureCrypto::generate_session_secret().unwrap();
         let session_id = "test-session-123";
         let user_id = "test-user-456";
-        let nonce = "1234567890abcdef"; // Mock nonce for testing
+        let nonce = "1234567890abcdef";
 
-        // Generate expected HMAC with nonce format
         let data = format!("{}:{}:{}", session_id, user_id, nonce);
         let expected_hmac =
             SecureCrypto::generate_registration_hmac(&data, &session_secret).unwrap();
         let nonce_hmac_format = format!("{}:{}", nonce, expected_hmac);
-
-        // Validation should succeed with correct HMAC in nonce:hmac format
         assert!(SecureCrypto::validate_session_hmac(
             session_id,
             user_id,
@@ -738,7 +767,6 @@ mod tests {
         )
         .is_ok());
 
-        // Validation should fail with wrong HMAC
         let wrong_hmac = format!("{}:deadbeef", nonce);
         assert!(SecureCrypto::validate_session_hmac(
             session_id,
@@ -748,7 +776,6 @@ mod tests {
         )
         .is_err());
 
-        // Validation should fail with wrong session_id
         let wrong_session_id = "wrong-session-789";
         assert!(SecureCrypto::validate_session_hmac(
             wrong_session_id,
@@ -758,7 +785,6 @@ mod tests {
         )
         .is_err());
 
-        // Validation should fail with wrong user_id
         let wrong_user_id = "wrong-user-789";
         assert!(SecureCrypto::validate_session_hmac(
             session_id,
@@ -768,7 +794,6 @@ mod tests {
         )
         .is_err());
 
-        // Validation should fail with invalid format (no colon)
         assert!(SecureCrypto::validate_session_hmac(
             session_id,
             user_id,
@@ -784,14 +809,10 @@ mod tests {
         let data1 = "session1:user1";
         let data2 = "session2:user2";
 
-        // Generate HMACs for different data
         let hmac1 = SecureCrypto::generate_registration_hmac(data1, &session_secret).unwrap();
         let hmac2 = SecureCrypto::generate_registration_hmac(data2, &session_secret).unwrap();
 
-        // HMACs should be different for different data
         assert_ne!(hmac1, hmac2);
-
-        // HMAC should be deterministic for the same data
         let hmac1_again = SecureCrypto::generate_registration_hmac(data1, &session_secret).unwrap();
         assert_eq!(hmac1, hmac1_again);
 
@@ -996,8 +1017,12 @@ impl SessionSecret {
         Self { key: bytes }
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.key
+    }
+
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.key)
     }
 
     fn derive_key(&self, context: &str) -> Key<Aes256Gcm> {

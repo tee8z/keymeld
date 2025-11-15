@@ -13,5 +13,5 @@ pub use signing::{
     SigningGeneratingNonces, SigningGeneratingPartialSignatures, SigningSessionFull,
     SigningSessionStatus, SigningStatusKind,
 };
-pub use types::{AggregatePublicKey, ParticipantData};
+pub use types::ParticipantData;
 pub use validation::*;

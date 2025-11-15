@@ -1,140 +1,111 @@
-just start
-🐳 Starting KeyMeld services (development)...
-KEYMELD_ENV=dev docker compose up -d
-[+] Running 7/7
- ⠿ Network keymeld_keymeld-network  Created                                                                                                                         0.1s
- ⠿ Volume "keymeld_bitcoin-data"    Created                                                                                                                         0.0s
- ⠿ Container keymeld-enclave-2      Healthy                                                                                                                         5.8s
- ⠿ Container keymeld-enclave-1      Healthy                                                                                                                         5.3s
- ⠿ Container keymeld-bitcoin        Started                                                                                                                         0.4s
- ⠿ Container keymeld-enclave-0      Healthy                                                                                                                         5.8s
- ⠿ Container keymeld-gateway        Started                                                                                                                         6.0s
-⏳ Waiting for services to be ready...
-✅ Services started!
-just status
-🔍 Service Status:
-✅ KeyMeld Gateway (http://localhost:8080)
-Bitcoin Core: ✅ Running
-just setup-regtest
-⛏️ Setting up regtest environment...
-just mine 101
-⛏️ Mining 101 blocks to bcrt1qah3jsdmvldlm842urdwv6xgruwnpy926vflnda...
-✅ Mined 101 blocks (total: 101)
-✅ Regtest ready with 101 blocks
-just fund-coordinator
-💰 Setting up coordinator wallet in Bitcoin Core...
-📋 Creating coordinator wallet in Bitcoin Core...
-🔑 Coordinator address: bcrt1qvxtdcv7u526gz2zhm98j4d82rr08gqu5zjq3dk
-💾 Exporting coordinator master extended private key from Bitcoin Core...
-⛏️ Mining 101 blocks to coordinator address...
-✅ Coordinator wallet funded with mining rewards
-💾 Private key saved to: /tmp/keymeld-keys/coordinator_master.key
-🔑 Both Bitcoin Core and example will use the same private key
-just _demo-no-deps 50000
-🔐 Running KeyMeld demo on regtest
-   Amount: 50000 sats
-   Destination: bcrt1qjshlwpdd8lggug6cuazhgexcaz3mt84pccglyq
 Starting KeyMeld Example...
 Waiting for KeyMeld Gateway at http://gateway:8080...
 Gateway is ready!
 Starting KeyMeld example...
-2025-11-07T02:43:49.612942Z  INFO keymeld_example: Loaded configuration
-2025-11-07T02:43:49.613513Z  INFO keymeld_example: Setting up Bitcoin Core wallet for funding...
-2025-11-07T02:43:49.613522Z  INFO keymeld_example: ✅ Connected to Bitcoin Core keymeld_coordinator wallet
-2025-11-07T02:43:49.614383Z  INFO keymeld_example: ✅ Bitcoin Core keymeld_coordinator wallet balance: 5100 BTC BTC
-2025-11-07T02:43:49.614412Z  INFO keymeld_example: Loading coordinator private key from: /app/keys/coordinator_master.key
-2025-11-07T02:43:49.614426Z  INFO keymeld_example: Found extended private key (xprv) format from Bitcoin Core
-2025-11-07T02:43:49.620646Z  INFO keymeld_example: ✅ Using extended private key from Bitcoin Core with BIP86 derivation
-2025-11-07T02:43:49.620827Z  INFO keymeld_example: 🔑 Persistent Coordinator Address: bcrt1ppndy9ayzvltxzldya0m8dewdcrynjr8aa5gnax9v8g2sr8s8gj7ssrq7ex
-2025-11-07T02:43:49.620833Z  INFO keymeld_example: 💰 To fund coordinator manually: bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 generatetoaddress 101 bcrt1ppndy9ayzvltxzldya0m8dewdcrynjr8aa5gnax9v8g2sr8s8gj7ssrq7ex
-2025-11-07T02:43:49.667764Z  INFO keymeld_example: 🧪 KeyMeld End-to-End Test - Two-Phase Flow
-2025-11-07T02:43:49.667777Z  INFO keymeld_example: ============================================
-2025-11-07T02:43:49.667779Z  INFO keymeld_example: Network: regtest
-2025-11-07T02:43:49.667781Z  INFO keymeld_example: Gateway: http://gateway:8080
-2025-11-07T02:43:49.667783Z  INFO keymeld_example: Participants: 2
-2025-11-07T02:43:49.667785Z  INFO keymeld_example: Creating 2 participant wallets...
-2025-11-07T02:43:49.675335Z  INFO keymeld_example: Created participant (019a5c32-e123-7a33-95ec-07dd57dc296d): 028fccceb7bec45268d2de017ce04c0f3a7ea0fc83e8f07446edc0813932d925e0 (8fccceb7) - Address: bcrt1p0wykqa7m4ncgeu8arnvn96j7s6qgvdg59vwu2l0r92qlhrv6j8qql5r6k4
-2025-11-07T02:43:49.682618Z  INFO keymeld_example: Created participant (019a5c32-e12b-7451-a406-1fa2e974081e): 03562b7fe6de8824548fb6554d26739d0621eba16823d42580fe570c66c8bc1582 (562b7fe6) - Address: bcrt1p4z6vueczvpp7snkxkpxhtfjusrpxqrq4kstdu5am5qf4rg0e8lksthv65q
-2025-11-07T02:43:49.682625Z  INFO keymeld_example: 📤 Step 1: Funding coordinator's derived address from master wallet...
-2025-11-07T02:43:49.682760Z  INFO keymeld_example: 🔑 Coordinator derived address: bcrt1ppndy9ayzvltxzldya0m8dewdcrynjr8aa5gnax9v8g2sr8s8gj7ssrq7ex
-2025-11-07T02:43:49.682777Z  INFO keymeld_example: 💰 Sending 0.0011 BTC from master wallet to coordinator: bcrt1ppndy9ayzvltxzldya0m8dewdcrynjr8aa5gnax9v8g2sr8s8gj7ssrq7ex
-2025-11-07T02:43:49.722786Z  INFO keymeld_example: ✅ Funding transaction sent: dfd2216fd5f746941ea3fdfca5a30de78ca0f9cd3a89bf91e09449908ea35b1d
-2025-11-07T02:43:49.777553Z  INFO keymeld_example: ⛏️ Mined 6 blocks to confirm funding
-2025-11-07T02:43:49.777569Z  INFO keymeld_example: 🔄 Refreshing coordinator wallet state...
-2025-11-07T02:43:49.786179Z  INFO keymeld_example: ✅ Wallet state refreshed! Balance: 0.00110000 BTC sats
-2025-11-07T02:43:49.786190Z  INFO keymeld_example:    - Confirmed: 0 BTC sats
-2025-11-07T02:43:49.786193Z  INFO keymeld_example:    - Trusted pending: 0 BTC sats
-2025-11-07T02:43:49.786194Z  INFO keymeld_example:    - Untrusted pending: 0.00110000 BTC sats
-2025-11-07T02:43:49.786196Z  INFO keymeld_example:    - Immature: 0 BTC sats
-2025-11-07T02:43:49.786199Z  INFO keymeld_example: 🔑 Starting Phase 1: Keygen Session
-2025-11-07T02:43:49.786209Z  INFO keymeld_example: 🔑 Creating KeyMeld keygen session...
-2025-11-07T02:43:49.787489Z  INFO keymeld_example: Selected enclave enclave-0 with key epoch 1
-2025-11-07T02:43:49.788369Z  INFO keymeld_example: 🔐 Simulating out-of-band session secret sharing...
-2025-11-07T02:43:49.788377Z  INFO keymeld_example:    📋 Session ID: 019a5c32-e19b-7e93-ae73-885d3ebdf49d
-2025-11-07T02:43:49.788379Z  INFO keymeld_example:    🔑 Session Secret (first 10 chars): 4f4051c002...
-2025-11-07T02:43:49.788381Z  INFO keymeld_example:    ⚠️  In production, coordinator would securely share this secret with participants
-2025-11-07T02:43:49.788383Z  INFO keymeld_example:       through encrypted channels (Signal, PGP, secure email, in-person, etc.)
-2025-11-07T02:43:49.788384Z  INFO keymeld_example:    ⚠️  This secret enables participants to prove authorization for keygen participation
-2025-11-07T02:43:49.788389Z  INFO keymeld_example:    📤 [OUT-OF-BAND] Coordinator securely shares session secret with participant 1 (8fccceb7)
-2025-11-07T02:43:49.788391Z  INFO keymeld_example:       📱 Participant 1 receives and stores session secret securely
-2025-11-07T02:43:49.788393Z  INFO keymeld_example:    📤 [OUT-OF-BAND] Coordinator securely shares session secret with participant 2 (562b7fe6)
-2025-11-07T02:43:49.788395Z  INFO keymeld_example:       📱 Participant 2 receives and stores session secret securely
-2025-11-07T02:43:49.788397Z  INFO keymeld_example: ✅ Out-of-band session secret sharing simulation completed
-2025-11-07T02:43:49.788398Z  INFO keymeld_example:    🔒 All participants now have the shared secret for HMAC generation
-2025-11-07T02:43:49.788400Z  INFO keymeld_example: ✅ Keygen session 019a5c32-e19b-7e93-ae73-885d3ebdf49d created
-2025-11-07T02:43:49.788404Z  INFO keymeld_example: 👥 Registering participants for keygen session...
-2025-11-07T02:43:49.789104Z  INFO keymeld_example: Keygen session 019a5c32-e19b-7e93-ae73-885d3ebdf49d has 3 available slots
-2025-11-07T02:43:49.791603Z  INFO keymeld_example: ✅ Coordinator registered for keygen
-2025-11-07T02:43:49.793414Z  INFO keymeld_example: ✅ Participant 0 registered for keygen
-2025-11-07T02:43:49.795141Z  INFO keymeld_example: ✅ Participant 1 registered for keygen
-2025-11-07T02:43:49.795156Z  INFO keymeld_example: ✅ All participants registered for keygen
-2025-11-07T02:43:49.795159Z  INFO keymeld_example: ⏳ Waiting for keygen completion...
-2025-11-07T02:43:49.795670Z  INFO keymeld_example: Keygen still collecting participants...
-2025-11-07T02:43:51.799137Z  INFO keymeld_example: ✅ Keygen complete: 02a0867af85c5c01b5ad3629fc333bcbf728cb811d8fbe81f5cde2e1b12d69a994
-2025-11-07T02:43:51.799156Z  INFO keymeld_example: 💰 Step 2A: Funding aggregate key address (consolidation transaction)...
-2025-11-07T02:43:51.799183Z  INFO keymeld_example: 🏦 Aggregate key taproot address: bcrt1p5zr847zutsqmttfk987rxw7t7u5vhqga37lgrawdutsmzttf4x2q7xdwzh
-2025-11-07T02:43:51.803988Z  INFO keymeld_example: ✅ Consolidation transaction sent: f1cbe561ca4fc74b57ca00ee123a9b142b1415dce4fc63f097df3158a8269103
-2025-11-07T02:43:51.808137Z  INFO keymeld_example: ⛏️ Mined 6 blocks to confirm consolidation
-2025-11-07T02:43:51.808215Z  INFO keymeld_example: 📝 Step 2B: Creating transaction spending from aggregate key...
-2025-11-07T02:43:51.808224Z  INFO keymeld_example: Creating MuSig2 transaction: 50000 sats to bcrt1qjshlwpdd8lggug6cuazhgexcaz3mt84pccglyq
-2025-11-07T02:43:51.808229Z  INFO keymeld_example: Spending UTXO: f1cbe561ca4fc74b57ca00ee123a9b142b1415dce4fc63f097df3158a8269103:1 (60000 sats)
-2025-11-07T02:43:51.808245Z  INFO keymeld_example: ✅ Using KeyMeld's pre-tweaked MuSig2 aggregate key for Bitcoin compatibility
-2025-11-07T02:43:51.808251Z  INFO keymeld_example: ✅ Created MuSig2 transaction with 1 inputs and 2 outputs
-2025-11-07T02:43:51.808254Z  INFO keymeld_example: 🔐 This transaction will be signed using KeyMeld MuSig2
-2025-11-07T02:43:51.808257Z  INFO keymeld_example: ✍️ Starting Phase 2: Signing Session
-2025-11-07T02:43:51.808260Z  INFO keymeld_example: ✍️ Creating signing session...
-2025-11-07T02:43:51.811071Z  INFO keymeld_example: ✅ Signing session 019a5c32-e980-7f50-b9b9-15be058b628e created
-2025-11-07T02:43:51.811090Z  INFO keymeld_example: ⏳ Waiting for signing completion...
-2025-11-07T02:43:51.811884Z  INFO keymeld_example: Signing still collecting participants...
-2025-11-07T02:43:53.815326Z  INFO keymeld_example: Signing still collecting participants...
-2025-11-07T02:43:55.818091Z  INFO keymeld_example: Signing still collecting participants...
-2025-11-07T02:43:57.821528Z  INFO keymeld_example: Signing session full, waiting for processing...
-2025-11-07T02:43:59.825038Z  INFO keymeld_example: Signing session full, waiting for processing...
-2025-11-07T02:44:01.828366Z  INFO keymeld_example: Generating nonces...
-2025-11-07T02:44:03.830852Z  INFO keymeld_example: Generating nonces...
-2025-11-07T02:44:05.833882Z  INFO keymeld_example: Generating nonces...
-2025-11-07T02:44:07.836889Z  INFO keymeld_example: Collecting nonces...
-2025-11-07T02:44:09.846866Z  INFO keymeld_example: Collecting nonces...
-2025-11-07T02:44:11.850569Z  INFO keymeld_example: Aggregating nonces...
-2025-11-07T02:44:13.854035Z  INFO keymeld_example: Aggregating nonces...
-2025-11-07T02:44:15.861496Z  INFO keymeld_example: Aggregating nonces...
-2025-11-07T02:44:17.864174Z  INFO keymeld_example: Generating partial signatures...
-2025-11-07T02:44:19.867821Z  INFO keymeld_example: Generating partial signatures...
-2025-11-07T02:44:21.878541Z  INFO keymeld_example: Collecting partial signatures...
-2025-11-07T02:44:23.880793Z  INFO keymeld_example: Collecting partial signatures...
-2025-11-07T02:44:25.883043Z  INFO keymeld_example: Collecting partial signatures...
-2025-11-07T02:44:27.892595Z  INFO keymeld_example: Finalizing signature...
-2025-11-07T02:44:29.894722Z  INFO keymeld_example: Finalizing signature...
-2025-11-07T02:44:31.897218Z  INFO keymeld_example: 🔏 Applying MuSig2 signature to transaction...
-2025-11-07T02:44:31.897245Z  INFO keymeld_example: 📡 Broadcasting transaction: b0576b0a7340a5305983f8ce0f54b720927359cec06ff78f2b8e47f70ff9c0fe
-2025-11-07T02:44:31.914539Z  INFO keymeld_example: ✅ Transaction broadcast successfully: b0576b0a7340a5305983f8ce0f54b720927359cec06ff78f2b8e47f70ff9c0fe
+2025-11-15T17:50:21.877904Z  INFO keymeld_example: Loaded configuration
+2025-11-15T17:50:21.878426Z  INFO keymeld_example: Setting up Bitcoin Core wallet for funding...
+2025-11-15T17:50:21.878444Z  INFO keymeld_example: ✅ Connected to Bitcoin Core keymeld_coordinator wallet
+2025-11-15T17:50:21.878955Z  INFO keymeld_example: ✅ Bitcoin Core keymeld_coordinator wallet balance: 5100 BTC BTC
+2025-11-15T17:50:21.878985Z  INFO keymeld_example: Loading coordinator private key from: /app/keys/coordinator_master.key
+2025-11-15T17:50:21.879003Z  INFO keymeld_example: Found extended private key (xprv) format from Bitcoin Core
+2025-11-15T17:50:21.885824Z  INFO keymeld_example: ✅ Using extended private key from Bitcoin Core with BIP86 derivation
+2025-11-15T17:50:21.886028Z  INFO keymeld_example: 🔑 Persistent Coordinator Address: bcrt1pm6px2pz37ep4jmxzmkqky4xuedka2qca8zae32gy4xzm4f82cn9qwmdj4q
+2025-11-15T17:50:21.886035Z  INFO keymeld_example: 💰 To fund coordinator manually: bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 generatetoaddress 101 bcrt1pm6px2pz37ep4jmxzmkqky4xuedka2qca8zae32gy4xzm4f82cn9qwmdj4q
+2025-11-15T17:50:21.935094Z  INFO keymeld_example: 🧪 KeyMeld End-to-End Test - Two-Phase Flow
+2025-11-15T17:50:21.935106Z  INFO keymeld_example: ============================================
+2025-11-15T17:50:21.935108Z  INFO keymeld_example: Network: regtest
+2025-11-15T17:50:21.935110Z  INFO keymeld_example: Gateway: http://gateway:8080
+2025-11-15T17:50:21.935112Z  INFO keymeld_example: Participants: 2
+2025-11-15T17:50:21.935114Z  INFO keymeld_example: Creating 2 participant wallets...
+2025-11-15T17:50:21.943106Z  INFO keymeld_example: Created participant (019a88a3-b6ef-7cb1-8a80-2dccfafcf52e): 03145a965bf9262233cf0854e0f505120cd51ecfdd448aba84b7bb240ed10b5882 (145a965b) - Address: bcrt1paxqjjregp9l5pkv2047sgvny4h6prjncg5hsyktgg3jkseenszmq8ep8um
+2025-11-15T17:50:21.950937Z  INFO keymeld_example: Created participant (019a88a3-b6f7-7970-a2c8-01d284224335): 0254810c3e9b509ea393222164c4b66e10e15f5701751b8afb008dbb6a63f17ced (54810c3e) - Address: bcrt1p4d2h2akpqme87fv7uukrcx5zm800mf4vc4zmnycrq9hpr9q7fkfsqgy6py
+2025-11-15T17:50:21.950951Z  INFO keymeld_example: 📤 Step 1: Funding coordinator's derived address from master wallet...
+2025-11-15T17:50:21.951094Z  INFO keymeld_example: 🔑 Coordinator derived address: bcrt1pm6px2pz37ep4jmxzmkqky4xuedka2qca8zae32gy4xzm4f82cn9qwmdj4q
+2025-11-15T17:50:21.951103Z  INFO keymeld_example: 💰 Sending 0.00065 BTC from master wallet to coordinator: bcrt1pm6px2pz37ep4jmxzmkqky4xuedka2qca8zae32gy4xzm4f82cn9qwmdj4q
+2025-11-15T17:50:21.991008Z  INFO keymeld_example: ✅ Funding transaction sent: 3feb47ad9790ecf42ae64a79651e531adc6de7b15d78ba888b8c7c93ef4ef8f3
+2025-11-15T17:50:22.042681Z  INFO keymeld_example: ⛏️ Mined 6 blocks to confirm funding
+2025-11-15T17:50:22.042700Z  INFO keymeld_example: 🔄 Refreshing coordinator wallet state...
+2025-11-15T17:50:22.052182Z  INFO keymeld_example: ✅ Wallet state refreshed! Balance: 0.00065000 BTC sats
+2025-11-15T17:50:22.052194Z  INFO keymeld_example:    - Confirmed: 0 BTC sats
+2025-11-15T17:50:22.052197Z  INFO keymeld_example:    - Trusted pending: 0 BTC sats
+2025-11-15T17:50:22.052199Z  INFO keymeld_example:    - Untrusted pending: 0.00065000 BTC sats
+2025-11-15T17:50:22.052202Z  INFO keymeld_example:    - Immature: 0 BTC sats
+2025-11-15T17:50:22.052205Z  INFO keymeld_example: 🔑 Starting Phase 1: Keygen Session
+2025-11-15T17:50:22.052236Z  INFO keymeld_example: 🔑 Creating KeyMeld keygen session...
+2025-11-15T17:50:22.053666Z  INFO keymeld_example: Selected enclave enclave-0 with key epoch 1
+2025-11-15T17:50:22.056811Z  INFO keymeld_example: 🔐 Simulating out-of-band session secret sharing...
+2025-11-15T17:50:22.056828Z  INFO keymeld_example:    📋 Session ID: 019a88a3-b765-70f3-8e8d-43075be1328d
+2025-11-15T17:50:22.056832Z  INFO keymeld_example:    🔑 Session Secret (first 10 chars): 3548702105...
+2025-11-15T17:50:22.056836Z  INFO keymeld_example:    ⚠️  In production, coordinator would securely share this secret with participants
+2025-11-15T17:50:22.056840Z  INFO keymeld_example:       through encrypted channels (Signal, PGP, secure email, in-person, etc.)
+2025-11-15T17:50:22.056842Z  INFO keymeld_example:    ⚠️  This secret enables participants to prove authorization for keygen participation
+2025-11-15T17:50:22.056849Z  INFO keymeld_example:    📤 [OUT-OF-BAND] Coordinator securely shares session secret with participant 1 (145a965b)
+2025-11-15T17:50:22.056852Z  INFO keymeld_example:       📱 Participant 1 receives and stores session secret securely
+2025-11-15T17:50:22.056855Z  INFO keymeld_example:    📤 [OUT-OF-BAND] Coordinator securely shares session secret with participant 2 (54810c3e)
+2025-11-15T17:50:22.056857Z  INFO keymeld_example:       📱 Participant 2 receives and stores session secret securely
+2025-11-15T17:50:22.056860Z  INFO keymeld_example: ✅ Out-of-band session secret sharing simulation completed
+2025-11-15T17:50:22.056862Z  INFO keymeld_example:    🔒 All participants now have the shared secret for HMAC generation
+2025-11-15T17:50:22.056865Z  INFO keymeld_example: ✅ Keygen session 019a88a3-b765-70f3-8e8d-43075be1328d created
+2025-11-15T17:50:22.056869Z  INFO keymeld_example: 📋 Approval Configuration:
+2025-11-15T17:50:22.056872Z  INFO keymeld_example:    - Coordinator requires signing approval: YES
+2025-11-15T17:50:22.056874Z  INFO keymeld_example:    - Participant 0 requires signing approval: YES
+2025-11-15T17:50:22.056877Z  INFO keymeld_example:    - Other participants require signing approval: NO
+2025-11-15T17:50:22.056879Z  INFO keymeld_example: 👥 Registering participants for keygen session...
+2025-11-15T17:50:22.057663Z  INFO keymeld_example: Keygen session 019a88a3-b765-70f3-8e8d-43075be1328d has 3 available slots
+2025-11-15T17:50:22.057674Z  INFO keymeld_example: 📝 Registering coordinator...
+2025-11-15T17:50:22.060940Z  INFO keymeld_example: ✅ Coordinator registered for keygen
+2025-11-15T17:50:22.060959Z  INFO keymeld_example: 📝 Registering participant 0...
+2025-11-15T17:50:22.063980Z  INFO keymeld_example: ✅ Participant 0 registered for keygen: {"keygen_session_id":"019a88a3-b765-70f3-8e8d-43075be1328d","user_id":"019a88a3-b765-70f3-8e8d-4325010c2e16","status":"collecting_participants","participants_registered":2,"expected_participants":3,"signer_index":1,"assigned_enclave_id":1,"require_signing_approval":true}
+2025-11-15T17:50:22.063994Z  INFO keymeld_example: 📝 Registering participant 1...
+2025-11-15T17:50:22.066770Z  INFO keymeld_example: ✅ Participant 1 registered for keygen: {"keygen_session_id":"019a88a3-b765-70f3-8e8d-43075be1328d","user_id":"019a88a3-b765-70f3-8e8d-43340d57ce04","status":"collecting_participants","participants_registered":3,"expected_participants":3,"signer_index":2,"assigned_enclave_id":2,"require_signing_approval":false}
+2025-11-15T17:50:22.066784Z  INFO keymeld_example: ✅ All 3 participants registered for keygen
+2025-11-15T17:50:23.068326Z  INFO keymeld_example: 🔍 Verifying all participants are properly registered...
+2025-11-15T17:50:23.071365Z  INFO keymeld_example: 📊 Keygen session status: Completed
+2025-11-15T17:50:23.071377Z  INFO keymeld_example: 📊 Registered participants: 3
+2025-11-15T17:50:23.071380Z  INFO keymeld_example: 📊 Expected participants: 3
+2025-11-15T17:50:23.071383Z  INFO keymeld_example: ✅ All 3 participants properly registered
+2025-11-15T17:50:23.071386Z  INFO keymeld_example: ⏳ Waiting for keygen completion...
+2025-11-15T17:50:23.073213Z  INFO keymeld_example: ⏳ Keygen attempt 1/60 - Status: Completed, Registered: 3/3
+2025-11-15T17:50:23.073240Z  INFO keymeld_example: 🎉 Keygen completed successfully after 1 attempts
+2025-11-15T17:50:23.073244Z  INFO keymeld_example: ✅ Keygen complete: 02ba372db0f0146353b9ca9780816a562b67d8f90a0705e222816193d1338b5ca7
+2025-11-15T17:50:23.073248Z  INFO keymeld_example: 💰 Step 2A: Funding aggregate key address (consolidation transaction)...
+2025-11-15T17:50:23.073262Z  INFO keymeld_example: 🏦 Aggregate key taproot address: bcrt1phgmjmv8sz3348ww2j7qgz6jk9dna37g2quz7yg5pvxfazvuttjns72gscd
+2025-11-15T17:50:23.077205Z  INFO keymeld_example: ✅ Consolidation transaction sent: 6c37aaf25aebb5a260099e46e187ea299c78b5d4e6ca8787f5ce295dddd73436
+2025-11-15T17:50:23.081168Z  INFO keymeld_example: ⛏️ Mined 6 blocks to confirm consolidation
+2025-11-15T17:50:23.081288Z  INFO keymeld_example: 📝 Step 2B: Creating transaction spending from aggregate key...
+2025-11-15T17:50:23.081306Z  INFO keymeld_example: Creating MuSig2 transaction: 5000 sats to bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80
+2025-11-15T17:50:23.081318Z  INFO keymeld_example: Spending UTXO: 6c37aaf25aebb5a260099e46e187ea299c78b5d4e6ca8787f5ce295dddd73436:1 (15000 sats)
+2025-11-15T17:50:23.081348Z  INFO keymeld_example: ✅ Using KeyMeld's pre-tweaked MuSig2 aggregate key for Bitcoin compatibility
+2025-11-15T17:50:23.081363Z  INFO keymeld_example: ✅ Created MuSig2 transaction with 1 inputs and 2 outputs
+2025-11-15T17:50:23.081371Z  INFO keymeld_example: 🔐 This transaction will be signed using KeyMeld MuSig2
+2025-11-15T17:50:23.081380Z  INFO keymeld_example: ✍️ Starting Phase 2: Signing Session
+2025-11-15T17:50:23.081388Z  INFO keymeld_example: ✍️ Creating signing session...
+2025-11-15T17:50:23.084999Z  INFO keymeld_example: ✅ Signing session 019a88a3-bb69-7112-8dd0-0a63d0e55bd2 created
+2025-11-15T17:50:23.085021Z  INFO keymeld_example: 📋 Starting Phase 2a: Signing Approvals
+2025-11-15T17:50:23.085024Z  INFO keymeld_example: ⚠️  Participants requiring approval before signing can proceed:
+2025-11-15T17:50:23.085027Z  INFO keymeld_example:    - Coordinator: 019a88a3-b765-70f3-8e8d-4311ecac8aa3
+2025-11-15T17:50:23.085031Z  INFO keymeld_example:    - Participant 0: 019a88a3-b765-70f3-8e8d-4325010c2e16
+2025-11-15T17:50:23.085035Z  INFO keymeld_example: ✅ Approving signing session 019a88a3-bb69-7112-8dd0-0a63d0e55bd2 for user 019a88a3-b765-70f3-8e8d-4311ecac8aa3
+2025-11-15T17:50:23.087008Z  INFO keymeld_example: ✅ Signing session 019a88a3-bb69-7112-8dd0-0a63d0e55bd2 approved by user 019a88a3-b765-70f3-8e8d-4311ecac8aa3
+2025-11-15T17:50:23.087022Z  INFO keymeld_example: ✅ Approving signing session 019a88a3-bb69-7112-8dd0-0a63d0e55bd2 for user 019a88a3-b765-70f3-8e8d-4325010c2e16
+2025-11-15T17:50:23.088259Z  INFO keymeld_example: ✅ Signing session 019a88a3-bb69-7112-8dd0-0a63d0e55bd2 approved by user 019a88a3-b765-70f3-8e8d-4325010c2e16
+2025-11-15T17:50:23.088272Z  INFO keymeld_example: ✅ All required approvals completed - signing can now proceed
+2025-11-15T17:50:23.088274Z  INFO keymeld_example: ⏳ Waiting for signing completion...
+2025-11-15T17:50:23.089112Z  INFO keymeld_example: Signing still collecting participants...
+2025-11-15T17:50:25.092112Z  INFO keymeld_example: Generating nonces...
+2025-11-15T17:50:27.096128Z  INFO keymeld_example: Aggregating nonces...
+2025-11-15T17:50:29.099743Z  INFO keymeld_example: Collecting partial signatures...
+2025-11-15T17:50:31.103805Z  INFO keymeld_example: 🔏 Applying MuSig2 signature to transaction...
+2025-11-15T17:50:31.103833Z  INFO keymeld_example: 📡 Broadcasting transaction: 629fae2dfda9ec8f4a626ab65167bf15e68264e1fbfbb185a8238b53156a1660
+2025-11-15T17:50:31.149980Z  INFO keymeld_example: ✅ Transaction broadcast successfully: 629fae2dfda9ec8f4a626ab65167bf15e68264e1fbfbb185a8238b53156a1660
 
-🎉 Two-Phase KeyMeld Test Completed Successfully!
+🎉 Three-Phase KeyMeld Test Completed Successfully!
 ✅ Phase 1: Keygen session completed
-✅ Phase 2: Signing session completed (participants inherited from keygen)
-✅ Aggregate key: 02a0867af85c5c01b5ad3629fc333bcbf728cb811d8fbe81f5cde2e1b12d69a994
-✅ Transaction broadcast: b0576b0a7340a5305983f8ce0f54b720927359cec06ff78f2b8e47f70ff9c0fe
-📋 Keygen Session ID: 019a5c32-e19b-7e93-ae73-885d3ebdf49d
-📋 Signing Session ID: 019a5c32-e980-7f50-b9b9-15be058b628e
+✅ Phase 2a: Signing approvals completed (with HMAC authentication)
+✅ Phase 2b: Signing session completed (participants inherited from keygen)
+✅ Aggregate key: 02ba372db0f0146353b9ca9780816a562b67d8f90a0705e222816193d1338b5ca7
+✅ Transaction broadcast: 629fae2dfda9ec8f4a626ab65167bf15e68264e1fbfbb185a8238b53156a1660
+📋 Keygen Session ID: 019a88a3-b765-70f3-8e8d-43075be1328d
+📋 Signing Session ID: 019a88a3-bb69-7112-8dd0-0a63d0e55bd2
 
 ✅ KeyMeld end-to-end test completed successfully!

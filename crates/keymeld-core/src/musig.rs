@@ -1,5 +1,5 @@
 use musig2::{
-    secp256k1::{PublicKey, SecretKey},
+    secp256k1::{PublicKey, Scalar, SecretKey},
     AggNonce, FirstRound, KeyAggContext, PartialSignature, PubNonce, SecNonceSpices, SecondRound,
 };
 use serde::Serialize;
@@ -11,7 +11,7 @@ use std::{
     vec::Vec,
 };
 use thiserror::Error;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     api::TaprootTweak,
@@ -77,6 +77,7 @@ pub struct SessionMetadata {
     pub aggregate_nonce: Option<AggNonce>,
     pub phase: SessionPhase,
     pub participants_ready: BTreeSet<UserId>,
+    pub taproot_tweak: TaprootTweak,
 }
 
 impl SessionMetadata {
@@ -128,7 +129,7 @@ impl MusigProcessor {
         message: Vec<u8>,
         taproot_tweak: TaprootTweak,
         participants: Vec<PublicKey>,
-        _expected_participant_count: Option<usize>,
+        expected_participant_count: Option<usize>,
     ) -> Result<(), MusigError> {
         let key_agg_ctx = if participants.len() >= 2 {
             let mut key_agg_ctx = KeyAggContext::new(participants.clone()).map_err(|e| {
@@ -155,11 +156,12 @@ impl MusigProcessor {
             message: message.clone(),
             expected_participants: vec![], // Will be populated when users are added
             participant_public_keys: BTreeMap::new(), // Will be populated when participants are added
-            expected_participant_count: _expected_participant_count,
+            expected_participant_count,
             key_agg_ctx: key_agg_ctx.clone(),
             aggregate_nonce: None,
             phase: phase.clone(),
             participants_ready: BTreeSet::new(),
+            taproot_tweak,
         };
 
         self.session_metadata
@@ -232,16 +234,65 @@ impl MusigProcessor {
             key_agg_ctx = Self::apply_taproot_tweak(key_agg_ctx, &taproot_tweak_config)?;
 
             let session_meta = self.get_session_metadata_mut(session_id)?;
+            let current_phase = session_meta.phase.clone();
             session_meta.key_agg_ctx = Some(key_agg_ctx);
             session_meta.phase = SessionPhase::NonceGeneration;
 
+            info!(
+                "🔄 Session {} transitioned from {:?} to NonceGeneration phase with {} participants",
+                session_id, current_phase, participant_count
+            );
+        } else if expected_count == 0 {
+            warn!(
+                "Session {} has no expected participant count set, cannot transition to NonceGeneration",
+                session_id
+            );
+        } else {
+            let session_meta = self.get_session_metadata(session_id)?;
             debug!(
-                "Session {} transitioned to NonceGeneration phase with {} participants",
-                session_id, participant_count
+                "Session {} waiting for more participants: {}/{} (phase: {:?})",
+                session_id, participant_count, expected_count, session_meta.phase
             );
         }
 
         Ok(())
+    }
+
+    /// Check if session should transition to NonceGeneration phase and force transition if needed
+    pub fn check_and_force_phase_transition(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<bool, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+        let participant_count = session_meta.participant_public_keys.len();
+        let expected_count = session_meta.expected_participant_count.unwrap_or(0);
+
+        if session_meta.phase == SessionPhase::CollectingParticipants
+            && participant_count >= expected_count
+            && participant_count >= 2
+            && session_meta.key_agg_ctx.is_none()
+        {
+            info!(
+                "🔄 Force transitioning session {} to NonceGeneration phase ({} participants ready)",
+                session_id, participant_count
+            );
+
+            let all_public_keys: Vec<PublicKey> = session_meta.get_all_participants();
+            let mut key_agg_ctx = KeyAggContext::new(all_public_keys).map_err(|e| {
+                MusigError::Musig2Error(format!("Failed to create key agg context: {e}"))
+            })?;
+
+            // Apply taproot tweak using the stored configuration
+            key_agg_ctx = Self::apply_taproot_tweak(key_agg_ctx, &session_meta.taproot_tweak)?;
+
+            let session_meta = self.get_session_metadata_mut(session_id)?;
+            session_meta.key_agg_ctx = Some(key_agg_ctx);
+            session_meta.phase = SessionPhase::NonceGeneration;
+
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     pub fn generate_nonce(
@@ -258,22 +309,34 @@ impl MusigProcessor {
             session_id,
             user_id,
             signer_index,
-            session_meta.expected_participants.len(),
+            session_meta
+                .expected_participant_count
+                .unwrap_or(session_meta.expected_participants.len()),
             session_meta.key_agg_ctx.is_some()
         );
 
-        if session_meta.phase != SessionPhase::NonceGeneration {
+        let user_key = (session_id.clone(), user_id.clone());
+
+        // Allow nonce generation in both NonceGeneration and NonceAggregation phases
+        // This handles retry scenarios where session may have advanced but user hasn't generated nonce
+        if session_meta.phase != SessionPhase::NonceGeneration
+            && session_meta.phase != SessionPhase::NonceAggregation
+        {
             return Err(MusigError::WrongPhase(format!(
-                "Expected NonceGeneration, got {:?}",
+                "Expected NonceGeneration or NonceAggregation, got {:?}",
                 session_meta.phase
             )));
         }
 
-        let user_key = (session_id.clone(), user_id.clone());
-
-        // Check if user already has a session
-        if self.user_sessions.contains_key(&user_key) {
-            return Err(MusigError::NonceAlreadyExists(user_id.to_string()));
+        // Check if user already has a session with a nonce - if so, return the existing nonce
+        if let Some(user_session) = self.user_sessions.get(&user_key) {
+            if let Some(existing_nonce) = user_session.musig_session.nonces.get(user_id) {
+                debug!(
+                    "User {} already has nonce for session {}, returning existing",
+                    user_id, session_id
+                );
+                return Ok(existing_nonce.clone());
+            }
         }
 
         let secret_key = SecretKey::from_byte_array(
@@ -292,7 +355,9 @@ impl MusigProcessor {
             "Session {} creating FirstRound with signer_index={} for group of {} signers",
             session_id,
             signer_index,
-            session_meta.expected_participants.len()
+            session_meta
+                .expected_participant_count
+                .unwrap_or(session_meta.expected_participants.len())
         );
 
         // Create individual MuSig2 session for this user
@@ -330,7 +395,9 @@ impl MusigProcessor {
                 phase: SessionPhase::NonceGeneration,
                 first_round: Some(first_round),
                 second_round: None,
-                expected_participant_count: Some(session_meta.expected_participants.len()),
+                expected_participant_count: session_meta
+                    .expected_participant_count
+                    .or(Some(session_meta.expected_participants.len())),
             },
         };
 
@@ -353,29 +420,56 @@ impl MusigProcessor {
 
         let session_meta = self.get_session_metadata(session_id)?;
 
-        if session_meta.phase != SessionPhase::NonceGeneration {
+        // Allow nonce addition in both NonceGeneration and NonceAggregation phases
+        // This handles retry scenarios where session may have advanced but we're still receiving nonces
+        if session_meta.phase != SessionPhase::NonceGeneration
+            && session_meta.phase != SessionPhase::NonceAggregation
+        {
             return Err(MusigError::WrongPhase(format!(
-                "Expected NonceGeneration, got {:?}",
+                "Expected NonceGeneration or NonceAggregation, got {:?}",
                 session_meta.phase
             )));
         }
 
+        // Clone the phase to avoid borrowing issues
+        let current_phase = session_meta.phase.clone();
+
         trace!(
             "Before adding nonce - expected participants: {}",
-            session_meta.expected_participants.len()
+            session_meta
+                .expected_participant_count
+                .unwrap_or(session_meta.expected_participants.len())
         );
+
+        // Check if this nonce already exists to avoid duplicates
+        for ((sid, _uid), user_session) in self.user_sessions.iter() {
+            if sid == session_id {
+                if let Some(existing_nonce) = user_session.musig_session.nonces.get(user_id) {
+                    if existing_nonce.serialize() == nonce.serialize() {
+                        debug!(
+                            "Nonce for user {} already exists in session {}, skipping duplicate",
+                            user_id, session_id
+                        );
+                        return Ok(());
+                    }
+                }
+                break;
+            }
+        }
 
         // Add nonce to ALL user sessions in this session
         // This ensures all users have the complete nonce set
         let mut updated_sessions = 0;
         for ((sid, uid), user_session) in self.user_sessions.iter_mut() {
             if sid == session_id {
-                if let Some(ref mut first_round) = user_session.musig_session.first_round {
-                    first_round
-                        .receive_nonce(signer_index, nonce.clone())
-                        .map_err(|e| {
-                            MusigError::Musig2Error(format!("Failed to receive nonce: {e}"))
-                        })?;
+                if current_phase == SessionPhase::NonceGeneration {
+                    if let Some(ref mut first_round) = user_session.musig_session.first_round {
+                        first_round
+                            .receive_nonce(signer_index, nonce.clone())
+                            .map_err(|e| {
+                                MusigError::Musig2Error(format!("Failed to receive nonce: {e}"))
+                            })?;
+                    }
                 }
                 user_session
                     .musig_session
@@ -404,7 +498,9 @@ impl MusigProcessor {
 
     fn check_nonce_completion(&mut self, session_id: &SessionId) -> Result<(), MusigError> {
         let session_meta = self.get_session_metadata(session_id)?;
-        let expected_count = session_meta.expected_participants.len();
+        let expected_count = session_meta
+            .expected_participant_count
+            .unwrap_or(session_meta.expected_participants.len());
 
         trace!(
             "Checking nonce completion for session {} - expected {} participants",
@@ -501,6 +597,25 @@ impl MusigProcessor {
             user_session.musig_session.first_round.is_some()
         );
 
+        // Check if signature already exists (from previous attempt) - return existing signature
+        if user_session.musig_session.phase == SessionPhase::Signing {
+            if let Some(ref second_round) = user_session.musig_session.second_round {
+                debug!(
+                    "User {} already has a signature for session {}, returning existing signature",
+                    user_id, session_id
+                );
+                let partial_signature: PartialSignature = second_round.our_signature();
+                let signature_bytes = partial_signature.serialize().to_vec();
+                let nonce_bytes = user_session
+                    .musig_session
+                    .nonces
+                    .get(user_id)
+                    .map(|n| n.serialize().to_vec())
+                    .unwrap_or_else(Vec::new);
+                return Ok((signature_bytes, nonce_bytes));
+            }
+        }
+
         if user_session.musig_session.phase != SessionPhase::NonceAggregation {
             return Err(MusigError::WrongPhase(format!(
                 "Expected NonceAggregation, got {:?}",
@@ -517,11 +632,14 @@ impl MusigProcessor {
         .map_err(|_| MusigError::InvalidPrivateKey)?;
 
         // Each user has their own FirstRound - can finalize independently
-        let first_round = user_session
-            .musig_session
-            .first_round
-            .take()
-            .ok_or_else(|| MusigError::Musig2Error("No first round found".to_string()))?;
+        // Handle case where first_round was already taken in a previous attempt
+        let first_round = if let Some(first_round) = user_session.musig_session.first_round.take() {
+            first_round
+        } else {
+            return Err(MusigError::Musig2Error(
+                "No first round found - signature may have already been generated".to_string(),
+            ));
+        };
 
         if !first_round.is_complete() {
             return Err(MusigError::Musig2Error(
@@ -549,17 +667,6 @@ impl MusigProcessor {
             .unwrap_or_else(Vec::new);
 
         Ok((signature_bytes, nonce_bytes))
-    }
-
-    pub fn sign_for_aggregator(
-        &mut self,
-        session_id: &SessionId,
-        user_id: &UserId,
-        private_key: &KeyMaterial,
-        _aggregate_nonce: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), MusigError> {
-        // For multiple users per enclave, use the original sign method but handle it carefully
-        self.sign(session_id, user_id, private_key)
     }
 
     pub fn add_partial_signature(
@@ -671,10 +778,23 @@ impl MusigProcessor {
     }
 
     pub fn clear_session(&mut self, session_id: &SessionId) {
+        // Count sessions before clearing
+        let user_sessions_before = self.user_sessions.len();
+        let has_metadata_before = self.session_metadata.contains_key(session_id);
+
         // Remove all user sessions for this session
         self.user_sessions.retain(|(sid, _), _| sid != session_id);
+
         // Remove session metadata
-        self.session_metadata.remove(session_id);
+        let metadata_removed = self.session_metadata.remove(session_id).is_some();
+
+        let user_sessions_after = self.user_sessions.len();
+        let removed_user_sessions = user_sessions_before - user_sessions_after;
+
+        info!(
+            "🧹 MuSig clear_session {}: removed {} user sessions, metadata_existed={}, metadata_removed={}",
+            session_id, removed_user_sessions, has_metadata_before, metadata_removed
+        );
     }
 
     pub fn get_aggregate_pubkey(&self, session_id: &SessionId) -> Result<Vec<u8>, MusigError> {
@@ -712,7 +832,6 @@ impl MusigProcessor {
                 })
             }
             TaprootTweak::PlainTweak { tweak } => {
-                use musig2::secp256k1::Scalar;
                 let scalar = Scalar::from_be_bytes(*tweak).map_err(|e| {
                     MusigError::Musig2Error(format!("Invalid plain tweak scalar: {e}"))
                 })?;
@@ -721,7 +840,6 @@ impl MusigProcessor {
                 })
             }
             TaprootTweak::XOnlyTweak { tweak } => {
-                use musig2::secp256k1::Scalar;
                 let scalar = Scalar::from_be_bytes(*tweak).map_err(|e| {
                     MusigError::Musig2Error(format!("Invalid x-only tweak scalar: {e}"))
                 })?;
@@ -750,7 +868,9 @@ impl MusigProcessor {
         info!(
             "Initiated MuSig2 signing ceremony for session {} with {} participants",
             session_id,
-            session_meta.expected_participants.len()
+            session_meta
+                .expected_participant_count
+                .unwrap_or(session_meta.expected_participants.len())
         );
 
         Ok(())
@@ -764,7 +884,9 @@ impl MusigProcessor {
             let user_key = (session_id.clone(), first_user_id.clone());
             if let Some(user_session) = self.user_sessions.get(&user_key) {
                 return Ok(user_session.musig_session.nonces.len()
-                    == session_meta.expected_participants.len());
+                    == session_meta
+                        .expected_participant_count
+                        .unwrap_or(session_meta.expected_participants.len()));
             }
         }
 
@@ -792,7 +914,9 @@ impl MusigProcessor {
             let session_meta = self.get_session_metadata(session_id)?;
             return Err(MusigError::InsufficientParticipants(format!(
                 "Need {} partial signatures, not all collected yet",
-                session_meta.expected_participants.len()
+                session_meta
+                    .expected_participant_count
+                    .unwrap_or(session_meta.expected_participants.len())
             )));
         }
 
@@ -837,11 +961,15 @@ impl MusigProcessor {
             let user_key = (session_id.clone(), first_user_id.clone());
             if let Some(user_session) = self.user_sessions.get(&user_key) {
                 if user_session.musig_session.nonces.len()
-                    != session_meta.expected_participants.len()
+                    != session_meta
+                        .expected_participant_count
+                        .unwrap_or(session_meta.expected_participants.len())
                 {
                     return Err(MusigError::InsufficientParticipants(format!(
                         "Need {} nonces, got {}",
-                        session_meta.expected_participants.len(),
+                        session_meta
+                            .expected_participant_count
+                            .unwrap_or(session_meta.expected_participants.len()),
                         user_session.musig_session.nonces.len()
                     )));
                 }

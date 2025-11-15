@@ -1,9 +1,10 @@
 use crate::{
+    crypto::SecureCrypto,
     identifiers::{EnclaveId, SessionId, UserId},
-    session::AggregatePublicKey,
-    KeygenStatusKind, SigningStatusKind,
+    AggregatePublicKey, EncryptedData, KeyMeldError, KeygenStatusKind, SigningStatusKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
@@ -18,7 +19,6 @@ pub struct CreateKeygenSessionRequest {
     pub timeout_secs: u64,
     pub encrypted_session_secret: String,
     pub max_signing_sessions: Option<u32>,
-    /// Taproot tweaking configuration (defaults to unspendable taproot tweak)
     #[serde(default)]
     pub taproot_tweak_config: TaprootTweak,
 }
@@ -58,7 +58,8 @@ pub struct RegisterKeygenParticipantRequest {
     pub user_id: UserId,
     pub encrypted_private_key: String,
     pub public_key: Vec<u8>,
-    pub session_hmac: String,
+    #[serde(default)]
+    pub require_signing_approval: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -71,6 +72,8 @@ pub struct RegisterKeygenParticipantResponse {
     pub expected_participants: usize,
     pub signer_index: usize,
     pub assigned_enclave_id: EnclaveId,
+    #[serde(default)]
+    pub require_signing_approval: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -114,13 +117,12 @@ pub struct SigningSessionStatusResponse {
     pub expected_participants: usize,
     pub final_signature: Option<String>,
     pub expires_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct EnclaveAssignmentRequest {
-    pub user_id: UserId,
-    pub session_id: SessionId,
+    /// Participants that require explicit approval before signing can proceed
+    #[serde(default)]
+    pub participants_requiring_approval: Vec<UserId>,
+    /// Participants who have already provided their approval
+    #[serde(default)]
+    pub approved_participants: Vec<UserId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -144,34 +146,11 @@ pub struct AvailableUserSlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct GetAvailableSlotsRequest {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub struct GetAvailableSlotsResponse {
     pub session_id: SessionId,
     pub available_slots: Vec<AvailableUserSlot>,
     pub total_slots: usize,
     pub claimed_slots: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct ClaimUserSlotRequest {
-    pub session_id: SessionId,
-    pub user_id: UserId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct ClaimUserSlotResponse {
-    pub session_id: SessionId,
-    pub user_id: UserId,
-    pub enclave_id: EnclaveId,
-    pub signer_index: usize,
-    pub enclave_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -183,12 +162,6 @@ pub struct EnclavePublicKeyResponse {
     pub pcr_measurements: HashMap<String, String>,
     pub timestamp: u64,
     pub healthy: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct SetCoordinatorKeyRequest {
-    pub encrypted_private_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -211,14 +184,6 @@ pub struct ListEnclavesResponse {
     pub enclaves: Vec<EnclaveHealthResponse>,
     pub total_enclaves: u32,
     pub healthy_enclaves: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct SetCoordinatorKeyResponse {
-    pub session_id: SessionId,
-    pub status: String,
-    pub coordinator_enclave_id: EnclaveId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -268,9 +233,7 @@ pub struct ErrorResponse {
 }
 
 pub mod validation {
-    use crate::{api::CreateKeygenSessionRequest, crypto::SecureCrypto};
-    use crate::{EncryptedData, KeyMeldError};
-    use serde_json;
+    use super::*;
 
     pub struct Validator;
 
@@ -385,6 +348,14 @@ pub mod validation {
         SecureCrypto::generate_registration_hmac(data, session_secret)
     }
 
+    pub fn validate_user_hmac(
+        user_id: &str,
+        user_hmac: &str,
+        user_public_key: &[u8],
+    ) -> Result<(), KeyMeldError> {
+        SecureCrypto::validate_user_hmac(user_id, user_hmac, user_public_key)
+    }
+
     pub fn validate_create_keygen_session_request(
         request: &CreateKeygenSessionRequest,
     ) -> Result<(), KeyMeldError> {
@@ -415,19 +386,20 @@ pub mod validation {
     }
 
     pub fn validate_register_keygen_participant_request(
-        request: &crate::api::RegisterKeygenParticipantRequest,
+        request: &RegisterKeygenParticipantRequest,
+        session_hmac: &str,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_non_empty_string(
             &request.encrypted_private_key,
             "Encrypted private key",
         )?;
         Validator::validate_vec_length(&request.public_key, Some(33), Some(65), "Public key")?;
-        Validator::validate_non_empty_string(&request.session_hmac, "Session HMAC")?;
+        Validator::validate_non_empty_string(session_hmac, "Session HMAC")?;
         Ok(())
     }
 
     pub fn validate_create_signing_session_request(
-        request: &crate::api::CreateSigningSessionRequest,
+        request: &CreateSigningSessionRequest,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_vec_length(&request.message_hash, Some(32), Some(32), "Message hash")?;
         if let Some(encrypted_message) = &request.encrypted_message {

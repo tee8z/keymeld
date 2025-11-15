@@ -6,7 +6,7 @@ use crate::{
     },
     Advanceable, KeyMeldError,
 };
-use tracing::info;
+use tracing::{error, info};
 
 #[async_trait::async_trait]
 impl Advanceable<KeygenSessionStatus> for KeygenSessionStatus {
@@ -72,6 +72,7 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
             self.keygen_session_id
         );
 
+        let start_time = std::time::Instant::now();
         let aggregate_public_key = enclave_manager
             .orchestrate_keygen_session_initialization(
                 &self.keygen_session_id,
@@ -83,13 +84,18 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
             )
             .await
             .map_err(|e| {
+                let elapsed = start_time.elapsed();
+                error!(
+                    "Failed to initialize keygen session {} after {:?}: {}",
+                    self.keygen_session_id, elapsed, e
+                );
                 KeyMeldError::EnclaveError(format!("Failed to initialize keygen session: {}", e))
             })?;
 
         info!(
             "Session {} computed aggregate public key with {} bytes",
             self.keygen_session_id,
-            aggregate_public_key.key_bytes.len()
+            aggregate_public_key.len()
         );
 
         Ok(KeygenSessionStatus::Completed(

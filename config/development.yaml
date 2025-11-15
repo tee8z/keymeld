@@ -28,7 +28,7 @@ enclaves:
   enclave_timeout_secs: 30
   aws_region: "us-west-2"
 coordinator:
-  processing_interval_ms: 5000
+  processing_interval_ms: 1000
   batch_size: 100
   max_retries: 5
   processing_timeout_mins: 1

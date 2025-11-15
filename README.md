@@ -26,11 +26,22 @@ KeyMeld addresses these challenges by delegating the coordination complexity to 
 - **2-phase workflow**: Separates key generation from signing for better UX
 
 ### Security Trade-offs
-This approach requires sending encrypted private keys to enclaves, which involves security trade-offs:
+KeyMeld's approach involves several security trade-offs compared to purely local signing:
 
-- **Higher risk**: Any key movement increases compromise risk compared to local signing
-- **Enclave protection**: AWS Nitro Enclaves provide hardware-level isolation and attestation
-- **Ideal for hot wallets**: Best suited for scenarios requiring frequent multi-party transactions
+**Trade-off 1: Key Movement vs Convenience**
+- **Risk**: Sending encrypted private keys to remote enclaves increases attack surface compared to never moving keys
+- **Benefit**: Enables automated multi-party workflows without coordinating multiple devices/locations
+- **Mitigation**: ECIES encryption ensures keys are never transmitted in plaintext
+
+**Trade-off 2: Trust Model**
+- **Risk**: Must trust AWS Nitro Enclave hardware and attestation process
+- **Benefit**: Hardware-level isolation provides stronger guarantees than software-only solutions
+- **Best for**: Organizations comfortable with cloud HSM trust models
+
+**Trade-off 3: Operational Complexity vs Security**
+- **Risk**: More complex infrastructure compared to simple local signing
+- **Benefit**: Centralized coordination with distributed key custody
+- **Best for**: High-frequency multi-party transactions where coordination overhead matters
 
 ### Use Cases
 - **Corporate treasury management**: Multi-signature spending from company funds
@@ -91,14 +102,15 @@ After starting the keymeld-gateway locally, API documentation is available at:
 ### 2-Phase API Endpoints
 
 **Phase 1: Keygen**
-- `POST /api/v1/keygen` - Create keygen session
-- `GET /api/v1/keygen/{id}/slots` - Get available registration slots
-- `POST /api/v1/keygen/{id}/participants` - Register participants
-- `GET /api/v1/keygen/{id}/status` - Check keygen progress
+- `POST /api/v1/keygen` - Create keygen session *(no auth required)*
+- `GET /api/v1/keygen/{id}/slots` - Get available registration slots *(no auth required)*
+- `POST /api/v1/keygen/{id}/participants` - Register participants *(requires X-Session-HMAC)*
+- `GET /api/v1/keygen/{id}/status` - Check keygen progress *(requires X-Session-HMAC)*
 
 **Phase 2: Signing**
-- `POST /api/v1/signing` - Create signing session (inherits from keygen)
-- `GET /api/v1/signing/{id}/status` - Check signing progress
+- `POST /api/v1/signing` - Create signing session *(requires X-Session-HMAC)*
+- `POST /api/v1/signing/{id}` - Approve signing session as participant *(requires X-Signing-HMAC)*
+- `GET /api/v1/signing/{id}/status` - Check signing progress *(requires X-Signing-HMAC)*
 
 ### Taproot Configuration
 KeyMeld supports flexible taproot tweaking for Bitcoin compatibility:
@@ -134,10 +146,35 @@ All encrypted data values in the API use **hex encoding** for consistency:
 
 The hex string decodes to JSON containing the `EncryptedData` structure with the encrypted signature that can be decrypted using the session secret via `decrypt_signature_with_secret()`.
 
-### Authentication
+### Authentication & Approval Workflow
+
+**ECIES Encryption & Zero-Knowledge Security:**
 - ECIES encryption for private key security
 - Deterministic signer indexing for participant consistency
 - Zero-knowledge operation at gateway level
+
+**HMAC Header Requirements:**
+
+**X-Session-HMAC** (for keygen operations):
+- Format: `nonce:hmac`
+- Uses session secret obtained from keygen creation response
+- Required for participant registration, keygen status, and signing session creation
+
+**X-Signing-HMAC** (for signing operations):
+- Format: `user_id:nonce:signature`
+- `signature` is hex-encoded secp256k1 ECDSA signature over SHA256(`user_id:nonce`)
+- Signed with participant's private key from keygen session
+- Uses compact signature format (64 bytes → 128 hex characters)
+- Required for signing approval and signing status endpoints
+
+**Signing Approval Process:**
+Participants can optionally require explicit approval before their keys are used in signing sessions:
+
+1. **Keygen Registration:** Set `require_signing_approval: true` when registering as a participant
+2. **Signing Session Creation:** When a signing session is created, it will wait in `collecting_participants` status if any participants require approval
+3. **Signing Approval:** Each participant requiring approval must call `POST /api/v1/signing/{id}` with `X-Signing-HMAC` header
+4. **Automatic Progression:** Once all required approvals are received, signing proceeds automatically through the MuSig2 phases
+
 
 ## Commands
 
@@ -209,8 +246,17 @@ sequenceDiagram
     C->>G: CREATE SIGNING SESSION<br/>keygen_session_id + transaction
     G-->>C: signing_session_id (inherits participants)
 
+    alt Participants Require Approval
+        Note over P: Some participants set require_signing_approval=true
+        loop For each participant requiring approval
+            P->>G: POST /signing/{id} (with X-Signing-HMAC)
+            G-->>P: Approval recorded
+        end
+        Note over G: Wait until all required approvals received
+    end
+
     Note over G,E: Auto-advance: MuSig2 Signing
-    G->>E: GenerateNonces → CollectNonces → Sign
+    G->>E: SessionFull → GenerateNonces → CollectNonces → Sign
     E-->>G: Signature ready
 
     loop Until Complete
@@ -246,30 +292,37 @@ stateDiagram-v2
         end note
     }
 
-    KeygenCompleted --> SigningCollecting: CREATE SIGNING SESSION
+    KeygenCompleted --> CollectingParticipants: CREATE SIGNING SESSION
 
     state "PHASE 2: SIGNING" as Phase2 {
-        SigningCollecting --> SigningGeneratingNonces: Inherit participants from keygen
-        SigningGeneratingNonces --> SigningCollectingNonces: Auto-advance
-        SigningCollectingNonces --> SigningAggregatingNonces: All nonces collected
-        SigningAggregatingNonces --> SigningGeneratingSignatures: Auto-advance
-        SigningGeneratingSignatures --> SigningCollectingSignatures: Auto-advance
-        SigningCollectingSignatures --> SigningFinalizing: All signatures collected
-        SigningFinalizing --> SigningCompleted: Auto-advance
+        CollectingParticipants --> SessionFull: All participants ready + approvals received
+        SessionFull --> GeneratingNonces: Auto-advance
+        GeneratingNonces --> CollectingNonces: Auto-advance
+        CollectingNonces --> AggregatingNonces: All nonces collected
+        AggregatingNonces --> GeneratingPartialSignatures: Auto-advance
+        GeneratingPartialSignatures --> CollectingPartialSignatures: Auto-advance
+        CollectingPartialSignatures --> FinalizingSignature: All signatures collected
+        FinalizingSignature --> Completed: Auto-advance
 
-        note right of SigningCollecting
-            No re-registration needed
-            Same signer indices as keygen
-            Message hash provided
+        note right of CollectingParticipants
+            Inherit participants from keygen
+            Wait for approvals if required
+            Same signer indices preserved
         end note
 
-        note right of SigningCompleted
+        note right of SessionFull
+            All participants ready
+            Session initialized on enclaves
+            Begin MuSig2 workflow
+        end note
+
+        note right of Completed
             MuSig2 signature ready
             Apply to PSBT & broadcast
         end note
     }
 
-    SigningCompleted --> [*]
+    Completed --> [*]
 ```
 
 ### 3. Participant Inheritance & Signer Index Management

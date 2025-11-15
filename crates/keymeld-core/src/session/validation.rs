@@ -163,21 +163,16 @@ pub fn validate_user_id(user_id: &UserId) -> Result<(), KeyMeldError> {
 mod tests {
     use super::*;
     use crate::identifiers::{EnclaveId, SessionId, UserId};
-    use musig2::secp256k1::PublicKey;
+
     use std::time::Duration;
 
     fn create_test_participant(user_id: UserId, enclave_id: EnclaveId) -> ParticipantData {
         ParticipantData::new_with_epoch(
             user_id,
             enclave_id,
-            "encrypted_key".to_string(),
-            PublicKey::from_slice(&[
-                0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce,
-                0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81,
-                0x5b, 0x16, 0xf8, 0x17, 0x98,
-            ])
-            .unwrap(),
             1,
+            "{}".to_string(),            // session_encrypted_data
+            "encrypted_key".to_string(), // enclave_encrypted_data
         )
     }
 

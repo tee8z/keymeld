@@ -1,5 +1,7 @@
 use anyhow::Result;
-use keymeld_core::{EncryptedData, PartialSignature, PubNonce, SessionId, SessionSecret, UserId};
+use keymeld_core::{
+    encrypted_data::*, EncryptedData, PartialSignature, PubNonce, SessionId, SessionSecret, UserId,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,9 @@ pub struct OperationInitData {
     pub aggregate_public_key: Vec<u8>,
     pub is_coordinator: bool,
     pub coordinator_private_key: Option<Vec<u8>>,
+    // Structured encrypted data from database (decrypted)
+    pub session_encrypted_data: Option<SigningSessionData>,
+    pub enclave_encrypted_data: Option<SigningEnclaveData>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +37,9 @@ pub struct OperationInitialized {
     pub aggregate_public_key: Vec<u8>,
     pub is_coordinator: bool,
     pub coordinator_private_key: Option<Vec<u8>>,
+    // Structured encrypted data for future use
+    pub session_data: Option<SigningSessionData>,
+    pub enclave_data: Option<SigningEnclaveData>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,21 +85,24 @@ pub struct OperationFailed {
     pub error: String,
     pub failed_at: std::time::SystemTime,
 }
-
-impl OperationInitialized {
-    pub fn new(data: OperationInitData) -> Self {
+impl From<OperationInitData> for OperationInitialized {
+    fn from(value: OperationInitData) -> Self {
         Self {
-            session_id: data.session_id,
-            session_secret: data.session_secret,
-            message: data.message,
-            message_hash: data.message_hash,
-            participant_keys: data.participant_keys,
-            aggregate_public_key: data.aggregate_public_key,
-            is_coordinator: data.is_coordinator,
-            coordinator_private_key: data.coordinator_private_key,
+            session_id: value.session_id,
+            session_secret: value.session_secret,
+            message: value.message,
+            message_hash: value.message_hash,
+            participant_keys: value.participant_keys,
+            aggregate_public_key: value.aggregate_public_key,
+            is_coordinator: value.is_coordinator,
+            coordinator_private_key: value.coordinator_private_key,
+            session_data: value.session_encrypted_data,
+            enclave_data: value.enclave_encrypted_data,
         }
     }
+}
 
+impl OperationInitialized {
     pub fn start_collecting_nonces(
         self,
         first_user: UserId,
@@ -121,6 +132,10 @@ impl OperationInitialized {
             .ok_or(EnclaveError::CryptoError)?
             .encrypt(&self.aggregate_public_key, "aggregate_pubkey")
             .map_err(|_| EnclaveError::CryptoError)
+    }
+
+    pub fn get_session_data(&self) -> Option<&SigningSessionData> {
+        self.session_data.as_ref()
     }
 
     pub fn session_secret(&self) -> Option<&SessionSecret> {
@@ -336,6 +351,24 @@ impl OperationState {
             OperationState::Failed(_) => None,
         }
     }
+
+    pub fn get_coordinator_private_key(&self) -> Option<Vec<u8>> {
+        match self {
+            OperationState::Initialized(s) => s.coordinator_private_key.clone(),
+            OperationState::CollectingNonces(s) => s.coordinator_private_key.clone(),
+            OperationState::GeneratingSignatures(s) => s.coordinator_private_key.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn is_coordinator(&self) -> bool {
+        match self {
+            OperationState::Initialized(s) => s.is_coordinator,
+            OperationState::CollectingNonces(s) => s.is_coordinator,
+            OperationState::GeneratingSignatures(s) => s.is_coordinator,
+            _ => false,
+        }
+    }
 }
 
 impl From<OperationInitialized> for OperationState {
@@ -400,8 +433,13 @@ mod tests {
             aggregate_public_key: aggregate_key,
             is_coordinator: false,
             coordinator_private_key: None,
+            session_encrypted_data: Some(SigningSessionData::new()),
+            enclave_encrypted_data: Some(SigningEnclaveData::new(
+                "test_coordinator_key".to_string(),
+                "test_session_secret".to_string(),
+            )),
         };
-        let initialized = OperationInitialized::new(init_data);
+        let initialized: OperationInitialized = init_data.into();
 
         let mut processor = MusigProcessor::new();
         let user1 = UserId::new_v7();

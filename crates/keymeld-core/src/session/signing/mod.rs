@@ -2,8 +2,8 @@ use crate::{
     api::TaprootTweak,
     enclave::EnclaveManager,
     identifiers::{EnclaveId, SessionId, UserId},
-    session::types::{AggregatePublicKey, ParticipantData},
-    KeyMeldError,
+    session::types::ParticipantData,
+    AggregatePublicKey, KeyMeldError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 pub mod processing;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingParticipants {
     pub signing_session_id: SessionId,
@@ -28,14 +28,17 @@ pub struct SigningCollectingParticipants {
     pub expires_at: u64,
     pub required_enclave_epochs: BTreeMap<EnclaveId, u64>,
     pub taproot_tweak: Option<TaprootTweak>,
+    pub participants_requiring_approval: Vec<UserId>,
+    pub approved_participants: Vec<UserId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningSessionFull {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -52,10 +55,11 @@ impl From<SigningCollectingParticipants> for SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message_hash,
+            encrypted_message: collecting.encrypted_message.clone(),
+            message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
-            aggregate_public_key: None,
+            aggregate_public_key: None, // Will be set during processing
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
             encrypted_session_secret: collecting.encrypted_session_secret,
             created_at: collecting.created_at,
@@ -74,7 +78,8 @@ impl SigningSessionFull {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message_hash,
+            encrypted_message: collecting.encrypted_message.clone(),
+            message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: Some(aggregate_public_key),
@@ -88,12 +93,13 @@ impl SigningSessionFull {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningGeneratingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -109,7 +115,8 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
         Self {
             signing_session_id: full.signing_session_id,
             keygen_session_id: full.keygen_session_id,
-            message: full.message,
+            encrypted_message: full.encrypted_message,
+            message_hash: full.message_hash,
             expected_participants: full.expected_participants,
             registered_participants: full.registered_participants,
             aggregate_public_key: full.aggregate_public_key,
@@ -122,12 +129,13 @@ impl From<SigningSessionFull> for SigningGeneratingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -142,7 +150,8 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
         Self {
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
-            message: generating.message,
+            encrypted_message: generating.encrypted_message,
+            message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
             aggregate_public_key: generating.aggregate_public_key,
@@ -154,12 +163,13 @@ impl From<SigningGeneratingNonces> for SigningCollectingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningAggregatingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -174,7 +184,8 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message,
+            encrypted_message: collecting.encrypted_message,
+            message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: collecting.aggregate_public_key,
@@ -186,12 +197,13 @@ impl From<SigningCollectingNonces> for SigningAggregatingNonces {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningGeneratingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -210,7 +222,8 @@ impl SigningGeneratingPartialSignatures {
         Self {
             signing_session_id: aggregating.signing_session_id,
             keygen_session_id: aggregating.keygen_session_id,
-            message: aggregating.message,
+            encrypted_message: aggregating.encrypted_message,
+            message_hash: aggregating.message_hash,
             expected_participants: aggregating.expected_participants,
             registered_participants: aggregating.registered_participants,
             aggregate_public_key: aggregating.aggregate_public_key,
@@ -223,12 +236,13 @@ impl SigningGeneratingPartialSignatures {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingPartialSignatures {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -243,7 +257,8 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
         Self {
             signing_session_id: generating.signing_session_id,
             keygen_session_id: generating.keygen_session_id,
-            message: generating.message,
+            encrypted_message: generating.encrypted_message,
+            message_hash: generating.message_hash,
             expected_participants: generating.expected_participants,
             registered_participants: generating.registered_participants,
             aggregate_public_key: generating.aggregate_public_key,
@@ -255,12 +270,13 @@ impl From<SigningGeneratingPartialSignatures> for SigningCollectingPartialSignat
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningFinalizingSignature {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message: Vec<u8>,
+    pub encrypted_message: String,
+    pub message_hash: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -275,7 +291,8 @@ impl From<SigningCollectingPartialSignatures> for SigningFinalizingSignature {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            message: collecting.message,
+            encrypted_message: collecting.encrypted_message,
+            message_hash: collecting.message_hash,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: collecting.aggregate_public_key,
@@ -287,7 +304,7 @@ impl From<SigningCollectingPartialSignatures> for SigningFinalizingSignature {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCompleted {
     pub signing_session_id: SessionId,
@@ -322,7 +339,7 @@ impl SigningCompleted {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningFailed {
     pub signing_session_id: SessionId,
@@ -336,7 +353,7 @@ pub struct SigningFailed {
     pub inherited_enclave_epochs: BTreeMap<EnclaveId, u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "detail", rename_all = "snake_case")]
 pub enum SigningSessionStatus {
     CollectingParticipants(SigningCollectingParticipants),
@@ -352,63 +369,143 @@ pub enum SigningSessionStatus {
 }
 
 impl SigningSessionStatus {
-    pub fn extract_status_info(&self) -> (SigningStatusKind, usize, Option<String>, u64) {
+    pub fn get_encrypted_message(&self) -> Option<String> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::SessionFull(ref status) => Some(status.encrypted_message.clone()),
+            SigningSessionStatus::GeneratingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::CollectingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::AggregatingNonces(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::GeneratingPartialSignatures(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::CollectingPartialSignatures(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::FinalizingSignature(ref status) => {
+                Some(status.encrypted_message.clone())
+            }
+            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+        }
+    }
+
+    pub fn get_message_hash(&self) -> Option<&Vec<u8>> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::SessionFull(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::GeneratingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::CollectingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::AggregatingNonces(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::GeneratingPartialSignatures(ref status) => {
+                Some(&status.message_hash)
+            }
+            SigningSessionStatus::CollectingPartialSignatures(ref status) => {
+                Some(&status.message_hash)
+            }
+            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.message_hash),
+            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+        }
+    }
+
+    pub fn extract_status_info(
+        &self,
+    ) -> (
+        SigningStatusKind,
+        usize,
+        Option<String>,
+        u64,
+        Vec<UserId>,
+        Vec<UserId>,
+    ) {
         match self {
             SigningSessionStatus::CollectingParticipants(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                status.participants_requiring_approval.clone(),
+                status.approved_participants.clone(),
             ),
             SigningSessionStatus::SessionFull(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(), // No pending approvals in SessionFull
+                Vec::new(), // Approval data not tracked beyond CollectingParticipants
             ),
             SigningSessionStatus::GeneratingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::CollectingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::AggregatingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::GeneratingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::CollectingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::FinalizingSignature(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
             SigningSessionStatus::Completed(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 Some(status.final_signature.clone()),
                 status.expires_at,
+                Vec::new(),
+                Vec::new(),
             ),
-            SigningSessionStatus::Failed(_) => (SigningStatusKind::from(self), 0, None, 0),
+            SigningSessionStatus::Failed(_) => (
+                SigningStatusKind::from(self),
+                0,
+                None,
+                0,
+                Vec::new(),
+                Vec::new(),
+            ),
         }
     }
 

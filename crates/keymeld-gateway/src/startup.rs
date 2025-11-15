@@ -17,18 +17,21 @@ use axum::{
 use keymeld_core::{
     api::*,
     enclave::{EnclaveConfig, EnclaveManager},
+    resilience::{GatewayLimits, RetryConfig, TimeoutConfig},
 };
 
 use std::{io::Error as IoError, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::OpenApi;
 
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
+use tracing::Level;
 use tracing::{error, info, warn};
 
 fn suggest_port_conflict_resolution(addr: SocketAddr) {
@@ -107,9 +110,34 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
     ),
     servers(
         (url = "/api/v1", description = "KeyMeld Gateway API v1")
-    )
+    ),
+    security(
+        ("SessionHmac" = []),
+        ("SigningHmac" = [])
+    ),
+    modifiers(&SecurityAddon)
 )]
 struct ApiDoc;
+
+use utoipa::Modify;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "SessionHmac",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-HMAC"))),
+            );
+
+            components.add_security_scheme(
+                "SigningHmac",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Signing-HMAC"))),
+            );
+        }
+    }
+}
 
 pub struct Application {
     listener: TcpListener,
@@ -130,6 +158,7 @@ impl Application {
             db: db.clone(),
             enclave_manager: enclave_manager.clone(),
             metrics: metrics.clone(),
+            gateway_limits: GatewayLimits::default(),
         };
 
         let app = Self::build_router(app_state, &config);
@@ -153,7 +182,7 @@ impl Application {
             }
         };
 
-        let coordinator_config = config.coordinator.as_ref().map(|sc| sc.to_owned());
+        let coordinator_config = Some(config.coordinator.clone());
         let coordinator = Coordinator::new(
             Arc::new(db.clone()),
             enclave_manager.clone(),
@@ -171,7 +200,10 @@ impl Application {
     }
 
     pub async fn run_until_stopped(self) -> Result<(), IoError> {
-        let socket_addr = self.listener.local_addr().unwrap();
+        let socket_addr = self
+            .listener
+            .local_addr()
+            .map_err(|e| IoError::other(format!("Failed to get local address: {}", e)))?;
 
         let server = serve(
             self.listener,
@@ -211,7 +243,7 @@ impl Application {
                 Ok(())
             }
             Err(e) => {
-                error!("❌ Server error on {}: {}", socket_addr, e);
+                error!("Server error on {}: {}", socket_addr, e);
 
                 let _ = self.coordinator_shutdown.send(());
                 self.coordinator_handle.abort();
@@ -232,7 +264,16 @@ impl Application {
             })
             .collect();
 
-        let enclave_manager = Arc::new(EnclaveManager::new(enclave_configs));
+        // Create timeout and retry configs using From implementations
+        let timeout_config = TimeoutConfig::from(&config.enclaves);
+        let retry_config = RetryConfig::from(&config.enclaves);
+
+        let enclave_manager = Arc::new(EnclaveManager::new_with_config(
+            enclave_configs,
+            timeout_config,
+            retry_config,
+            config.enclaves.max_connections_per_enclave.unwrap_or(50) as usize,
+        )?);
 
         info!(
             "Configured enclave manager with {} total enclaves",
@@ -259,6 +300,10 @@ impl Application {
             )
             .route("/signing", post(handlers::create_signing_session))
             .route(
+                "/signing/{signing_session_id}",
+                post(handlers::approve_signing_session),
+            )
+            .route(
                 "/signing/{signing_session_id}/status",
                 get(handlers::get_signing_status),
             )
@@ -282,7 +327,12 @@ impl Application {
         let app = Router::new().nest("/api/v1", api_routes);
 
         let mut app = app
-            .layer(TraceLayer::new_for_http())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(DefaultMakeSpan::new().level(Level::DEBUG))
+                    .on_request(DefaultOnRequest::new().level(Level::DEBUG))
+                    .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
+            )
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 metrics_middleware,
@@ -343,9 +393,10 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use crate::config::{
-        DatabaseConfig, DevelopmentConfig, EnclaveConfig, EnclaveInfo, Environment, SecurityConfig,
-        ServerConfig,
+        CoordinatorConfig, DatabaseConfig, DevelopmentConfig, EnclaveConfig, EnclaveInfo,
+        Environment, SecurityConfig, ServerConfig,
     };
+    use keymeld_core::logging::LoggingConfig;
     use tempfile::TempDir;
 
     fn create_test_config() -> (Config, TempDir) {
@@ -383,10 +434,23 @@ mod tests {
                     },
                 ],
                 max_users_per_enclave: Some(50),
+                max_connections_per_enclave: Some(25),
                 enclave_timeout_secs: Some(30),
+                vsock_timeout_secs: None,
+                nonce_generation_timeout_secs: None,
+                session_init_timeout_secs: None,
+                signing_timeout_secs: None,
+                network_write_timeout_secs: None,
+                network_read_timeout_secs: None,
+                max_message_size_bytes: None,
+                connection_retry_delay_ms: None,
+                max_retry_attempts: None,
+                initial_retry_delay_ms: None,
+                max_retry_delay_ms: None,
+                retry_backoff_multiplier: None,
             },
-            coordinator: None,
-            logging: None,
+            coordinator: CoordinatorConfig::default(),
+            logging: LoggingConfig::default(),
             security: SecurityConfig::default(),
             development: Some(DevelopmentConfig::default()),
         };

@@ -25,7 +25,8 @@ enclaves:
       cid: 5
       port: 5002
   max_users_per_enclave: 50
-  enclave_timeout_secs: 30
+  enclave_timeout_secs: 600
+  vsock_timeout_secs: 600
   aws_region: "us-west-2"
 coordinator:
   processing_interval_ms: 100
