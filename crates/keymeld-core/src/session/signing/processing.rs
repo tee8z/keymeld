@@ -119,6 +119,7 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key),
             encrypted_session_secret: Some(encrypted_session_secret),
             taproot_tweak: self.taproot_tweak.clone().unwrap_or_default(),
+            encrypted_adaptor_configs: String::new(), // Will be retrieved from database structured data
         };
 
         enclave_manager
@@ -132,7 +133,7 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingParticipants {
             })?;
 
         info!(
-            "✅ Signing session {} initialized on all enclaves during SessionFull transition",
+            "Signing session {} initialized on all enclaves during SessionFull transition",
             self.signing_session_id
         );
 

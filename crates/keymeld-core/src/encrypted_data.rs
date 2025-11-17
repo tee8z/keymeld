@@ -65,6 +65,8 @@ impl KeygenParticipantEnclaveData {
 pub struct SigningSessionData {
     pub message: Option<String>,
     pub signed_message: Option<Vec<u8>>,
+    pub adaptor_configs: Option<String>,
+    pub adaptor_signatures: Option<String>,
 }
 
 impl SigningSessionData {
@@ -79,6 +81,16 @@ impl SigningSessionData {
 
     pub fn with_signed_message(mut self, signed_message: Vec<u8>) -> Self {
         self.signed_message = Some(signed_message);
+        self
+    }
+
+    pub fn with_adaptor_configs(mut self, adaptor_configs: String) -> Self {
+        self.adaptor_configs = Some(adaptor_configs);
+        self
+    }
+
+    pub fn with_adaptor_signatures(mut self, adaptor_signatures: String) -> Self {
+        self.adaptor_signatures = Some(adaptor_signatures);
         self
     }
 }
@@ -199,10 +211,14 @@ mod tests {
     fn test_signing_session_data_builder() {
         let data = SigningSessionData::new()
             .with_message("test message".to_string())
-            .with_signed_message(vec![9, 10, 11, 12]);
+            .with_signed_message(vec![9, 10, 11, 12])
+            .with_adaptor_configs("encrypted_configs".to_string())
+            .with_adaptor_signatures("encrypted_sigs".to_string());
 
         assert_eq!(data.message, Some("test message".to_string()));
         assert_eq!(data.signed_message, Some(vec![9, 10, 11, 12]));
+        assert_eq!(data.adaptor_configs, Some("encrypted_configs".to_string()));
+        assert_eq!(data.adaptor_signatures, Some("encrypted_sigs".to_string()));
     }
 
     #[test]

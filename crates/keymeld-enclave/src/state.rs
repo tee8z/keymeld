@@ -455,6 +455,7 @@ mod tests {
                 TaprootTweak::None,
                 vec![public_key1, public_key2],
                 Some(2),
+                None,
             )
             .unwrap();
 

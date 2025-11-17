@@ -7,7 +7,7 @@ use crate::{
 use keymeld_core::{
     enclave::EnclaveManager,
     session::{KeygenSessionStatus, KeygenStatusKind, SigningSessionStatus, SigningStatusKind},
-    Advanceable,
+    Advanceable, SessionId,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -642,11 +642,22 @@ impl Coordinator {
                                 // Continue processing other participants
                             } else {
                                 debug!(
-                                    "✅ Updated participant data for user {} in session {}",
+                                    "Updated participant data for user {} in session {}",
                                     user_id, session_id
                                 );
                             }
                         }
+                    }
+                }
+
+                // Check if session just completed and has adaptor configs to process
+                if next_state_name == "completed" {
+                    if let Err(e) = self.process_adaptor_signatures_if_needed(&session_id).await {
+                        warn!(
+                            "Failed to process adaptor signatures for completed session {}: {}",
+                            session_id, e
+                        );
+                        // Don't fail the entire session - adaptor signatures are optional
                     }
                 }
 
@@ -681,5 +692,73 @@ impl Coordinator {
                 Ok(false)
             }
         }
+    }
+
+    async fn process_adaptor_signatures_if_needed(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ApiError> {
+        // Retrieve structured data from database
+        let session_data = self
+            .db
+            .get_signing_session_structured_data(session_id)
+            .await?;
+
+        if let Some(data) = session_data {
+            if let Some(adaptor_configs) = &data.adaptor_configs {
+                if !adaptor_configs.is_empty() {
+                    info!(
+                        "Processing adaptor signatures for completed session {}",
+                        session_id
+                    );
+
+                    // Get participants for enclave orchestration
+                    let signing_status = self.db.get_signing_session_by_id(session_id).await?;
+                    let participants = if let Some(status) = signing_status {
+                        status
+                            .registered_participants()
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        return Ok(());
+                    };
+
+                    // Call enclave manager to orchestrate adaptor signature processing
+                    let encrypted_adaptor_signatures = match self
+                        .enclave_manager
+                        .orchestrate_adaptor_signature_processing(
+                            session_id,
+                            adaptor_configs,
+                            &participants,
+                        )
+                        .await
+                    {
+                        Ok(signatures) => {
+                            info!(
+                                "Successfully processed adaptor signatures for session {}",
+                                session_id
+                            );
+                            signatures
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to process adaptor signatures for session {}: {}",
+                                session_id, e
+                            );
+                            // Don't fail the session - adaptor signatures are optional
+                            String::new()
+                        }
+                    };
+
+                    // Update structured data with adaptor signature results
+                    let updated_data = data.with_adaptor_signatures(encrypted_adaptor_signatures);
+                    self.db
+                        .update_signing_session_structured_data(session_id, &updated_data)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }

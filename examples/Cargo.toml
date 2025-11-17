@@ -5,9 +5,20 @@ edition = "2021"
 authors = ["tee8z@protonmail.com"]
 description = "Examples for using KeyMeld with Bitcoin development kit"
 
+[lib]
+name = "keymeld_examples"
+path = "src/lib.rs"
+
 [[bin]]
 name = "keymeld_example"
 path = "src/keymeld_example.rs"
+
+[[bin]]
+name = "keymeld_adaptor_test"
+path = "src/keymeld_adaptor_test.rs"
+
+
+
 
 
 

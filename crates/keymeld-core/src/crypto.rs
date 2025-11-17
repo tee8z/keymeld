@@ -664,6 +664,140 @@ impl SecureCrypto {
         );
         Ok(())
     }
+
+    pub fn encrypt_adaptor_configs(
+        data: &[u8],
+        session_secret: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        Self::encrypt_with_context(data, session_secret, "adaptor_configs")
+    }
+
+    pub fn decrypt_adaptor_configs(
+        encrypted_data_json: &serde_json::Value,
+        session_secret: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_configs")
+    }
+
+    pub fn encrypt_adaptor_signatures(
+        data: &[u8],
+        session_secret: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        Self::encrypt_with_context(data, session_secret, "adaptor_signatures")
+    }
+
+    pub fn decrypt_adaptor_signatures(
+        encrypted_data_json: &serde_json::Value,
+        session_secret: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_signatures")
+    }
+
+    fn encrypt_with_context(
+        data: &[u8],
+        session_secret: &str,
+        context: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        let secret_bytes = hex::decode(session_secret).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {}", e))
+        })?;
+
+        if secret_bytes.len() != 32 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid session secret length".to_string(),
+            ));
+        }
+
+        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
+        let mut derived_key = [0u8; 32];
+        hk.expand(context.as_bytes(), &mut derived_key)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, data)
+            .map_err(|e| KeyMeldError::EncryptionError(e.to_string()))?;
+
+        Ok(EncryptedData {
+            ciphertext,
+            nonce: nonce.to_vec(),
+            context: context.to_string(),
+        })
+    }
+
+    fn decrypt_with_context(
+        encrypted_data_json: &serde_json::Value,
+        session_secret: &str,
+        expected_context: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        let ciphertext = encrypted_data_json
+            .get("ciphertext")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                KeyMeldError::CryptoError("Missing or invalid ciphertext".to_string())
+            })?;
+
+        let nonce = encrypted_data_json
+            .get("nonce")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| KeyMeldError::CryptoError("Missing or invalid nonce".to_string()))?;
+
+        let context = encrypted_data_json
+            .get("context")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| KeyMeldError::CryptoError("Missing or invalid context".to_string()))?;
+
+        if context != expected_context {
+            return Err(KeyMeldError::CryptoError(format!(
+                "Invalid context for decryption: expected {}, got {}",
+                expected_context, context
+            )));
+        }
+
+        let ciphertext_bytes: Vec<u8> = ciphertext
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as u8)
+            .collect();
+
+        let nonce_bytes: Vec<u8> = nonce
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as u8)
+            .collect();
+
+        if nonce_bytes.len() != 12 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid nonce length".to_string(),
+            ));
+        }
+
+        let secret_bytes = hex::decode(session_secret).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {}", e))
+        })?;
+
+        if secret_bytes.len() != 32 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid session secret length".to_string(),
+            ));
+        }
+
+        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
+        let mut derived_key = [0u8; 32];
+        hk.expand(context.as_bytes(), &mut derived_key)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
+        let cipher = Aes256Gcm::new(key);
+        let nonce_ref = Nonce::from_slice(&nonce_bytes);
+
+        let decrypted = cipher
+            .decrypt(nonce_ref, ciphertext_bytes.as_ref())
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
+
+        Ok(decrypted)
+    }
 }
 
 #[cfg(test)]
@@ -1017,6 +1151,16 @@ impl SessionSecret {
         Self { key: bytes }
     }
 
+    pub fn from_hex(hex_string: &str) -> Result<Self, anyhow::Error> {
+        let bytes = hex::decode(hex_string)?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!("Session secret must be 32 bytes"));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Ok(Self { key })
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.key
     }
@@ -1091,6 +1235,24 @@ impl SessionSecret {
 
     pub fn decrypt_signature(&self, encrypted: &EncryptedData) -> Result<Vec<u8>> {
         self.decrypt(encrypted, "signature")
+    }
+
+    pub fn encrypt_adaptor_signatures(
+        &self,
+        signatures: &[crate::musig::AdaptorSignatureResult],
+    ) -> Result<EncryptedData> {
+        let serialized = serde_json::to_vec(signatures)
+            .map_err(|e| anyhow!("Failed to serialize adaptor signatures: {}", e))?;
+        self.encrypt(&serialized, "adaptor_signatures")
+    }
+
+    pub fn decrypt_adaptor_signatures(
+        &self,
+        encrypted: &EncryptedData,
+    ) -> Result<Vec<crate::musig::AdaptorSignatureResult>> {
+        let decrypted = self.decrypt(encrypted, "adaptor_signatures")?;
+        serde_json::from_slice(&decrypted)
+            .map_err(|e| anyhow!("Failed to deserialize adaptor signatures: {}", e))
     }
 
     pub fn hash_message(message: &str) -> Vec<u8> {

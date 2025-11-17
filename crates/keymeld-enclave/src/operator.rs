@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use dashmap::DashMap;
+use hex;
 use hmac::{Hmac, Mac};
 use keymeld_core::{
     crypto::{SecureCrypto, SessionSecret},
@@ -52,6 +53,15 @@ pub struct SessionState {
     pub operation_state: OperationState,
     pub musig_processor: MusigProcessor,
     pub private_keys: BTreeMap<UserId, SecurePrivateKey>,
+}
+
+impl SessionState {
+    /// Get key material for a specific user
+    pub fn get_user_key_material(&self, user_id: &UserId) -> Option<KeyMaterial> {
+        self.private_keys
+            .get(user_id)
+            .map(|secure_key| KeyMaterial::new(secure_key.key.clone()))
+    }
 }
 
 pub struct EnclaveOperator {
@@ -225,6 +235,16 @@ impl EnclaveOperator {
                     message: "Session cleared".to_string(),
                 }))
             }
+            // NEW: Adaptor signature commands
+            EnclaveCommand::InitiateAdaptorSigning(cmd) => {
+                self.handle_initiate_adaptor_signing(cmd).await
+            }
+            EnclaveCommand::SignAdaptorPartialSignature(cmd) => {
+                self.handle_sign_adaptor_partial_signature(cmd).await
+            }
+            EnclaveCommand::ProcessAdaptorSignatures(cmd) => {
+                self.handle_process_adaptor_signatures(cmd).await
+            }
             EnclaveCommand::GetPublicInfo => {
                 let active_sessions_count = self.sessions.iter().count() as u32;
                 let attestation_document =
@@ -316,6 +336,7 @@ impl EnclaveOperator {
                 cmd.taproot_tweak,
                 Vec::new(),
                 Some(cmd.expected_participant_count),
+                None, // No adaptor configs for keygen sessions
             )
             .map_err(|e| {
                 EnclaveError::SessionInitializationFailed(format!(
@@ -491,6 +512,7 @@ impl EnclaveOperator {
                 cmd.taproot_tweak,
                 keygen_participants, // Use participants from completed keygen session
                 Some(cmd.expected_participant_count),
+                cmd.adaptor_configs, // Pass through adaptor configs from command
             )
             .map_err(|e| {
                 EnclaveError::SessionInitializationFailed(format!(
@@ -755,7 +777,7 @@ impl EnclaveOperator {
         } // Lock is released here
 
         info!(
-            "✅ Participant {} added to session {} successfully",
+            "Participant {} added to session {} successfully",
             cmd.user_id, session_id
         );
 
@@ -1093,7 +1115,7 @@ impl EnclaveOperator {
         let is_valid = expected_hmac == provided_hmac;
         if is_valid {
             debug!(
-                "✅ Keygen participant HMAC validation successful for session {} and user {}",
+                "Keygen participant HMAC validation successful for session {} and user {}",
                 cmd.keygen_session_id, cmd.user_id
             );
             Ok(EnclaveResponse::Success(SuccessResponse {
@@ -1101,7 +1123,7 @@ impl EnclaveOperator {
             }))
         } else {
             warn!(
-                "❌ Keygen participant HMAC validation failed for session {} and user {}",
+                "Keygen participant HMAC validation failed for session {} and user {}",
                 cmd.keygen_session_id, cmd.user_id
             );
             Ok(EnclaveResponse::Error(ErrorResponse {
@@ -1115,7 +1137,7 @@ impl EnclaveOperator {
     pub async fn clear_session(&self, session_id: SessionId) -> Result<(), EnclaveError> {
         let session_exists_before = self.sessions.contains_key(&session_id);
         info!(
-            "🗑️ Clearing session {} (exists_before={})",
+            "Clearing session {} (exists_before={})",
             session_id, session_exists_before
         );
 
@@ -1123,28 +1145,25 @@ impl EnclaveOperator {
         if let Some(session_arc) = self.sessions.get(&session_id) {
             if let Ok(mut session_state) = session_arc.lock() {
                 session_state.musig_processor.clear_session(&session_id);
-                info!(
-                    "🧹 Cleared MuSig processor state for session {}",
-                    session_id
-                );
+                info!("Cleared MuSig processor state for session {}", session_id);
             } else {
                 warn!(
-                    "❌ Failed to acquire lock for session {} during clearing",
+                    "Failed to acquire lock for session {} during clearing",
                     session_id
                 );
             }
         } else {
             info!(
-                "ℹ️ Session {} not found in sessions map during clear",
+                "Session {} not found in sessions map during clear",
                 session_id
             );
         }
 
         // Remove session from concurrent map - this is lock-free!
         if self.sessions.remove(&session_id).is_some() {
-            info!("✅ Session {} cleared successfully", session_id);
+            info!("Session {} cleared successfully", session_id);
         } else {
-            warn!("⚠️ Session {} was not found during clear", session_id);
+            warn!("Session {} was not found during clear", session_id);
         }
 
         Ok(())
@@ -1323,7 +1342,7 @@ impl EnclaveOperator {
         };
 
         debug!(
-            "✅ Nonce generated successfully for user {} in session {}",
+            "Nonce generated successfully for user {} in session {}",
             cmd.user_id, session_id
         );
 
@@ -1374,7 +1393,7 @@ impl EnclaveOperator {
             .map_err(|e| EnclaveError::NonceError(format!("Failed to add nonce: {}", e)))?;
 
         debug!(
-            "✅ Nonce added successfully for user {} in session {}",
+            "Nonce added successfully for user {} in session {}",
             cmd.user_id, cmd.signing_session_id
         );
 
@@ -1388,7 +1407,7 @@ impl EnclaveOperator {
         cmd: keymeld_core::enclave::ParitialSignatureCommand,
     ) -> Result<EnclaveResponse, EnclaveError> {
         trace!(
-            "✍️ Signing partial signature for session {} and user {}",
+            "Signing partial signature for session {} and user {}",
             cmd.signing_session_id,
             cmd.user_id
         );
@@ -1469,7 +1488,7 @@ impl EnclaveOperator {
         })?;
 
         debug!(
-            "✅ Partial signature generated for user {} in session {}",
+            "Partial signature generated for user {} in session {}",
             cmd.user_id, cmd.signing_session_id
         );
 
@@ -1523,7 +1542,7 @@ impl EnclaveOperator {
             })?;
 
         debug!(
-            "✅ Partial signature added successfully for session {}",
+            "Partial signature added successfully for session {}",
             cmd.signing_session_id
         );
 
@@ -1537,7 +1556,7 @@ impl EnclaveOperator {
         cmd: keymeld_core::enclave::GetAggregatePublicKeyCommand,
     ) -> Result<EnclaveResponse, EnclaveError> {
         trace!(
-            "🔑 Getting aggregate public key for session {}",
+            "Getting aggregate public key for session {}",
             cmd.keygen_session_id
         );
 
@@ -1576,7 +1595,7 @@ impl EnclaveOperator {
         let participant_count = session_state.private_keys.len();
 
         debug!(
-            "✅ Aggregate public key retrieved for session {} with {} participants",
+            "Aggregate public key retrieved for session {} with {} participants",
             cmd.keygen_session_id, participant_count
         );
 
@@ -1594,7 +1613,7 @@ impl EnclaveOperator {
         cmd: keymeld_core::enclave::FinalizeCommand,
     ) -> Result<EnclaveResponse, EnclaveError> {
         trace!(
-            "🔒 Finalizing signature for session {} (keygen: {})",
+            "Finalizing signature for session {} (keygen: {})",
             cmd.signing_session_id,
             cmd.keygen_session_id
         );
@@ -1639,7 +1658,7 @@ impl EnclaveOperator {
         };
 
         info!(
-            "✅ Signature finalized successfully for session {} with {} participants",
+            "Signature finalized successfully for session {} with {} participants",
             cmd.signing_session_id, participant_count
         );
 
@@ -1658,7 +1677,7 @@ impl EnclaveOperator {
         cmd: keymeld_core::enclave::GetAggregateNonceCommand,
     ) -> Result<EnclaveResponse, EnclaveError> {
         trace!(
-            "🎯 Getting aggregate nonce for session {}",
+            "Getting aggregate nonce for session {}",
             cmd.signing_session_id
         );
 
@@ -1689,7 +1708,7 @@ impl EnclaveOperator {
         })?;
 
         debug!(
-            "✅ Aggregate nonce retrieved for session {}",
+            "Aggregate nonce retrieved for session {}",
             cmd.signing_session_id
         );
 
@@ -1701,11 +1720,204 @@ impl EnclaveOperator {
             },
         ))
     }
+
+    // ========== ADAPTOR SIGNATURE HANDLERS ==========
+
+    async fn handle_initiate_adaptor_signing(
+        &self,
+        cmd: keymeld_core::enclave::InitiateAdaptorSigningCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        info!(
+            "Initiating adaptor signing for session {}",
+            cmd.signing_session_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for initiating adaptor signing",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().unwrap();
+
+        // Check if session has adaptor configurations
+        if !session_state
+            .musig_processor
+            .has_adaptor_configs(&cmd.signing_session_id)
+            .unwrap_or(false)
+        {
+            return Err(EnclaveError::InvalidRequest(
+                "No adaptor configurations found for session".to_string(),
+            ));
+        }
+
+        // Generate adaptor nonces to initiate the adaptor signing process
+        session_state
+            .musig_processor
+            .generate_adaptor_nonces(&cmd.signing_session_id)
+            .map_err(|e| {
+                EnclaveError::SigningError(format!("Failed to generate adaptor nonces: {}", e))
+            })?;
+
+        info!(
+            "Adaptor signing initiated for session {}",
+            cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::Success(
+            keymeld_core::enclave::SuccessResponse {
+                message: "Adaptor signing initiated".to_string(),
+            },
+        ))
+    }
+
+    async fn handle_sign_adaptor_partial_signature(
+        &self,
+        cmd: keymeld_core::enclave::SignAdaptorPartialSignatureCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        info!(
+            "Signing adaptor partial signature for session {} user {} adaptor {}",
+            cmd.signing_session_id, cmd.user_id, cmd.adaptor_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for adaptor partial signature",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().unwrap();
+
+        // Get the user's key material
+        let key_material = session_state
+            .get_user_key_material(&cmd.user_id)
+            .ok_or_else(|| {
+                EnclaveError::KeyError(format!("Key material not found for user {}", cmd.user_id))
+            })?;
+
+        // Generate partial adaptor signature
+        let partial_sig = session_state
+            .musig_processor
+            .sign_adaptor_for_user(
+                &cmd.signing_session_id,
+                &cmd.user_id,
+                &cmd.adaptor_id,
+                &key_material,
+            )
+            .map_err(|e| {
+                EnclaveError::SigningError(format!("Failed to sign adaptor partial: {}", e))
+            })?;
+
+        info!(
+            "Adaptor partial signature created for session {} user {} adaptor {}",
+            cmd.signing_session_id, cmd.user_id, cmd.adaptor_id
+        );
+
+        Ok(EnclaveResponse::AdaptorPartialSignature(
+            keymeld_core::enclave::AdaptorPartialSignatureResponse {
+                signing_session_id: cmd.signing_session_id,
+                user_id: cmd.user_id,
+                adaptor_id: cmd.adaptor_id,
+                partial_signature: hex::encode(partial_sig.serialize()),
+            },
+        ))
+    }
+
+    async fn handle_process_adaptor_signatures(
+        &self,
+        cmd: keymeld_core::enclave::ProcessAdaptorSignaturesCommand,
+    ) -> Result<EnclaveResponse, EnclaveError> {
+        info!(
+            "Processing adaptor signatures for session {}",
+            cmd.signing_session_id
+        );
+
+        let session_arc = self
+            .sessions
+            .get(&cmd.signing_session_id)
+            .map(|guard| guard.value().clone())
+            .ok_or_else(|| {
+                error!(
+                    "Session {} not found for processing adaptor signatures",
+                    cmd.signing_session_id
+                );
+                EnclaveError::SessionNotFound(cmd.signing_session_id.to_string())
+            })?;
+
+        let mut session_state = session_arc.lock().unwrap();
+
+        // Check if all adaptor signatures are ready
+        if !session_state
+            .musig_processor
+            .are_adaptor_signatures_ready(&cmd.signing_session_id)
+            .unwrap_or(false)
+        {
+            return Err(EnclaveError::InvalidRequest(
+                "Not all adaptor signatures are ready".to_string(),
+            ));
+        }
+
+        // Process all adaptor signatures
+        let adaptor_signatures = session_state
+            .musig_processor
+            .process_adaptor_signatures(&cmd.signing_session_id)
+            .map_err(|e| {
+                EnclaveError::SigningError(format!("Failed to process adaptor signatures: {}", e))
+            })?;
+
+        let encrypted_adaptor_signatures =
+            if let Some(session_secret) = session_state.operation_state.get_session_secret() {
+                let encrypted = session_secret
+                    .encrypt_adaptor_signatures(&adaptor_signatures)
+                    .map_err(|e| {
+                        EnclaveError::CryptographicError(format!(
+                            "Failed to encrypt adaptor signatures: {}",
+                            e
+                        ))
+                    })?;
+
+                encrypted.to_hex_json().map_err(|e| {
+                    EnclaveError::Internal(format!(
+                        "Failed to serialize encrypted adaptor signatures: {}",
+                        e
+                    ))
+                })?
+            } else {
+                serde_json::to_string(&adaptor_signatures).map_err(|e| {
+                    EnclaveError::Internal(format!("Failed to serialize adaptor signatures: {}", e))
+                })?
+            };
+
+        info!(
+            "Processed {} adaptor signatures for session {}",
+            adaptor_signatures.len(),
+            cmd.signing_session_id
+        );
+
+        Ok(EnclaveResponse::AdaptorSignatures(
+            keymeld_core::enclave::AdaptorSignaturesResponse {
+                signing_session_id: cmd.signing_session_id,
+                adaptor_signatures: encrypted_adaptor_signatures,
+            },
+        ))
+    }
 }
 
 impl Drop for EnclaveOperator {
     fn drop(&mut self) {
-        info!("🧹 Dropping EnclaveOperator and zeroizing sensitive data");
+        info!("Dropping EnclaveOperator and zeroizing sensitive data");
         self.private_key.zeroize();
     }
 }

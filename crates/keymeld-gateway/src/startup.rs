@@ -75,6 +75,9 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             CreateSigningSessionRequest,
             CreateSigningSessionResponse,
             SigningSessionStatusResponse,
+            keymeld_core::musig::AdaptorConfig,
+            keymeld_core::musig::AdaptorType,
+            keymeld_core::musig::AdaptorSignatureResult,
             EnclaveAssignmentResponse,
             EnclaveHealthResponse,
             EnclavePublicKeyResponse,
@@ -225,7 +228,7 @@ impl Application {
 
         match server.with_graceful_shutdown(shutdown_signal()).await {
             Ok(_) => {
-                info!("✅ Server on {} shut down gracefully", socket_addr);
+                info!("Server on {} shut down gracefully", socket_addr);
 
                 let _ = self.coordinator_shutdown.send(());
                 match timeout(Duration::from_secs(10), self.coordinator_handle).await {

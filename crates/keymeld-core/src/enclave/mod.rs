@@ -8,14 +8,16 @@ pub use client::VsockClient;
 pub use distribution::{EnclaveAssignmentManager, SessionAssignment};
 pub use manager::{EnclaveConfig, EnclaveInfo, EnclaveManager};
 pub use protocol::{
-    AddNonceCommand, AddPartialSignatureCommand, AddParticipantCommand,
-    AggregateKeyCompleteResponse, AggregateNonceResponse, AggregatePublicKeyResponse,
-    AttestationResponse, ClearSessionCommand, ConfigureCommand, EnclaveCommand, EnclaveError,
-    EnclaveResponse, ErrorResponse, FinalSignatureResponse, FinalizeCommand, GenerateNonceCommand,
-    GetAggregateNonceCommand, GetAggregatePublicKeyCommand, InitKeygenSessionCommand,
-    InitSigningSessionCommand, NonceResponse, ParitialSignatureCommand, PublicInfoResponse,
-    SessionHmacValidationResponse, ShareAggregateNonceCommand, SignatureResponse, SuccessResponse,
-    ValidateKeygenParticipantHmacCommand, ValidateSessionHmacCommand,
+    AdaptorPartialSignatureResponse, AdaptorSignaturesResponse, AddNonceCommand,
+    AddPartialSignatureCommand, AddParticipantCommand, AggregateKeyCompleteResponse,
+    AggregateNonceResponse, AggregatePublicKeyResponse, AttestationResponse, ClearSessionCommand,
+    ConfigureCommand, EnclaveCommand, EnclaveError, EnclaveResponse, ErrorResponse,
+    FinalSignatureResponse, FinalizeCommand, GenerateNonceCommand, GetAggregateNonceCommand,
+    GetAggregatePublicKeyCommand, InitKeygenSessionCommand, InitSigningSessionCommand,
+    InitiateAdaptorSigningCommand, NonceResponse, ParitialSignatureCommand,
+    ProcessAdaptorSignaturesCommand, PublicInfoResponse, SessionHmacValidationResponse,
+    ShareAggregateNonceCommand, SignAdaptorPartialSignatureCommand, SignatureResponse,
+    SuccessResponse, ValidateKeygenParticipantHmacCommand, ValidateSessionHmacCommand,
 };
 
 #[cfg(test)]

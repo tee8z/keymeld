@@ -424,6 +424,7 @@ impl SigningSessionStatus {
         u64,
         Vec<UserId>,
         Vec<UserId>,
+        String,
     ) {
         match self {
             SigningSessionStatus::CollectingParticipants(ref status) => (
@@ -433,14 +434,16 @@ impl SigningSessionStatus {
                 status.expires_at,
                 status.participants_requiring_approval.clone(),
                 status.approved_participants.clone(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::SessionFull(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
-                Vec::new(), // No pending approvals in SessionFull
-                Vec::new(), // Approval data not tracked beyond CollectingParticipants
+                Vec::new(),    // No pending approvals in SessionFull
+                Vec::new(),    // Approval data not tracked beyond CollectingParticipants
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::GeneratingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -449,6 +452,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::CollectingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -457,6 +461,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::AggregatingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -465,6 +470,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::GeneratingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
@@ -473,6 +479,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::CollectingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
@@ -481,6 +488,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::FinalizingSignature(ref status) => (
                 SigningStatusKind::from(self),
@@ -489,6 +497,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // No adaptor signatures yet
             ),
             SigningSessionStatus::Completed(ref status) => (
                 SigningStatusKind::from(self),
@@ -497,6 +506,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // Adaptor signatures now stored in database structured data
             ),
             SigningSessionStatus::Failed(_) => (
                 SigningStatusKind::from(self),
@@ -505,6 +515,7 @@ impl SigningSessionStatus {
                 0,
                 Vec::new(),
                 Vec::new(),
+                String::new(),
             ),
         }
     }

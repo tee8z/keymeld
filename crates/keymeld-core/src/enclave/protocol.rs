@@ -1,6 +1,7 @@
 use crate::{
     api::TaprootTweak,
     identifiers::{EnclaveId, SessionId, UserId},
+    musig::AdaptorConfig,
     KeyMeldError,
 };
 use musig2::{PartialSignature, PubNonce};
@@ -29,6 +30,10 @@ pub enum EnclaveCommand {
     DistributeSessionSecret(DistributeSessionSecretCommand),
     BatchDistributeSessionSecrets(BatchDistributeSessionSecretsCommand),
     GetPublicInfo,
+    // NEW: Adaptor signature commands
+    InitiateAdaptorSigning(InitiateAdaptorSigningCommand),
+    SignAdaptorPartialSignature(SignAdaptorPartialSignatureCommand),
+    ProcessAdaptorSignatures(ProcessAdaptorSignaturesCommand),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +53,9 @@ pub enum EnclaveResponse {
     KeygenInitialized(KeygenInitializedResponse),
     SessionSecret(SessionSecretResponse),
     Error(ErrorResponse),
+    // NEW: Adaptor signature responses
+    AdaptorPartialSignature(AdaptorPartialSignatureResponse),
+    AdaptorSignatures(AdaptorSignaturesResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +85,7 @@ pub struct InitSigningSessionCommand {
     pub timeout_secs: u64,
     pub taproot_tweak: TaprootTweak,
     pub expected_participant_count: usize,
+    pub adaptor_configs: Option<Vec<AdaptorConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,8 +301,43 @@ pub struct BatchSessionSecretsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSecretResponse {
-    pub keygen_session_id: SessionId,
     pub session_secret: String,
+    pub enclave_id: EnclaveId,
+}
+
+// NEW: Adaptor signature commands
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitiateAdaptorSigningCommand {
+    pub signing_session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignAdaptorPartialSignatureCommand {
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    pub adaptor_id: uuid::Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessAdaptorSignaturesCommand {
+    pub signing_session_id: SessionId,
+}
+
+// NEW: Adaptor signature responses
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptorPartialSignatureResponse {
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    pub adaptor_id: uuid::Uuid,
+    pub partial_signature: String, // Hex-encoded partial signature
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptorSignaturesResponse {
+    pub signing_session_id: SessionId,
+    pub adaptor_signatures: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +418,12 @@ pub enum EnclaveError {
     ValidationFailed(String),
     #[error("Operation failed: {0}")]
     OperationFailed(String),
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("Key error: {0}")]
+    KeyError(String),
+    #[error("Signing error: {0}")]
+    SigningError(String),
     #[error("KeyMeld error: {0}")]
     KeyMeldError(String),
     #[error("Invalid attestation: {0}")]

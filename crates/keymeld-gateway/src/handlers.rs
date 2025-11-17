@@ -253,7 +253,7 @@ pub async fn create_keygen_session(
             })?;
 
         info!(
-            "✅ Keygen session {} initialized on enclave {} (coordinator: {})",
+            "Keygen session {} initialized on enclave {} (coordinator: {})",
             request.keygen_session_id, enclave_id, is_coordinator
         );
     }
@@ -553,6 +553,31 @@ pub async fn create_signing_session(
 
     validate_create_signing_session_request(&request)
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {}", e)))?;
+
+    // Additional validation for encrypted adaptor configs if provided
+    if !request.encrypted_adaptor_configs.is_empty() {
+        // Validate that it's properly formatted JSON with required fields
+        match serde_json::from_str::<serde_json::Value>(&request.encrypted_adaptor_configs) {
+            Ok(value) => {
+                if !value.is_object() {
+                    return Err(ApiError::bad_request(
+                        "Encrypted adaptor configs must be a JSON object".to_string(),
+                    ));
+                }
+                // Check for required encrypted data fields
+                if value.get("ciphertext").is_none() || value.get("nonce").is_none() {
+                    return Err(ApiError::bad_request(
+                        "Encrypted adaptor configs missing required encryption fields".to_string(),
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(ApiError::bad_request(
+                    "Encrypted adaptor configs must be valid JSON".to_string(),
+                ));
+            }
+        }
+    }
 
     let encrypted_session_secret = state
         .db
@@ -863,7 +888,18 @@ pub async fn get_signing_status(
         expires_at,
         participants_requiring_approval,
         approved_participants,
+        _adaptor_signatures,
     ) = session_status.extract_status_info();
+
+    // Read adaptor signatures from database structured data
+    let adaptor_signatures = match state
+        .db
+        .get_signing_session_structured_data(&signing_session_id)
+        .await?
+    {
+        Some(session_data) => session_data.adaptor_signatures.unwrap_or_default(),
+        None => String::new(),
+    };
 
     let response = SigningSessionStatusResponse {
         signing_session_id,
@@ -875,6 +911,7 @@ pub async fn get_signing_status(
         expires_at,
         participants_requiring_approval,
         approved_participants,
+        adaptor_signatures,
     };
 
     Ok(Json(response))
@@ -1038,4 +1075,246 @@ pub async fn get_available_slots(
     };
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use keymeld_core::{
+        api::CreateSigningSessionRequest,
+        identifiers::SessionId,
+        musig::{AdaptorConfig, AdaptorType},
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn test_client_side_privacy_architecture() {
+        // Test that gateway only receives encrypted blobs, never plain text adaptor configs
+
+        // Simulate what a client would do: encrypt configs before sending
+        let adaptor_config = AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Single,
+            adaptor_points: vec![
+                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9".to_string(),
+            ],
+            hints: None,
+        };
+
+        // Test serialization of plain config (this happens CLIENT-SIDE only)
+        let json = serde_json::to_string(&adaptor_config).expect("Should serialize");
+        assert!(json.contains(&adaptor_config.adaptor_id.to_string()));
+        assert!(json.contains("Single"));
+
+        // Test deserialization
+        let deserialized: AdaptorConfig = serde_json::from_str(&json).expect("Should deserialize");
+        assert_eq!(deserialized.adaptor_id, adaptor_config.adaptor_id);
+        assert!(matches!(deserialized.adaptor_type, AdaptorType::Single));
+
+        // Test CreateSigningSessionRequest with encrypted adaptor configs (what gateway sees)
+        let request = CreateSigningSessionRequest {
+            signing_session_id: SessionId::new_v7(),
+            keygen_session_id: SessionId::new_v7(),
+            message_hash: vec![0u8; 32],
+            encrypted_message: Some("test_message".to_string()),
+            timeout_secs: 3600,
+            // Gateway only ever sees encrypted blobs - never plain text business logic
+            encrypted_adaptor_configs: serde_json::to_string(&serde_json::json!({
+                "ciphertext": "a1b2c3d4e5f6...encrypted_blob",
+                "nonce": "9f8e7d6c5b4a3210",
+                "context": "adaptor_configs"
+            }))
+            .unwrap(),
+        };
+
+        // Verify gateway cannot see business logic from encrypted request
+        let request_json = serde_json::to_string(&request).expect("Should serialize request");
+        assert!(request_json.contains("encrypted_adaptor_configs"));
+        assert!(request_json.contains("encrypted_blob"));
+        // Critical: Gateway never sees plain text business logic
+        assert!(!request_json.contains(&adaptor_config.adaptor_id.to_string()));
+        assert!(!request_json.contains("oracle"));
+    }
+
+    #[test]
+    fn test_empty_encrypted_adaptor_configs_default() {
+        // Test that empty encrypted_adaptor_configs work as expected
+        let request = CreateSigningSessionRequest {
+            signing_session_id: SessionId::new_v7(),
+            keygen_session_id: SessionId::new_v7(),
+            message_hash: vec![0u8; 32],
+            encrypted_message: None,
+            timeout_secs: 3600,
+            encrypted_adaptor_configs: String::new(),
+        };
+
+        assert!(request.encrypted_adaptor_configs.is_empty());
+
+        // Test serialization/deserialization with empty configs
+        let json = serde_json::to_string(&request).expect("Should serialize");
+        let deserialized: CreateSigningSessionRequest =
+            serde_json::from_str(&json).expect("Should deserialize");
+        assert!(deserialized.encrypted_adaptor_configs.is_empty());
+    }
+
+    #[test]
+    fn test_client_side_encryption_flow() {
+        // Test the CLIENT-SIDE encryption that happens BEFORE gateway interaction
+        use keymeld_core::api::validation::{
+            decrypt_adaptor_configs, encrypt_adaptor_configs_for_client,
+            validate_decrypted_adaptor_configs,
+        };
+
+        let session_secret = "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678";
+
+        // CLIENT creates adaptor configs (contains sensitive business logic)
+        let client_adaptor_configs = vec![
+            AdaptorConfig {
+                adaptor_id: Uuid::now_v7(),
+                adaptor_type: AdaptorType::Single,
+                adaptor_points: vec![
+                    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+                        .to_string(),
+                ],
+                hints: None,
+            },
+            AdaptorConfig {
+                adaptor_id: Uuid::now_v7(),
+                adaptor_type: AdaptorType::And,
+                adaptor_points: vec![
+                    "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659"
+                        .to_string(),
+                    "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66"
+                        .to_string(),
+                ],
+                hints: None,
+            },
+        ];
+
+        // CLIENT encrypts configs before sending to gateway (privacy preserved)
+        let encrypted = encrypt_adaptor_configs_for_client(&client_adaptor_configs, session_secret)
+            .expect("Client should encrypt adaptor configs");
+
+        // Verify encrypted blob structure (what gateway receives)
+        assert!(!encrypted.is_empty());
+        assert!(encrypted.contains("ciphertext"));
+        assert!(encrypted.contains("nonce"));
+        assert!(encrypted.contains("adaptor_configs"));
+
+        // CRITICAL: Verify gateway cannot see business logic (UUIDs are opaque)
+        assert!(!encrypted.contains(&client_adaptor_configs[0].adaptor_id.to_string()));
+        assert!(!encrypted.contains(&client_adaptor_configs[1].adaptor_id.to_string()));
+
+        // ENCLAVE decrypts configs (only enclaves have session secret)
+        let enclave_decrypted = decrypt_adaptor_configs(&encrypted, session_secret)
+            .expect("Enclave should decrypt adaptor configs");
+
+        // Verify enclave gets original configs
+        assert_eq!(enclave_decrypted.len(), 2);
+        assert_eq!(
+            enclave_decrypted[0].adaptor_id,
+            client_adaptor_configs[0].adaptor_id
+        );
+        assert_eq!(
+            enclave_decrypted[1].adaptor_id,
+            client_adaptor_configs[1].adaptor_id
+        );
+        assert!(matches!(
+            enclave_decrypted[0].adaptor_type,
+            AdaptorType::Single
+        ));
+        assert!(matches!(
+            enclave_decrypted[1].adaptor_type,
+            AdaptorType::And
+        ));
+
+        // ENCLAVE validates decrypted configs
+        validate_decrypted_adaptor_configs(&enclave_decrypted)
+            .expect("Decrypted configs should be valid");
+
+        // Test standard MuSig2 case (no adaptor configs)
+        let empty_encrypted = encrypt_adaptor_configs_for_client(&[], session_secret)
+            .expect("Should handle empty configs");
+        assert!(empty_encrypted.is_empty());
+
+        let empty_decrypted = decrypt_adaptor_configs(&empty_encrypted, session_secret)
+            .expect("Should decrypt empty configs");
+        assert!(empty_decrypted.is_empty());
+    }
+
+    #[test]
+    fn test_zero_knowledge_privacy_guarantees() {
+        // Test that KeyMeld provides true zero-knowledge privacy for Bitcoin smart contracts
+        use keymeld_core::api::validation::encrypt_adaptor_configs_for_client;
+
+        let session_secret = "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678";
+
+        // CLIENT-SIDE: Different contract types with sensitive business logic
+        let weather_betting_config = vec![AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Single,
+            adaptor_points: vec![
+                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9".to_string(),
+            ],
+            hints: None,
+        }];
+
+        let corporate_payment_config = vec![AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::And,
+            adaptor_points: vec![
+                "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
+                "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
+            ],
+            hints: None,
+        }];
+
+        let defi_atomic_swap_config = vec![AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Or,
+            adaptor_points: vec![
+                "02abc123def456789012345678901234567890123456789012345678901234567890".to_string(),
+                "03def456789012345678901234567890123456789012345678901234567890123abc".to_string(),
+            ],
+            hints: Some(vec![
+                "swap_completion_hint".to_string(),
+                "timeout_refund_hint".to_string(),
+            ]),
+        }];
+
+        // CLIENT encrypts all configs before sending to gateway
+        let encrypted_weather =
+            encrypt_adaptor_configs_for_client(&weather_betting_config, session_secret)
+                .expect("Should encrypt weather config");
+        let encrypted_payment =
+            encrypt_adaptor_configs_for_client(&corporate_payment_config, session_secret)
+                .expect("Should encrypt payment config");
+        let encrypted_defi =
+            encrypt_adaptor_configs_for_client(&defi_atomic_swap_config, session_secret)
+                .expect("Should encrypt DeFi config");
+
+        // ZERO-KNOWLEDGE VERIFICATION: Gateway cannot see any adaptor IDs (only encrypted UUIDs)
+        assert!(!encrypted_weather.contains(&weather_betting_config[0].adaptor_id.to_string()));
+        assert!(!encrypted_payment.contains(&corporate_payment_config[0].adaptor_id.to_string()));
+        assert!(!encrypted_defi.contains(&defi_atomic_swap_config[0].adaptor_id.to_string()));
+
+        // PRIVACY VERIFICATION: All encrypted blobs are valid JSON but opaque
+        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_weather).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_payment).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_defi).is_ok());
+
+        // UNIQUENESS VERIFICATION: Each encryption produces different ciphertext
+        assert_ne!(encrypted_weather, encrypted_payment);
+        assert_ne!(encrypted_payment, encrypted_defi);
+        assert_ne!(encrypted_weather, encrypted_defi);
+
+        // STRUCTURE VERIFICATION: All contain required encrypted data structure
+        for encrypted in [&encrypted_weather, &encrypted_payment, &encrypted_defi] {
+            assert!(encrypted.contains("ciphertext"));
+            assert!(encrypted.contains("nonce"));
+            assert!(encrypted.contains("adaptor_configs"));
+        }
+
+        println!("Zero-knowledge privacy verified: Gateway remains blind to all contract details");
+    }
 }

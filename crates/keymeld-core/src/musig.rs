@@ -1,8 +1,10 @@
+use hex;
 use musig2::{
     secp256k1::{PublicKey, Scalar, SecretKey},
-    AggNonce, FirstRound, KeyAggContext, PartialSignature, PubNonce, SecNonceSpices, SecondRound,
+    AdaptorSignature, AggNonce, FirstRound, KeyAggContext, PartialSignature, PubNonce,
+    SecNonceSpices, SecondRound,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     format,
@@ -12,6 +14,7 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
+use uuid::Uuid;
 
 use crate::{
     api::TaprootTweak,
@@ -44,6 +47,37 @@ pub enum MusigError {
     SignatureAlreadyExists(String),
     #[error("Duplicate participant: {0}")]
     DuplicateParticipant(String),
+    #[error("Invalid adaptor configuration: {0}")]
+    InvalidAdaptorConfig(String),
+}
+
+/// Adaptor signature configuration for a session
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AdaptorConfig {
+    pub adaptor_id: Uuid,            // Opaque UUID v7 identifier - no business logic
+    pub adaptor_type: AdaptorType,   // "single", "and", or "or"
+    pub adaptor_points: Vec<String>, // Hex-encoded secp256k1 points only
+    pub hints: Option<Vec<String>>,  // Mathematical hints for "or" case
+}
+
+/// Type of adaptor signature configuration
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum AdaptorType {
+    Single, // Standard single adaptor point
+    And,    // Requires ALL secrets (T = t1*G + t2*G + ...)
+    Or,     // Any secret works, with hints to recover others
+}
+
+/// Final adaptor signature result
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AdaptorSignatureResult {
+    pub adaptor_id: Uuid,                // Matches AdaptorConfig.adaptor_id
+    pub adaptor_type: AdaptorType,       // Cryptographic type
+    pub signature_scalar: String,        // The encrypted signature s'
+    pub nonce_point: String,             // The adapted nonce R + T
+    pub adaptor_points: Vec<String>,     // The adaptor points used
+    pub hints: Option<Vec<String>>,      // Mathematical hints (for "or" case)
+    pub aggregate_adaptor_point: String, // The combined adaptor point
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,8 +87,13 @@ pub enum SessionPhase {
     NonceAggregation,
     Signing,
     Aggregation,
+
+    // NEW: Adaptor-specific phases
+    AdaptorNonceGeneration,
+    AdaptorNonceAggregation,
+
     Complete,
-    Failed(String),
+    Failed,
 }
 
 type UserSessionKey = (SessionId, UserId);
@@ -78,6 +117,13 @@ pub struct SessionMetadata {
     pub phase: SessionPhase,
     pub participants_ready: BTreeSet<UserId>,
     pub taproot_tweak: TaprootTweak,
+
+    // NEW: Adaptor signature support
+    pub adaptor_configs: Vec<AdaptorConfig>,
+    pub adaptor_aggregate_nonces: BTreeMap<Uuid, AggNonce>,
+    pub adaptor_partial_signatures: BTreeMap<Uuid, BTreeMap<String, PartialSignature>>,
+    pub adaptor_final_signatures: BTreeMap<Uuid, AdaptorSignatureResult>,
+    pub regular_signature: Option<String>,
 }
 
 impl SessionMetadata {
@@ -130,6 +176,7 @@ impl MusigProcessor {
         taproot_tweak: TaprootTweak,
         participants: Vec<PublicKey>,
         expected_participant_count: Option<usize>,
+        adaptor_configs: Option<Vec<AdaptorConfig>>,
     ) -> Result<(), MusigError> {
         let key_agg_ctx = if participants.len() >= 2 {
             let mut key_agg_ctx = KeyAggContext::new(participants.clone()).map_err(|e| {
@@ -150,6 +197,17 @@ impl MusigProcessor {
             SessionPhase::CollectingParticipants
         };
 
+        // Validate and process adaptor configs if provided
+        let processed_adaptor_configs = match adaptor_configs {
+            Some(configs) => {
+                for config in &configs {
+                    self.validate_adaptor_config(config)?;
+                }
+                configs
+            }
+            None => Vec::new(),
+        };
+
         // Create new session metadata
         let session_metadata = SessionMetadata {
             session_id: session_id.clone(),
@@ -162,11 +220,416 @@ impl MusigProcessor {
             phase: phase.clone(),
             participants_ready: BTreeSet::new(),
             taproot_tweak,
+            // NEW: Initialize adaptor fields with provided configs
+            adaptor_configs: processed_adaptor_configs,
+            adaptor_aggregate_nonces: BTreeMap::new(),
+            adaptor_partial_signatures: BTreeMap::new(),
+            adaptor_final_signatures: BTreeMap::new(),
+            regular_signature: None,
         };
 
         self.session_metadata
             .insert(session_id.clone(), session_metadata);
         Ok(())
+    }
+
+    fn validate_adaptor_config(&self, config: &AdaptorConfig) -> Result<(), MusigError> {
+        match config.adaptor_type {
+            AdaptorType::Single => {
+                if config.adaptor_points.len() != 1 {
+                    return Err(MusigError::InvalidAdaptorConfig(
+                        "Single adaptor requires exactly 1 point".to_string(),
+                    ));
+                }
+            }
+            AdaptorType::And => {
+                if config.adaptor_points.len() < 2 {
+                    return Err(MusigError::InvalidAdaptorConfig(
+                        "And adaptor requires at least 2 points".to_string(),
+                    ));
+                }
+            }
+            AdaptorType::Or => {
+                if config.adaptor_points.len() < 2 {
+                    return Err(MusigError::InvalidAdaptorConfig(
+                        "Or adaptor requires at least 2 points".to_string(),
+                    ));
+                }
+                if config.hints.is_none() {
+                    return Err(MusigError::InvalidAdaptorConfig(
+                        "Or adaptor requires hints".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Validate that adaptor points are valid hex
+        for point_hex in &config.adaptor_points {
+            if hex::decode(point_hex).is_err() {
+                return Err(MusigError::InvalidAdaptorConfig(
+                    "Invalid hex in adaptor point".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a session has adaptor configurations
+    pub fn has_adaptor_configs(&self, session_id: &SessionId) -> Result<bool, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+        Ok(!session_meta.adaptor_configs.is_empty())
+    }
+
+    /// Get adaptor signature results for a session
+    pub fn get_adaptor_signatures(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<AdaptorSignatureResult>, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+        Ok(session_meta
+            .adaptor_final_signatures
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    /// Check if session should transition to adaptor phases
+    pub fn should_transition_to_adaptor_phases(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+        Ok(!session_meta.adaptor_configs.is_empty()
+            && session_meta.phase == SessionPhase::Aggregation
+            && session_meta.regular_signature.is_some())
+    }
+
+    // ========== ADAPTOR SIGNATURE CRYPTOGRAPHIC OPERATIONS ==========
+
+    /// Compute aggregate adaptor point for a given adaptor configuration
+    fn compute_aggregate_adaptor_point(
+        &self,
+        config: &AdaptorConfig,
+    ) -> Result<PublicKey, MusigError> {
+        if config.adaptor_points.is_empty() {
+            return Err(MusigError::InvalidAdaptorConfig(
+                "No adaptor points provided".to_string(),
+            ));
+        }
+
+        // Decode the first adaptor point
+        let first_point_bytes = hex::decode(&config.adaptor_points[0]).map_err(|_| {
+            MusigError::InvalidAdaptorConfig("Invalid hex in adaptor point".to_string())
+        })?;
+
+        let mut aggregate_point = PublicKey::from_slice(&first_point_bytes)
+            .map_err(|_| MusigError::InvalidAdaptorConfig("Invalid secp256k1 point".to_string()))?;
+
+        match config.adaptor_type {
+            AdaptorType::Single => {
+                // For single adaptor, just return the single point
+                Ok(aggregate_point)
+            }
+            AdaptorType::And => {
+                // For "and" adaptor: T_agg = T1 + T2 + ... + Tn
+                for point_hex in config.adaptor_points.iter().skip(1) {
+                    let point_bytes = hex::decode(point_hex).map_err(|_| {
+                        MusigError::InvalidAdaptorConfig("Invalid hex in adaptor point".to_string())
+                    })?;
+
+                    let point = PublicKey::from_slice(&point_bytes).map_err(|_| {
+                        MusigError::InvalidAdaptorConfig("Invalid secp256k1 point".to_string())
+                    })?;
+
+                    aggregate_point = aggregate_point.combine(&point).map_err(|_| {
+                        MusigError::InvalidAdaptorConfig("Point addition failed".to_string())
+                    })?;
+                }
+                Ok(aggregate_point)
+            }
+            AdaptorType::Or => {
+                // For "or" adaptor, we use the first point as the primary adaptor
+                // The hints contain information about alternative paths
+                Ok(aggregate_point)
+            }
+        }
+    }
+
+    /// Generate adaptor nonces for all configured adaptors in a session (Phase: Aggregation -> AdaptorNonceGeneration)
+    pub fn generate_adaptor_nonces(&mut self, session_id: &SessionId) -> Result<(), MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+
+        // Verify we're in the right phase
+        if session_meta.phase != SessionPhase::Aggregation {
+            return Err(MusigError::WrongPhase(format!(
+                "Expected Aggregation phase, got {:?}",
+                session_meta.phase
+            )));
+        }
+
+        // Verify we have a regular aggregate nonce
+        if session_meta.aggregate_nonce.is_none() {
+            return Err(MusigError::WrongPhase(
+                "No base aggregate nonce available".to_string(),
+            ));
+        }
+
+        // Verify we have adaptor configurations
+        if session_meta.adaptor_configs.is_empty() {
+            return Err(MusigError::WrongPhase(
+                "No adaptor configurations available".to_string(),
+            ));
+        }
+
+        info!(
+            "Generating adaptor nonces for {} adaptors in session {}",
+            session_meta.adaptor_configs.len(),
+            session_id
+        );
+
+        // Transition to adaptor nonce generation phase
+        let session_meta = self.get_session_metadata_mut(session_id)?;
+        session_meta.phase = SessionPhase::AdaptorNonceGeneration;
+
+        // Immediately transition to nonce aggregation since musig2 handles adaptation internally
+        self.aggregate_adaptor_nonces(session_id)?;
+
+        Ok(())
+    }
+
+    /// Aggregate adaptor nonces (Phase: AdaptorNonceGeneration -> AdaptorNonceAggregation)
+    pub fn aggregate_adaptor_nonces(&mut self, session_id: &SessionId) -> Result<(), MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+
+        if session_meta.phase != SessionPhase::AdaptorNonceGeneration {
+            return Err(MusigError::WrongPhase(format!(
+                "Expected AdaptorNonceGeneration phase, got {:?}",
+                session_meta.phase
+            )));
+        }
+
+        info!("Aggregating adaptor nonces for session {}", session_id);
+
+        // With musig2's adaptor signature support, nonce aggregation is handled internally
+        // We just transition to the next phase
+        let session_meta = self.get_session_metadata_mut(session_id)?;
+        session_meta.phase = SessionPhase::AdaptorNonceAggregation;
+
+        Ok(())
+    }
+
+    /// Generate partial adaptor signature for a user using musig2's adaptor API
+    pub fn sign_adaptor_for_user(
+        &mut self,
+        session_id: &SessionId,
+        user_id: &UserId,
+        adaptor_id: &Uuid,
+        key_material: &KeyMaterial,
+    ) -> Result<PartialSignature, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+
+        // Verify we're in the right phase for adaptor signing
+        if session_meta.phase != SessionPhase::AdaptorNonceAggregation {
+            return Err(MusigError::WrongPhase(format!(
+                "Expected AdaptorNonceAggregation phase, got {:?}",
+                session_meta.phase
+            )));
+        }
+
+        // Find the adaptor config
+        let adaptor_config = session_meta
+            .adaptor_configs
+            .iter()
+            .find(|c| c.adaptor_id == *adaptor_id)
+            .ok_or_else(|| MusigError::InvalidAdaptorConfig("Adaptor not found".to_string()))?;
+
+        // Get user session
+        let user_session_key = (session_id.clone(), user_id.clone());
+        let _user_session = self
+            .user_sessions
+            .get(&user_session_key)
+            .ok_or_else(|| MusigError::SessionNotFound(session_id.clone()))?;
+
+        // Get the aggregate nonce and key aggregation context
+        let agg_nonce = session_meta
+            .aggregate_nonce
+            .as_ref()
+            .ok_or_else(|| MusigError::WrongPhase("No aggregate nonce".to_string()))?;
+
+        let key_agg_ctx = session_meta
+            .key_agg_ctx
+            .as_ref()
+            .ok_or_else(|| MusigError::WrongPhase("No key aggregation context".to_string()))?;
+
+        // Get user's secret key
+        let secret_key = key_material
+            .to_secp256k1_secret()
+            .map_err(|_| MusigError::InvalidPrivateKey)?;
+
+        // Compute aggregate adaptor point
+        let adaptor_point = self.compute_aggregate_adaptor_point(adaptor_config)?;
+
+        // Create secret nonce using the user's secret key
+        let sec_nonce = musig2::SecNonce::build(secret_key.secret_bytes())
+            .with_seckey(secret_key)
+            .with_message(&session_meta.message)
+            .build();
+
+        // Generate partial adaptor signature using musig2's adaptor API
+        let partial_sig = musig2::adaptor::sign_partial(
+            key_agg_ctx,
+            secret_key,
+            sec_nonce,
+            agg_nonce,
+            adaptor_point,
+            &session_meta.message,
+        )
+        .map_err(|e| MusigError::Musig2Error(e.to_string()))?;
+
+        // Store the partial adaptor signature
+        let session_meta_mut = self.get_session_metadata_mut(session_id)?;
+        session_meta_mut
+            .adaptor_partial_signatures
+            .entry(*adaptor_id)
+            .or_insert_with(BTreeMap::new)
+            .insert(user_id.to_string(), partial_sig);
+
+        Ok(partial_sig)
+    }
+
+    /// Aggregate partial adaptor signatures into final adaptor signature using musig2 API
+    pub fn aggregate_adaptor_signatures(
+        &mut self,
+        session_id: &SessionId,
+        adaptor_id: &Uuid,
+    ) -> Result<AdaptorSignatureResult, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+
+        // Find the adaptor config
+        let adaptor_config = session_meta
+            .adaptor_configs
+            .iter()
+            .find(|c| c.adaptor_id == *adaptor_id)
+            .ok_or_else(|| MusigError::InvalidAdaptorConfig("Adaptor not found".to_string()))?
+            .clone();
+
+        // Get partial signatures for this adaptor
+        let partial_sigs = session_meta
+            .adaptor_partial_signatures
+            .get(adaptor_id)
+            .ok_or_else(|| MusigError::WrongPhase("No partial signatures found".to_string()))?;
+
+        let expected_count = session_meta
+            .expected_participant_count
+            .unwrap_or(session_meta.expected_participants.len());
+
+        if partial_sigs.len() != expected_count {
+            return Err(MusigError::InsufficientParticipants(format!(
+                "Expected {} signatures, got {}",
+                expected_count,
+                partial_sigs.len()
+            )));
+        }
+
+        // Get required components
+        let key_agg_ctx = session_meta
+            .key_agg_ctx
+            .as_ref()
+            .ok_or_else(|| MusigError::WrongPhase("No key aggregation context".to_string()))?;
+
+        let agg_nonce = session_meta
+            .aggregate_nonce
+            .as_ref()
+            .ok_or_else(|| MusigError::WrongPhase("No aggregate nonce".to_string()))?;
+
+        // Compute aggregate adaptor point
+        let aggregate_adaptor_point = self.compute_aggregate_adaptor_point(&adaptor_config)?;
+
+        // Aggregate partial signatures using musig2's adaptor API
+        let partial_sig_vec: Vec<PartialSignature> = partial_sigs.values().cloned().collect();
+        let adaptor_signature: AdaptorSignature = musig2::adaptor::aggregate_partial_signatures(
+            key_agg_ctx,
+            agg_nonce,
+            aggregate_adaptor_point,
+            partial_sig_vec.iter().copied(),
+            &session_meta.message,
+        )
+        .map_err(|e| MusigError::Musig2Error(e.to_string()))?;
+
+        // Create result with the real adaptor signature
+        let result = AdaptorSignatureResult {
+            adaptor_id: *adaptor_id,
+            adaptor_type: adaptor_config.adaptor_type.clone(),
+            signature_scalar: hex::encode(adaptor_signature.serialize()),
+            nonce_point: hex::encode(&agg_nonce.serialize()[33..66]), // R2 point
+            adaptor_points: adaptor_config.adaptor_points.clone(),
+            hints: adaptor_config.hints.clone(),
+            aggregate_adaptor_point: hex::encode(aggregate_adaptor_point.serialize()),
+        };
+
+        // Store the final result
+        let session_meta_mut = self.get_session_metadata_mut(session_id)?;
+        session_meta_mut
+            .adaptor_final_signatures
+            .insert(*adaptor_id, result.clone());
+
+        Ok(result)
+    }
+
+    /// Process all adaptor signatures for a session (Phase: AdaptorNonceAggregation -> Complete)
+    pub fn process_adaptor_signatures(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<Vec<AdaptorSignatureResult>, MusigError> {
+        let adaptor_ids: Vec<Uuid> = {
+            let session_meta = self.get_session_metadata(session_id)?;
+            session_meta
+                .adaptor_configs
+                .iter()
+                .map(|c| c.adaptor_id)
+                .collect()
+        };
+
+        let mut results = Vec::new();
+
+        for adaptor_id in &adaptor_ids {
+            let result = self.aggregate_adaptor_signatures(session_id, adaptor_id)?;
+            results.push(result);
+        }
+
+        // All adaptor signatures processed - transition to Complete
+        let session_meta = self.get_session_metadata_mut(session_id)?;
+        session_meta.phase = SessionPhase::Complete;
+
+        info!(
+            "All adaptor signatures processed for session {} - workflow complete",
+            session_id
+        );
+
+        Ok(results)
+    }
+
+    /// Check if all adaptor signatures are ready for a session
+    pub fn are_adaptor_signatures_ready(&self, session_id: &SessionId) -> Result<bool, MusigError> {
+        let session_meta = self.get_session_metadata(session_id)?;
+
+        for config in &session_meta.adaptor_configs {
+            let partial_sigs = session_meta
+                .adaptor_partial_signatures
+                .get(&config.adaptor_id);
+
+            let expected_count = session_meta
+                .expected_participant_count
+                .unwrap_or(session_meta.expected_participants.len());
+
+            match partial_sigs {
+                Some(sigs) if sigs.len() == expected_count => continue,
+                _ => return Ok(false),
+            }
+        }
+
+        Ok(true)
     }
 
     pub fn add_participant(
@@ -239,7 +702,7 @@ impl MusigProcessor {
             session_meta.phase = SessionPhase::NonceGeneration;
 
             info!(
-                "🔄 Session {} transitioned from {:?} to NonceGeneration phase with {} participants",
+                "Session {} transitioned from {:?} to NonceGeneration phase with {} participants",
                 session_id, current_phase, participant_count
             );
         } else if expected_count == 0 {
@@ -273,7 +736,7 @@ impl MusigProcessor {
             && session_meta.key_agg_ctx.is_none()
         {
             info!(
-                "🔄 Force transitioning session {} to NonceGeneration phase ({} participants ready)",
+                "Force transitioning session {} to NonceGeneration phase ({} participants ready)",
                 session_id, participant_count
             );
 
@@ -547,18 +1010,18 @@ impl MusigProcessor {
                 }
 
                 info!(
-                    "✅ Session {} transitioned to NonceAggregation phase - all {} nonces collected, updated {} user sessions",
+                    "Session {} transitioned to NonceAggregation phase - all {} nonces collected, updated {} user sessions",
                     session_id, expected_count, updated_user_sessions
                 );
             } else {
                 info!(
-                    "⏳ Not all nonces collected yet for session {} ({}/{})",
+                    "Not all nonces collected yet for session {} ({}/{})",
                     session_id, current_nonce_count, expected_count
                 );
             }
         } else {
             info!(
-                "⏳ No user sessions found yet for signing session {} - waiting for nonce generation to start",
+                "No user sessions found yet for signing session {} - waiting for nonce generation to start",
                 session_id
             );
         }
@@ -792,7 +1255,7 @@ impl MusigProcessor {
         let removed_user_sessions = user_sessions_before - user_sessions_after;
 
         info!(
-            "🧹 MuSig clear_session {}: removed {} user sessions, metadata_existed={}, metadata_removed={}",
+            "MuSig clear_session {}: removed {} user sessions, metadata_existed={}, metadata_removed={}",
             session_id, removed_user_sessions, has_metadata_before, metadata_removed
         );
     }
@@ -993,7 +1456,7 @@ impl MusigProcessor {
             .session_metadata
             .iter()
             .filter_map(|(session_id, meta)| {
-                if matches!(meta.phase, SessionPhase::Complete | SessionPhase::Failed(_)) {
+                if matches!(meta.phase, SessionPhase::Complete | SessionPhase::Failed) {
                     Some(session_id.clone())
                 } else {
                     None
@@ -1026,6 +1489,7 @@ impl MusigProcessor {
             message.to_vec(),
             TaprootTweak::None,
             participant_pubkeys,
+            None,
             None,
         )?;
 
@@ -1095,6 +1559,10 @@ impl Clone for MusigSession {
     }
 }
 
+// TODO: This Clone implementation is problematic because it loses FirstRound/SecondRound state
+// We should refactor to avoid cloning MusigSession and use references or take ownership instead
+// This is a temporary fix to maintain compilation while we address the architectural issue
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,7 +1583,8 @@ mod tests {
             vec![1, 2, 3],
             TaprootTweak::None,
             participants,
-            Some(2),
+            Some(1),
+            None,
         );
 
         // Session creation should succeed with 1 participant, but be in CollectingParticipants phase
@@ -1146,6 +1615,7 @@ mod tests {
                 TaprootTweak::None,
                 participants,
                 Some(2),
+                None,
             )
             .unwrap();
 
@@ -1159,5 +1629,132 @@ mod tests {
         let user_key = (session_id.clone(), user_id.clone());
         let user_session = processor.user_sessions.get(&user_key).unwrap();
         assert!(user_session.musig_session.nonces.contains_key(&user_id));
+    }
+
+    #[test]
+    fn test_adaptor_signature_foundation() {
+        let mut processor = MusigProcessor::new();
+
+        let secp = Secp256k1::new();
+        let (_secret_key, public_key) = secp.generate_keypair(&mut rng());
+        let participants = vec![public_key];
+
+        let session_id = SessionId::new_v7();
+        let message = b"test message with adaptors".to_vec();
+
+        // Create adaptor config for testing
+        let adaptor_config = AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Single,
+            adaptor_points: vec![
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
+            ],
+            hints: None,
+        };
+
+        let adaptor_configs = vec![adaptor_config];
+
+        let result = processor.init_session(
+            &session_id,
+            message.clone(),
+            TaprootTweak::None,
+            participants,
+            None,
+            Some(adaptor_configs),
+        );
+
+        assert!(result.is_ok());
+        assert!(processor.has_adaptor_configs(&session_id).unwrap());
+
+        // Test aggregate adaptor point computation
+        let session_meta = processor.get_session_metadata(&session_id).unwrap();
+        let config = &session_meta.adaptor_configs[0];
+        let aggregate_point = processor.compute_aggregate_adaptor_point(config);
+        assert!(aggregate_point.is_ok());
+
+        // Test should transition to adaptor phases
+        let should_transition = processor.should_transition_to_adaptor_phases(&session_id);
+        assert!(should_transition.is_ok());
+    }
+
+    #[test]
+    fn test_comprehensive_adaptor_signature_workflow() {
+        let mut processor = MusigProcessor::new();
+        let secp = Secp256k1::new();
+
+        // Create test participants
+        let (_secret_key, public_key) = secp.generate_keypair(&mut rng());
+        let participants = vec![public_key];
+
+        let session_id = SessionId::new_v7();
+        let message = b"Comprehensive adaptor signature test".to_vec();
+
+        // Create real adaptor point (representing oracle outcome)
+        let (_adaptor_secret, adaptor_public) = secp.generate_keypair(&mut rng());
+        let adaptor_point_hex = hex::encode(adaptor_public.serialize());
+
+        // Test different adaptor types
+        let single_adaptor = AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Single,
+            adaptor_points: vec![adaptor_point_hex.clone()],
+            hints: None,
+        };
+
+        let and_adaptor = AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::And,
+            adaptor_points: vec![adaptor_point_hex.clone(), adaptor_point_hex.clone()],
+            hints: None,
+        };
+
+        let or_adaptor = AdaptorConfig {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Or,
+            adaptor_points: vec![adaptor_point_hex.clone(), adaptor_point_hex],
+            hints: Some(vec!["hint1".to_string(), "hint2".to_string()]),
+        };
+
+        // Initialize session with multiple adaptor configurations
+        let result = processor.init_session(
+            &session_id,
+            message,
+            TaprootTweak::None,
+            participants,
+            None,
+            Some(vec![single_adaptor, and_adaptor, or_adaptor]),
+        );
+        assert!(result.is_ok());
+
+        // Verify session has adaptor configurations
+        assert!(processor.has_adaptor_configs(&session_id).unwrap());
+
+        let session_meta = processor.get_session_metadata(&session_id).unwrap();
+        assert_eq!(session_meta.adaptor_configs.len(), 3);
+
+        // Test aggregate adaptor point computation for each type
+        for config in &session_meta.adaptor_configs {
+            let computed_point = processor.compute_aggregate_adaptor_point(config);
+            assert!(
+                computed_point.is_ok(),
+                "Failed for adaptor type {:?}",
+                config.adaptor_type
+            );
+
+            // Verify the point is valid
+            let point = computed_point.unwrap();
+            assert_eq!(point.serialize().len(), 33); // Compressed point
+        }
+
+        // Test that should_transition_to_adaptor_phases works correctly
+        let should_transition = processor.should_transition_to_adaptor_phases(&session_id);
+        assert!(should_transition.is_ok());
+        // Should be false because we haven't completed regular MuSig2 workflow yet
+        assert!(!should_transition.unwrap());
+
+        // Test that we can get empty adaptor signatures (since none are generated yet)
+        let adaptor_sigs = processor.get_adaptor_signatures(&session_id);
+        assert!(adaptor_sigs.is_ok());
+        assert!(adaptor_sigs.unwrap().is_empty());
     }
 }

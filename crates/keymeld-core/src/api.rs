@@ -95,6 +95,8 @@ pub struct CreateSigningSessionRequest {
     pub message_hash: Vec<u8>,
     pub encrypted_message: Option<String>,
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub encrypted_adaptor_configs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -123,6 +125,8 @@ pub struct SigningSessionStatusResponse {
     /// Participants who have already provided their approval
     #[serde(default)]
     pub approved_participants: Vec<UserId>,
+    #[serde(default)]
+    pub adaptor_signatures: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -406,6 +410,122 @@ pub mod validation {
             Validator::validate_non_empty_string(encrypted_message, "Encrypted message")?;
         }
         Validator::validate_timeout_range(Some(request.timeout_secs))?;
+
+        if !request.encrypted_adaptor_configs.is_empty() {
+            Validator::validate_non_empty_string(
+                &request.encrypted_adaptor_configs,
+                "Encrypted adaptor configs",
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn decrypt_adaptor_configs(
+        encrypted_configs_hex: &str,
+        session_secret: &str,
+    ) -> Result<Vec<crate::musig::AdaptorConfig>, KeyMeldError> {
+        if encrypted_configs_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_configs_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {}", e)))?;
+
+        let decrypted_bytes = SecureCrypto::decrypt_adaptor_configs(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {}", e))
+            })?,
+            session_secret,
+        )?;
+
+        serde_json::from_slice(&decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to deserialize adaptor configs: {}", e))
+        })
+    }
+
+    pub fn encrypt_adaptor_configs_for_client(
+        configs: &[crate::musig::AdaptorConfig],
+        session_secret: &str,
+    ) -> Result<String, KeyMeldError> {
+        if configs.is_empty() {
+            return Ok(String::new());
+        }
+
+        let serialized = serde_json::to_vec(configs).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to serialize adaptor configs: {}", e))
+        })?;
+
+        let encrypted_data = SecureCrypto::encrypt_adaptor_configs(&serialized, session_secret)?;
+
+        encrypted_data
+            .to_hex_json()
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to encode to hex JSON: {}", e)))
+    }
+
+    pub fn validate_decrypted_adaptor_configs(
+        configs: &[crate::musig::AdaptorConfig],
+    ) -> Result<(), KeyMeldError> {
+        for config in configs {
+            match config.adaptor_type {
+                crate::musig::AdaptorType::Single => {
+                    if config.adaptor_points.len() != 1 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Single adaptor requires exactly 1 point".to_string(),
+                        ));
+                    }
+                }
+                crate::musig::AdaptorType::And => {
+                    if config.adaptor_points.len() < 2 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "And adaptor requires at least 2 points".to_string(),
+                        ));
+                    }
+                }
+                crate::musig::AdaptorType::Or => {
+                    if config.adaptor_points.len() < 2 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Or adaptor requires at least 2 points".to_string(),
+                        ));
+                    }
+                    if config.hints.is_none() {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Or adaptor requires hints".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            for point_hex in &config.adaptor_points {
+                if hex::decode(point_hex).is_err() {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Invalid hex in adaptor point".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn decrypt_adaptor_signatures_with_secret(
+        encrypted_signatures_hex: &str,
+        session_secret: &str,
+    ) -> Result<Vec<crate::musig::AdaptorSignatureResult>, KeyMeldError> {
+        if encrypted_signatures_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_signatures_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {}", e)))?;
+
+        let decrypted_bytes = SecureCrypto::decrypt_adaptor_signatures(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {}", e))
+            })?,
+            session_secret,
+        )?;
+
+        serde_json::from_slice(&decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to deserialize adaptor signatures: {}", e))
+        })
     }
 }

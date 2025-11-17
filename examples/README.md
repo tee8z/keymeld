@@ -1,6 +1,6 @@
 # KeyMeld Examples
 
-This directory contains example implementations demonstrating how to use KeyMeld for distributed MuSig2 Bitcoin signing.
+This directory contains example implementations demonstrating how to use KeyMeld for distributed MuSig2 Bitcoin signing, including both regular MuSig2 and adaptor signatures workflows.
 
 ## Quick Start
 
@@ -27,6 +27,47 @@ The `just quickstart` command will:
 2. Launch KeyMeld gateway and 3 Nitro enclaves
 3. Run the complete 2-phase MuSig2 workflow
 4. Create and broadcast a real Bitcoin transaction
+
+## Examples Overview
+
+This directory contains two main examples:
+
+### 1. Regular MuSig2 Example (`keymeld_example`)
+Basic distributed MuSig2 signing with taproot integration.
+
+```bash
+# Run regular MuSig2 example
+cargo run --bin keymeld_example -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+```
+
+### 2. Adaptor Signatures Example (`keymeld_adaptor_test`)
+Comprehensive adaptor signatures testing with multiple signature types.
+
+```bash
+# Test all adaptor signature types
+cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+
+# Test only single adaptor signatures
+cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --single-only
+
+# Test only "And" adaptor signatures
+cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --and-only
+
+# Test only "Or" adaptor signatures  
+cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --or-only
+
+# Skip regular signing and test only adaptor signatures
+cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --skip-regular-signing
+```
+
+## Shared Library Structure
+
+The examples share common functionality through a modular structure:
+
+- **`lib.rs`**: Core utilities, configuration loading, and `KeyMeldE2ETest` implementation
+- **`adaptor_utils.rs`**: Adaptor-specific utilities for creating, validating, and displaying adaptor signatures
+- **`keymeld_example.rs`**: Clean regular MuSig2 example
+- **`keymeld_adaptor_test.rs`**: Comprehensive adaptor signatures testing
 
 ## Architecture Overview
 

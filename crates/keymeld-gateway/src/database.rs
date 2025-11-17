@@ -559,13 +559,20 @@ impl Database {
         let participants_user_ids = expected_participants.clone();
 
         // Create structured encrypted data for signing session
-        let session_data = keymeld_core::encrypted_data::SigningSessionData::new().with_message(
-            request
-                .encrypted_message
-                .as_ref()
-                .unwrap_or(&"".to_string())
-                .clone(),
-        );
+        let mut session_data = keymeld_core::encrypted_data::SigningSessionData::new()
+            .with_message(
+                request
+                    .encrypted_message
+                    .as_ref()
+                    .unwrap_or(&"".to_string())
+                    .clone(),
+            );
+
+        // Add encrypted adaptor configs if provided
+        if !request.encrypted_adaptor_configs.is_empty() {
+            session_data =
+                session_data.with_adaptor_configs(request.encrypted_adaptor_configs.clone());
+        }
         let session_encrypted = serde_json::to_string(&session_data).map_err(|e| {
             ApiError::Serialization(format!("Failed to serialize session data: {}", e))
         })?;
@@ -1128,6 +1135,55 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn get_signing_session_structured_data(
+        &self,
+        signing_session_id: &SessionId,
+    ) -> Result<Option<keymeld_core::encrypted_data::SigningSessionData>, ApiError> {
+        let row = sqlx::query(
+            "SELECT session_encrypted_data FROM signing_sessions WHERE signing_session_id = ?",
+        )
+        .bind(signing_session_id.as_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let session_encrypted: String = row.get("session_encrypted_data");
+            let session_data = serde_json::from_str::<
+                keymeld_core::encrypted_data::SigningSessionData,
+            >(&session_encrypted)
+            .map_err(|e| {
+                ApiError::Serialization(format!(
+                    "Failed to deserialize signing session data: {}",
+                    e
+                ))
+            })?;
+            Ok(Some(session_data))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_signing_session_structured_data(
+        &self,
+        signing_session_id: &SessionId,
+        session_data: &keymeld_core::encrypted_data::SigningSessionData,
+    ) -> Result<(), ApiError> {
+        let session_encrypted = serde_json::to_string(session_data).map_err(|e| {
+            ApiError::Serialization(format!("Failed to serialize session data: {}", e))
+        })?;
+
+        sqlx::query(
+            "UPDATE signing_sessions SET session_encrypted_data = ?, updated_at = ? WHERE signing_session_id = ?",
+        )
+        .bind(session_encrypted)
+        .bind(DbUtils::current_timestamp())
+        .bind(signing_session_id.as_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }
 

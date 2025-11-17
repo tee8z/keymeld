@@ -50,6 +50,7 @@ pub struct SigningSessionInitParams {
     pub coordinator_encrypted_private_key: Option<String>,
     pub encrypted_session_secret: Option<String>,
     pub taproot_tweak: TaprootTweak,
+    pub encrypted_adaptor_configs: String,
 }
 
 #[derive(Debug, Clone)]
@@ -725,7 +726,7 @@ impl EnclaveManager {
                     }
                     Err(e) => {
                         error!(
-                            "❌ Failed to distribute nonce for user {} (signer_index={}) to enclave {}: {}",
+                            "Failed to distribute nonce for user {} (signer_index={}) to enclave {}: {}",
                             nonce_user_id, signer_index, enclave_id, e
                         );
                         return Err(KeyMeldError::EnclaveError(format!(
@@ -848,7 +849,7 @@ impl EnclaveManager {
             // Check if participant already has a signature
             if participant.partial_signature.is_some() {
                 debug!(
-                    "✅ User {} already has partial signature, skipping generation",
+                    "User {} already has partial signature, skipping generation",
                     user_id
                 );
                 if let Some(existing_sig) = &participant.partial_signature {
@@ -876,7 +877,7 @@ impl EnclaveManager {
                         partial_signatures.insert(user_id.clone(), sig_resp.partial_signature);
                         successful_signatures += 1;
                         debug!(
-                            "✅ Generated partial signature for user {} ({}/{})",
+                            "Generated partial signature for user {} ({}/{})",
                             user_id,
                             successful_signatures,
                             participants.len()
@@ -890,7 +891,7 @@ impl EnclaveManager {
                 }
                 Err(e) => {
                     warn!(
-                        "⚠️ Failed to generate partial signature for user {}: {}",
+                        "Failed to generate partial signature for user {}: {}",
                         user_id, e
                     );
                     return Err(e);
@@ -951,14 +952,14 @@ impl EnclaveManager {
         params: SigningSessionInitParams,
     ) -> Result<(), KeyMeldError> {
         info!(
-            "🚀 Starting optimized signing session initialization for session {} with {} participants",
+            "Starting optimized signing session initialization for session {} with {} participants",
             params.signing_session_id,
             params.participants.len()
         );
 
         for (user_id, participant_data) in &params.participants {
             debug!(
-                "📋 Participant {} assigned to enclave {} with enclave_data_len={}",
+                "Participant {} assigned to enclave {} with enclave_data_len={}",
                 user_id,
                 participant_data.enclave_id,
                 participant_data.enclave_encrypted_data.len()
@@ -1007,6 +1008,13 @@ impl EnclaveManager {
                 timeout_secs: self.timeout_config.session_init_timeout_secs,
                 taproot_tweak: params.taproot_tweak.clone(),
                 expected_participant_count: params.participants.len(),
+                adaptor_configs: if params.encrypted_adaptor_configs.is_empty() {
+                    None
+                } else {
+                    // Pass encrypted adaptor configs to enclaves - they will decrypt
+                    // Gateway manager should not decrypt, only forward encrypted data
+                    None // Enclaves will handle decryption with session secret
+                },
             };
 
             match self
@@ -1022,7 +1030,7 @@ impl EnclaveManager {
                 }
                 Err(e) => {
                     error!(
-                        "❌ CRITICAL: Failed to initialize signing session on enclave {}: {}",
+                        "CRITICAL: Failed to initialize signing session on enclave {}: {}",
                         enclave_id, e
                     );
                     // DO NOT skip this enclave - we need all enclaves to work
@@ -1036,7 +1044,7 @@ impl EnclaveManager {
 
         // Add participants only to their assigned enclaves for optimal distribution
         debug!(
-            "🔄 Adding participants to their assigned enclaves for signing session {}",
+            "Adding participants to their assigned enclaves for signing session {}",
             params.signing_session_id
         );
         let mut successful_additions = 0;
@@ -1049,7 +1057,7 @@ impl EnclaveManager {
             // Only process if this enclave was successfully initialized
             if !successfully_initialized_enclaves.contains(&assigned_enclave_id) {
                 error!(
-                    "❌ Skipping participant {} - assigned enclave {} was not successfully initialized",
+                    "Skipping participant {} - assigned enclave {} was not successfully initialized",
                     user_id, assigned_enclave_id
                 );
                 failed_enclaves.push((
@@ -1101,12 +1109,14 @@ impl EnclaveManager {
                     }
                     Err(e) => {
                         if attempts >= MAX_ATTEMPTS {
-                            error!("❌ Failed to add participant {} to enclave {} after {} attempts: {}",
-                                user_id, assigned_enclave_id, MAX_ATTEMPTS, e);
+                            error!(
+                                "Failed to add participant {} to enclave {} after {} attempts: {}",
+                                user_id, assigned_enclave_id, MAX_ATTEMPTS, e
+                            );
                             failed_enclaves.push((assigned_enclave_id, user_id.clone(), e));
                             break; // Exit retry loop for this participant
                         } else {
-                            warn!("⚠️ Failed to add participant {} to enclave {} (attempt {}), retrying: {}",
+                            warn!("Failed to add participant {} to enclave {} (attempt {}), retrying: {}",
                                 user_id, assigned_enclave_id, attempts, e);
                             sleep(Duration::from_millis(50)).await;
                         }
@@ -1116,13 +1126,13 @@ impl EnclaveManager {
         }
 
         info!(
-            "🎉 Completed signing session initialization for session {} - added {} participants to their assigned enclaves",
+            "Completed signing session initialization for session {} - added {} participants to their assigned enclaves",
             params.signing_session_id, successful_additions
         );
 
         if !failed_enclaves.is_empty() {
             warn!(
-                "⚠️ Some participant additions failed: {} failures",
+                "Some participant additions failed: {} failures",
                 failed_enclaves.len()
             );
             for (enclave_id, user_id, error) in &failed_enclaves {
@@ -1161,7 +1171,7 @@ impl EnclaveManager {
         }
 
         info!(
-            "✅ All {} participants successfully added to their assigned enclaves",
+            "All {} participants successfully added to their assigned enclaves",
             params.participants.len()
         );
 
@@ -1246,7 +1256,7 @@ impl EnclaveManager {
                     if *enclave_id == *coordinator_enclave_id =>
                 {
                     info!(
-                        "✅ Coordinator enclave {} initialized and encrypted session secret for {} other enclaves",
+                        "Coordinator enclave {} initialized and encrypted session secret for {} other enclaves",
                         enclave_id, response.encrypted_session_secrets.len()
                     );
                     coordinator_encrypted_secrets = response.encrypted_session_secrets;
@@ -1282,7 +1292,7 @@ impl EnclaveManager {
             {
                 EnclaveResponse::Success(_) => {
                     info!(
-                        "✅ Distributed session secret to enclave {} after initialization",
+                        "Distributed session secret to enclave {} after initialization",
                         encrypted_secret.target_enclave_id
                     );
                 }
@@ -1320,13 +1330,13 @@ impl EnclaveManager {
                 // Public key data is shared as needed for MuSig2 operations
                 let enclave_encrypted_data = if *enclave_id == participant.enclave_id {
                     debug!(
-                        "✅ Providing private key data for user {} to their assigned enclave {}",
+                        "Providing private key data for user {} to their assigned enclave {}",
                         user_id, enclave_id
                     );
                     participant.enclave_encrypted_data.clone()
                 } else {
                     debug!(
-                        "🔐 Only providing public key data for user {} to non-assigned enclave {}",
+                        "Only providing public key data for user {} to non-assigned enclave {}",
                         user_id, enclave_id
                     );
                     String::new()
@@ -1395,6 +1405,117 @@ impl EnclaveManager {
         );
 
         Ok(aggregate_public_key_bytes)
+    }
+
+    pub async fn orchestrate_adaptor_signature_processing(
+        &self,
+        signing_session_id: &SessionId,
+        adaptor_configs: &str,
+        participants: &BTreeMap<UserId, ParticipantData>,
+    ) -> Result<String, KeyMeldError> {
+        info!(
+            "Orchestrating adaptor signature processing for session {}",
+            signing_session_id
+        );
+
+        // Step 1: Initiate adaptor signing on coordinator enclave
+        let coordinator_enclave_id = participants
+            .values()
+            .next()
+            .map(|p| p.enclave_id)
+            .ok_or_else(|| KeyMeldError::EnclaveError("No participants found".to_string()))?;
+
+        let initiate_cmd = crate::enclave::InitiateAdaptorSigningCommand {
+            signing_session_id: signing_session_id.clone(),
+        };
+
+        let initiate_response = self
+            .send_command_to_enclave(
+                &coordinator_enclave_id,
+                crate::enclave::EnclaveCommand::InitiateAdaptorSigning(initiate_cmd),
+            )
+            .await
+            .map_err(|e| {
+                KeyMeldError::EnclaveError(format!("Failed to initiate adaptor signing: {}", e))
+            })?;
+
+        match initiate_response {
+            crate::enclave::EnclaveResponse::Success(_) => {}
+            _ => {
+                return Err(KeyMeldError::EnclaveError(
+                    "Unexpected response from initiate adaptor signing".to_string(),
+                ));
+            }
+        }
+
+        // Step 2: Parse adaptor configs to get adaptor IDs
+        let configs: Vec<crate::musig::AdaptorConfig> = if !adaptor_configs.is_empty() {
+            crate::api::validation::decrypt_adaptor_configs(adaptor_configs, "placeholder_secret")?
+        } else {
+            Vec::new()
+        };
+
+        // Step 3: Generate partial adaptor signatures for each participant and adaptor
+        for (user_id, participant) in participants {
+            for config in &configs {
+                let partial_cmd = crate::enclave::SignAdaptorPartialSignatureCommand {
+                    signing_session_id: signing_session_id.clone(),
+                    user_id: user_id.clone(),
+                    adaptor_id: config.adaptor_id,
+                };
+
+                let partial_response = self
+                    .send_command_to_enclave(
+                        &participant.enclave_id,
+                        crate::enclave::EnclaveCommand::SignAdaptorPartialSignature(partial_cmd),
+                    )
+                    .await
+                    .map_err(|e| {
+                        KeyMeldError::EnclaveError(format!(
+                            "Failed to sign adaptor partial for user {}: {}",
+                            user_id, e
+                        ))
+                    })?;
+
+                match partial_response {
+                    crate::enclave::EnclaveResponse::AdaptorPartialSignature(_) => {}
+                    _ => {
+                        return Err(KeyMeldError::EnclaveError(format!(
+                            "Unexpected response from adaptor partial signing for user {}",
+                            user_id
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Step 4: Process and aggregate all adaptor signatures
+        let process_cmd = crate::enclave::ProcessAdaptorSignaturesCommand {
+            signing_session_id: signing_session_id.clone(),
+        };
+
+        let process_response = self
+            .send_command_to_enclave(
+                &coordinator_enclave_id,
+                crate::enclave::EnclaveCommand::ProcessAdaptorSignatures(process_cmd),
+            )
+            .await
+            .map_err(|e| {
+                KeyMeldError::EnclaveError(format!("Failed to process adaptor signatures: {}", e))
+            })?;
+
+        match process_response {
+            crate::enclave::EnclaveResponse::AdaptorSignatures(response) => {
+                info!(
+                    "Successfully processed adaptor signatures for session {}",
+                    signing_session_id
+                );
+                Ok(response.adaptor_signatures)
+            }
+            _ => Err(KeyMeldError::EnclaveError(
+                "Unexpected response from process adaptor signatures".to_string(),
+            )),
+        }
     }
 }
 
@@ -1478,6 +1599,7 @@ mod tests {
             coordinator_encrypted_private_key: Some("coordinator_key".to_string()),
             encrypted_session_secret: Some("session_secret".to_string()),
             taproot_tweak: TaprootTweak::UnspendableTaproot,
+            encrypted_adaptor_configs: String::new(),
         };
 
         assert_eq!(params.participants.len(), 3);

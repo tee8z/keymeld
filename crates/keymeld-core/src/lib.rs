@@ -8,7 +8,6 @@ pub use musig2::{
     PartialSignature, PubNonce, SecNonce, SecondRound,
 };
 
-// Type alias for cleaner API - aggregate public key as raw bytes for serialization
 pub type AggregatePublicKey = Vec<u8>;
 
 pub mod api;
@@ -47,8 +46,6 @@ pub enum KeyMeldError {
     SessionTooLarge(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
-
-    // Specific crypto errors
     #[error("Random number generation failed")]
     RandomGenerationError(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("Time operation failed")]
@@ -67,8 +64,6 @@ pub enum KeyMeldError {
     HmacError(String),
     #[error("Attestation verification failed: {0}")]
     AttestationError(String),
-
-    // Generic fallback for other crypto errors
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
     #[error("Invalid state: {0}")]
