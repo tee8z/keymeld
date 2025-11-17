@@ -1,4 +1,4 @@
-use crate::KeyMeldError;
+use crate::{musig::AdaptorSignatureResult, KeyMeldError};
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
@@ -7,10 +7,16 @@ use anyhow::{anyhow, Result};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng as RandOsRng, TryRngCore};
-use secp256k1::{ecdh::SharedSecret, PublicKey, SecretKey, SECP256K1};
+use secp256k1::{ecdh::SharedSecret, ecdsa::Signature, Message, PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
+use serde_cbor::Value as CborValue;
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Formatter, Result as FmtResult},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use subtle::ConstantTimeEq;
 use tracing::{trace, warn};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -122,8 +128,8 @@ impl SecureCrypto {
         hasher.update(session_id.as_bytes());
         hasher.update(user_id.as_bytes());
         hasher.update(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map_err(KeyMeldError::TimeError)?
                 .as_nanos()
                 .to_le_bytes(),
@@ -240,15 +246,10 @@ impl SecureCrypto {
     ) -> Result<HashMap<String, String>, KeyMeldError> {
         let mut pcrs = HashMap::new();
 
-        if let serde_cbor::Value::Map(map) = doc {
-            if let Some(serde_cbor::Value::Map(pcr_map)) =
-                map.get(&serde_cbor::Value::Text("pcrs".to_string()))
-            {
+        if let CborValue::Map(map) = doc {
+            if let Some(CborValue::Map(pcr_map)) = map.get(&CborValue::Text("pcrs".to_string())) {
                 for (key, value) in pcr_map {
-                    if let (
-                        serde_cbor::Value::Integer(pcr_idx),
-                        serde_cbor::Value::Bytes(pcr_value),
-                    ) = (key, value)
+                    if let (CborValue::Integer(pcr_idx), CborValue::Bytes(pcr_value)) = (key, value)
                     {
                         pcrs.insert(pcr_idx.to_string(), hex::encode(pcr_value));
                     }
@@ -262,16 +263,16 @@ impl SecureCrypto {
     fn extract_public_key_from_attestation(
         doc: &serde_cbor::Value,
     ) -> Result<String, KeyMeldError> {
-        if let serde_cbor::Value::Map(map) = doc {
-            if let Some(serde_cbor::Value::Bytes(user_data)) =
-                map.get(&serde_cbor::Value::Text("user_data".to_string()))
+        if let CborValue::Map(map) = doc {
+            if let Some(CborValue::Bytes(user_data)) =
+                map.get(&CborValue::Text("user_data".to_string()))
             {
                 let user_data_str = String::from_utf8(user_data.clone()).map_err(|e| {
                     KeyMeldError::CryptoError(format!("Invalid user_data UTF-8: {e}"))
                 })?;
 
-                let user_data_json: serde_json::Value = serde_json::from_str(&user_data_str)
-                    .map_err(|e| {
+                let user_data_json: JsonValue =
+                    serde_json::from_str(&user_data_str).map_err(|e| {
                         KeyMeldError::CryptoError(format!("Invalid user_data JSON: {}", e))
                     })?;
 
@@ -295,8 +296,8 @@ impl SecureCrypto {
     ) -> Result<AttestedPublicKey, KeyMeldError> {
         let public_key_hex = hex::encode(public_key.serialize());
         let attestation_hex = hex::encode(&attestation_doc);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map_err(KeyMeldError::TimeError)?
             .as_secs();
 
@@ -360,7 +361,7 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_signature_data(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         let ciphertext = encrypted_data_json
@@ -427,7 +428,7 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_message_data(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         let ciphertext = encrypted_data_json
@@ -645,15 +646,14 @@ impl SecureCrypto {
         let signature_bytes = hex::decode(signature_hex)
             .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {}", e)))?;
         let message_to_verify = format!("{}:{}", hmac_user_id, nonce);
-        let message_hash = sha2::Sha256::digest(message_to_verify.as_bytes());
-        let public_key = secp256k1::PublicKey::from_slice(user_public_key)
+        let message_hash = Sha256::digest(message_to_verify.as_bytes());
+        let public_key = PublicKey::from_slice(user_public_key)
             .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {}", e)))?;
-        let signature =
-            secp256k1::ecdsa::Signature::from_compact(&signature_bytes).map_err(|e| {
-                KeyMeldError::ValidationError(format!("Invalid signature format: {}", e))
-            })?;
+        let signature = Signature::from_compact(&signature_bytes).map_err(|e| {
+            KeyMeldError::ValidationError(format!("Invalid signature format: {}", e))
+        })?;
         let message_hash_array: [u8; 32] = message_hash.into();
-        let message = secp256k1::Message::from_digest(message_hash_array);
+        let message = Message::from_digest(message_hash_array);
         signature.verify(message, &public_key).map_err(|e| {
             KeyMeldError::ValidationError(format!("Signature verification failed: {}", e))
         })?;
@@ -673,7 +673,7 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_adaptor_configs(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_configs")
@@ -687,7 +687,7 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_adaptor_signatures(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_signatures")
@@ -729,7 +729,7 @@ impl SecureCrypto {
     }
 
     fn decrypt_with_context(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
         expected_context: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
@@ -950,7 +950,6 @@ mod tests {
         let hmac1_again = SecureCrypto::generate_registration_hmac(data1, &session_secret).unwrap();
         assert_eq!(hmac1, hmac1_again);
 
-        // HMAC should be different for different secrets
         let different_secret = SecureCrypto::generate_session_secret().unwrap();
         let hmac_different_secret =
             SecureCrypto::generate_registration_hmac(data1, &different_secret).unwrap();
@@ -965,15 +964,12 @@ mod tests {
         let key1 = SecureCrypto::derive_session_encryption_key(session_id, user_id).unwrap();
         let key2 = SecureCrypto::derive_session_encryption_key(session_id, user_id).unwrap();
 
-        // Same inputs should produce same key
         assert_eq!(key1, key2);
 
-        // Different session_id should produce different key
         let key3 =
             SecureCrypto::derive_session_encryption_key("different-session", user_id).unwrap();
         assert_ne!(key1, key3);
 
-        // Different user_id should produce different key
         let key4 =
             SecureCrypto::derive_session_encryption_key(session_id, "different-user").unwrap();
         assert_ne!(key1, key4);
@@ -1121,7 +1117,7 @@ mod tests {
     #[test]
     fn test_hmac_workflow_integration() {
         let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let message_hash = sha2::Sha256::digest(b"Bitcoin transaction to sign").to_vec();
+        let message_hash = Sha256::digest(b"Bitcoin transaction to sign").to_vec();
 
         let participant_hmac =
             SecureCrypto::generate_message_hmac(&message_hash, &session_secret).unwrap();
@@ -1239,7 +1235,7 @@ impl SessionSecret {
 
     pub fn encrypt_adaptor_signatures(
         &self,
-        signatures: &[crate::musig::AdaptorSignatureResult],
+        signatures: &[AdaptorSignatureResult],
     ) -> Result<EncryptedData> {
         let serialized = serde_json::to_vec(signatures)
             .map_err(|e| anyhow!("Failed to serialize adaptor signatures: {}", e))?;
@@ -1249,7 +1245,7 @@ impl SessionSecret {
     pub fn decrypt_adaptor_signatures(
         &self,
         encrypted: &EncryptedData,
-    ) -> Result<Vec<crate::musig::AdaptorSignatureResult>> {
+    ) -> Result<Vec<AdaptorSignatureResult>> {
         let decrypted = self.decrypt(encrypted, "adaptor_signatures")?;
         serde_json::from_slice(&decrypted)
             .map_err(|e| anyhow!("Failed to deserialize adaptor signatures: {}", e))
@@ -1267,8 +1263,8 @@ impl SessionSecret {
     }
 }
 
-impl std::fmt::Debug for SessionSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for SessionSecret {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("SessionSecret")
             .field("key", &"[REDACTED]")
             .finish()
@@ -1359,7 +1355,6 @@ mod session_secret_tests {
 
         assert_eq!(signature, decrypted);
 
-        // Test with different signature
         let signature2 = vec![10, 20, 30, 40, 50];
         let encrypted2 = secret.encrypt_signature(&signature2).unwrap();
         let decrypted2 = secret.decrypt_signature(&encrypted2).unwrap();

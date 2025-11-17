@@ -28,7 +28,7 @@ use keymeld_core::{
     KeyMaterial,
 };
 
-use musig2::secp256k1::SecretKey;
+use musig2::secp256k1::{PublicKey, SecretKey};
 
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, trace, warn};
@@ -56,7 +56,6 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// Get key material for a specific user
     pub fn get_user_key_material(&self, user_id: &UserId) -> Option<KeyMaterial> {
         self.private_keys
             .get(user_id)
@@ -99,14 +98,12 @@ impl From<crate::attestation::AttestationDocument> for AttestationResponse {
 }
 
 impl EnclaveOperator {
-    /// Helper function to hash a message using SHA256
     fn hash_message(message: &[u8]) -> Vec<u8> {
         let mut hasher = Sha256::new();
         hasher.update(message);
         hasher.finalize().to_vec()
     }
 
-    /// Helper function to extract session secret bytes from a session
     fn get_session_secret_bytes(&self, session_id: &SessionId) -> Result<Vec<u8>, EnclaveError> {
         let session_state_ref = self.sessions.get(session_id).ok_or_else(|| {
             error!("Session {} not found", session_id);
@@ -131,7 +128,6 @@ impl EnclaveOperator {
         Ok(session_secret.as_bytes().to_vec())
     }
 
-    /// Helper function to encrypt session secret for a target enclave
     fn encrypt_session_secret_for_enclave(
         &self,
         target_public_key: &str,
@@ -235,7 +231,6 @@ impl EnclaveOperator {
                     message: "Session cleared".to_string(),
                 }))
             }
-            // NEW: Adaptor signature commands
             EnclaveCommand::InitiateAdaptorSigning(cmd) => {
                 self.handle_initiate_adaptor_signing(cmd).await
             }
@@ -292,7 +287,6 @@ impl EnclaveOperator {
     ) -> Result<EnclaveResponse, EnclaveError> {
         let session_id = cmd.keygen_session_id.clone();
 
-        // Decrypt the session secret if provided (only for coordinator enclave)
         let session_secret = if let Some(encrypted_secret) = &cmd.encrypted_session_secret {
             let private_key_array: [u8; 32] = self.private_key[..32].try_into().map_err(|_| {
                 EnclaveError::CryptographicError("Private key must be exactly 32 bytes".to_string())
@@ -327,7 +321,6 @@ impl EnclaveOperator {
             None
         };
 
-        // Create a new MuSig processor for this session
         let mut musig_processor = MusigProcessor::new();
         musig_processor
             .init_session(
@@ -336,7 +329,7 @@ impl EnclaveOperator {
                 cmd.taproot_tweak,
                 Vec::new(),
                 Some(cmd.expected_participant_count),
-                None, // No adaptor configs for keygen sessions
+                Vec::new(), // No adaptor configs for keygen sessions
             )
             .map_err(|e| {
                 EnclaveError::SessionInitializationFailed(format!(
@@ -345,7 +338,6 @@ impl EnclaveOperator {
                 ))
             })?;
 
-        // Decrypt coordinator private key if provided
         let coordinator_private_key =
             if let Some(encrypted_key) = &cmd.coordinator_encrypted_private_key {
                 match self
@@ -365,7 +357,6 @@ impl EnclaveOperator {
                 None
             };
 
-        // Store enclave public keys if this is the coordinator
         if cmd.coordinator_encrypted_private_key.is_some() {
             for enclave_key in &cmd.enclave_public_keys {
                 self.enclave_public_keys
@@ -386,13 +377,11 @@ impl EnclaveOperator {
             enclave_encrypted_data: None,
         };
 
-        // Clone session secret before moving init_data
         let session_secret_for_distribution = init_data.session_secret.clone();
         let is_coordinator = cmd.coordinator_encrypted_private_key.is_some();
 
         let operation: OperationInitialized = init_data.into();
 
-        // Create the session state with its own MuSig processor
         let session_state = SessionState {
             session_id: session_id.clone(),
             operation_state: OperationState::from(operation),
@@ -400,13 +389,11 @@ impl EnclaveOperator {
             private_keys: BTreeMap::new(),
         };
 
-        // Use concurrent map for lock-free insertion
         self.sessions.insert(
             session_id.clone(),
             Arc::new(std::sync::Mutex::new(session_state)),
         );
 
-        // If this is the coordinator and has session secret, encrypt it for other enclaves
         if is_coordinator {
             if let Some(session_secret) = session_secret_for_distribution.as_ref() {
                 match self
@@ -451,14 +438,12 @@ impl EnclaveOperator {
             warn!("Failed to clear existing session state: {}", e);
         }
 
-        // Validate message hash length
         if cmd.encrypted_message.is_empty() {
             return Err(EnclaveError::ValidationFailed(
                 "Message cannot be empty".to_string(),
             ));
         }
 
-        // Get participants and session secret from the completed keygen session
         let (keygen_participants, session_secret) = {
             let keygen_session_arc =
                 self.sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
@@ -505,6 +490,28 @@ impl EnclaveOperator {
 
         let message_hash = Self::hash_message(&message);
 
+        // Decrypt adaptor configs if provided
+        let adaptor_configs = if let Some(encrypted_configs) = &cmd.encrypted_adaptor_configs {
+            if !encrypted_configs.is_empty() {
+                match keymeld_core::api::validation::decrypt_adaptor_configs(
+                    encrypted_configs,
+                    &hex::encode(session_secret.as_bytes()),
+                ) {
+                    Ok(configs) => configs,
+                    Err(e) => {
+                        return Err(EnclaveError::DataDecodingError(format!(
+                            "Failed to decrypt adaptor configs: {}",
+                            e
+                        )));
+                    }
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         musig_processor
             .init_session(
                 &session_id,
@@ -512,7 +519,7 @@ impl EnclaveOperator {
                 cmd.taproot_tweak,
                 keygen_participants, // Use participants from completed keygen session
                 Some(cmd.expected_participant_count),
-                cmd.adaptor_configs, // Pass through adaptor configs from command
+                adaptor_configs, // Pass decrypted adaptor configs
             )
             .map_err(|e| {
                 EnclaveError::SessionInitializationFailed(format!(
@@ -556,7 +563,6 @@ impl EnclaveOperator {
 
         let operation: OperationInitialized = init_data.into();
 
-        // Create the session state
         let session_state = SessionState {
             session_id: session_id.clone(),
             operation_state: OperationState::from(operation),
@@ -564,7 +570,6 @@ impl EnclaveOperator {
             private_keys: BTreeMap::new(),
         };
 
-        // Use concurrent map for lock-free insertion
         self.sessions.insert(
             session_id.clone(),
             Arc::new(std::sync::Mutex::new(session_state)),
@@ -584,13 +589,11 @@ impl EnclaveOperator {
             ),
         )?;
 
-        // Get session state from concurrent map
         let session_arc = self.sessions.get(&session_id).ok_or_else(|| {
             error!("Session {} not found", session_id);
             EnclaveError::SessionNotFound(session_id.to_string())
         })?;
 
-        // First, validate session secret and deserialize data without holding the lock
         let (participant_public_key, encrypted_private_key_hex) = {
             let session_state = session_arc.lock().map_err(|e| {
                 error!(
@@ -613,7 +616,6 @@ impl EnclaveOperator {
                     ))
                 })?;
 
-            // Deserialize participant session data
             let participant_session_data = if !cmd.session_encrypted_data.is_empty() {
                 if let Ok(signing_data) = serde_json::from_str::<SigningParticipantSessionData>(
                     &cmd.session_encrypted_data,
@@ -637,7 +639,6 @@ impl EnclaveOperator {
                 None
             };
 
-            // Extract public key from decrypted session data
             let participant_public_key = if let Some(session_data) = participant_session_data {
                 session_data.public_key
             } else {
@@ -645,9 +646,7 @@ impl EnclaveOperator {
                 vec![]
             };
 
-            // Parse private key from enclave data if provided
             let encrypted_private_key_hex = if !cmd.enclave_encrypted_data.is_empty() {
-                // First, decrypt the hex-encoded encrypted structured data
                 let encrypted_bytes = hex::decode(&cmd.enclave_encrypted_data).map_err(|e| {
                     EnclaveError::DataDecodingError(format!("Failed to decode hex data: {}", e))
                 })?;
@@ -677,7 +676,6 @@ impl EnclaveOperator {
                     ))
                 })?;
 
-                // Parse the decrypted JSON and extract the encrypted private key field
                 if let Ok(keygen_data) =
                     serde_json::from_str::<KeygenParticipantEnclaveData>(&decrypted_str)
                 {
@@ -704,7 +702,6 @@ impl EnclaveOperator {
             (participant_public_key, encrypted_private_key_hex)
         }; // Lock is released here
 
-        // Decrypt private key if provided (async call outside of lock)
         let decrypted_private_key = if let Some(encrypted_hex) = encrypted_private_key_hex {
             Some(
                 self.decrypt_private_key_from_coordinator(&encrypted_hex)
@@ -714,7 +711,6 @@ impl EnclaveOperator {
             None
         };
 
-        // Re-acquire lock to store the results
         {
             let mut session_state = session_arc.lock().map_err(|e| {
                 error!(
@@ -726,7 +722,6 @@ impl EnclaveOperator {
                 )
             })?;
 
-            // Store private key if we decrypted one
             if let Some(private_key) = decrypted_private_key {
                 let secure_key = SecurePrivateKey {
                     session_id: session_id.clone(),
@@ -748,11 +743,9 @@ impl EnclaveOperator {
                     .insert(cmd.user_id.clone(), secure_key);
             }
 
-            // Add participant to MuSig processor
-            let public_key = musig2::secp256k1::PublicKey::from_slice(&participant_public_key)
-                .map_err(|e| {
-                    EnclaveError::InvalidPublicKey(format!("Invalid public key: {}", e))
-                })?;
+            let public_key = PublicKey::from_slice(&participant_public_key).map_err(|e| {
+                EnclaveError::InvalidPublicKey(format!("Invalid public key: {}", e))
+            })?;
 
             session_state
                 .musig_processor
@@ -763,18 +756,7 @@ impl EnclaveOperator {
                         e
                     ))
                 })?;
-
-            // Force phase transition check to ensure we move to NonceGeneration when ready
-            if let Err(e) = session_state
-                .musig_processor
-                .check_and_force_phase_transition(&session_id)
-            {
-                warn!(
-                    "Failed to check phase transition for session {}: {}",
-                    session_id, e
-                );
-            }
-        } // Lock is released here
+        }
 
         info!(
             "Participant {} added to session {} successfully",
@@ -832,7 +814,6 @@ impl EnclaveOperator {
         secret_array.copy_from_slice(&secret_bytes);
         let session_secret = SessionSecret::from_bytes(secret_array);
 
-        // Update the session with the distributed session secret
         {
             let mut session_state = session_arc.lock().map_err(|e| {
                 error!(
@@ -865,7 +846,6 @@ impl EnclaveOperator {
                             cmd.keygen_session_id
                         );
                     } else {
-                        // No existing secret, safe to set
                         op.session_secret = Some(session_secret);
                         debug!(
                             "Successfully set session secret for session {}",
@@ -894,9 +874,7 @@ impl EnclaveOperator {
 
         let mut encrypted_secrets = Vec::new();
 
-        // Step 1: Coordinator encrypts session secret for each target enclave using stored public keys
         for target_enclave_id in &cmd.target_enclaves {
-            // Get the public key for the target enclave
             let target_public_key = self
                 .enclave_public_keys
                 .get(target_enclave_id)
@@ -1141,7 +1119,6 @@ impl EnclaveOperator {
             session_id, session_exists_before
         );
 
-        // Clear MuSig processor state first to remove user sessions and nonces
         if let Some(session_arc) = self.sessions.get(&session_id) {
             if let Ok(mut session_state) = session_arc.lock() {
                 session_state.musig_processor.clear_session(&session_id);
@@ -1159,7 +1136,6 @@ impl EnclaveOperator {
             );
         }
 
-        // Remove session from concurrent map - this is lock-free!
         if self.sessions.remove(&session_id).is_some() {
             info!("Session {} cleared successfully", session_id);
         } else {
@@ -1305,7 +1281,6 @@ impl EnclaveOperator {
                 EnclaveError::SessionNotFound(session_id.to_string())
             })?;
 
-        // Extract data we need without holding the lock across await
         let (has_private_key, coordinator_key) = {
             let session_state = session_arc.lock().map_err(|e| {
                 error!("Failed to acquire session lock for nonce generation: {}", e);
@@ -1422,7 +1397,6 @@ impl EnclaveOperator {
             EnclaveError::SessionNotFound(cmd.keygen_session_id.to_string())
         })?;
 
-        // Extract what we need without holding locks across awaits
         let (has_keygen_key, has_signing_key, coordinator_key) = {
             let keygen_session = keygen_session_arc.lock().map_err(|e| {
                 error!("Failed to acquire keygen session lock: {}", e);
@@ -1456,7 +1430,6 @@ impl EnclaveOperator {
             )));
         };
 
-        // Generate partial signature using MuSig processor with minimal lock time
         let (partial_sig_bytes, pub_nonce_bytes) = {
             let mut signing_session = signing_session_arc.lock().map_err(|e| {
                 error!(
@@ -1721,8 +1694,6 @@ impl EnclaveOperator {
         ))
     }
 
-    // ========== ADAPTOR SIGNATURE HANDLERS ==========
-
     async fn handle_initiate_adaptor_signing(
         &self,
         cmd: keymeld_core::enclave::InitiateAdaptorSigningCommand,
@@ -1746,7 +1717,6 @@ impl EnclaveOperator {
 
         let mut session_state = session_arc.lock().unwrap();
 
-        // Check if session has adaptor configurations
         if !session_state
             .musig_processor
             .has_adaptor_configs(&cmd.signing_session_id)
@@ -1757,7 +1727,6 @@ impl EnclaveOperator {
             ));
         }
 
-        // Generate adaptor nonces to initiate the adaptor signing process
         session_state
             .musig_processor
             .generate_adaptor_nonces(&cmd.signing_session_id)
@@ -1800,14 +1769,12 @@ impl EnclaveOperator {
 
         let mut session_state = session_arc.lock().unwrap();
 
-        // Get the user's key material
         let key_material = session_state
             .get_user_key_material(&cmd.user_id)
             .ok_or_else(|| {
                 EnclaveError::KeyError(format!("Key material not found for user {}", cmd.user_id))
             })?;
 
-        // Generate partial adaptor signature
         let partial_sig = session_state
             .musig_processor
             .sign_adaptor_for_user(
@@ -1858,7 +1825,6 @@ impl EnclaveOperator {
 
         let mut session_state = session_arc.lock().unwrap();
 
-        // Check if all adaptor signatures are ready
         if !session_state
             .musig_processor
             .are_adaptor_signatures_ready(&cmd.signing_session_id)
@@ -1869,7 +1835,6 @@ impl EnclaveOperator {
             ));
         }
 
-        // Process all adaptor signatures
         let adaptor_signatures = session_state
             .musig_processor
             .process_adaptor_signatures(&cmd.signing_session_id)

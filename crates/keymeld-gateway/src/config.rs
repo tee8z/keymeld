@@ -66,7 +66,6 @@ pub struct EnclaveConfig {
     pub max_users_per_enclave: Option<u32>,
     pub max_connections_per_enclave: Option<u32>,
     pub enclave_timeout_secs: Option<u64>,
-    // Timeout configurations
     pub vsock_timeout_secs: Option<u64>,
     pub nonce_generation_timeout_secs: Option<u64>,
     pub session_init_timeout_secs: Option<u64>,
@@ -74,7 +73,6 @@ pub struct EnclaveConfig {
     pub network_write_timeout_secs: Option<u64>,
     pub network_read_timeout_secs: Option<u64>,
     pub max_message_size_bytes: Option<usize>,
-    // Retry configurations
     pub max_retry_attempts: Option<u32>,
     pub initial_retry_delay_ms: Option<u64>,
     pub max_retry_delay_ms: Option<u64>,
@@ -426,8 +424,6 @@ impl Config {
         if !self.is_safe_for_environment() {
             anyhow::bail!("Configuration does not meet production security requirements");
         }
-
-        // KMS validation removed - using direct ECIES encryption
 
         if self.database.path.starts_with("./") || self.database.path.starts_with("../") {
             anyhow::bail!("Production database path should be absolute, not relative");

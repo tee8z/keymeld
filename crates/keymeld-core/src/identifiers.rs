@@ -362,7 +362,6 @@ mod tests {
         assert_eq!(user_id.as_str(), uuid_str);
         assert_eq!(format!("{user_id}"), uuid_str);
 
-        // Test parsing fails with invalid UUID
         let invalid_uuid = "not-a-valid-uuid";
         assert!(UserId::try_from(invalid_uuid).is_err());
         assert!(UserId::parse(invalid_uuid).is_err());
@@ -380,12 +379,10 @@ mod tests {
             "cbfacaae-9bdf-48c8-801e-2c7bb5197b7e"
         );
 
-        // Test TryFrom with valid UUID
         let valid_uuid = "cbfacaae-9bdf-48c8-801e-2c7bb5197b7e";
         let session_id_try = SessionId::try_from(valid_uuid).expect("Valid UUID");
         assert_eq!(session_id_try.as_string(), valid_uuid);
 
-        // Test parsing fails with invalid UUID
         let invalid_uuid = "not-a-valid-uuid";
         assert!(SessionId::try_from(invalid_uuid).is_err());
         assert!(SessionId::parse(invalid_uuid).is_err());
@@ -396,12 +393,10 @@ mod tests {
         let correlation_id = CorrelationId::new();
         assert!(!correlation_id.as_string().is_empty());
 
-        // Test TryFrom with valid UUID
         let valid_uuid = "550e8400-e29b-41d4-a716-446655440000";
         let correlation_id_try = CorrelationId::try_from(valid_uuid).expect("Valid UUID");
         assert_eq!(correlation_id_try.as_string(), valid_uuid);
 
-        // Test parsing fails with invalid UUID
         let invalid_uuid = "not-a-valid-uuid";
         assert!(CorrelationId::try_from(invalid_uuid).is_err());
         assert!(CorrelationId::parse(invalid_uuid).is_err());

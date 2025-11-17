@@ -14,7 +14,7 @@ COPY crates ./crates
 COPY examples ./examples
 
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --bin keymeld_example
+RUN cargo build --release --bin keymeld_example --bin keymeld_adaptor_test
 
 FROM debian:bookworm-slim
 
@@ -33,7 +33,8 @@ RUN useradd -m -u 1000 -s /bin/bash keymeld
 RUN mkdir -p /app/keys /app/config /app/data && \
     chown -R keymeld:keymeld /app
 
-COPY --from=builder /app/target/release/keymeld_example /usr/local/bin/keymeld-example
+COPY --from=builder /app/target/release/keymeld_example /usr/local/bin/keymeld_example
+COPY --from=builder /app/target/release/keymeld_adaptor_test /usr/local/bin/keymeld_adaptor_test
 
 # Copy all example configs
 COPY --chown=keymeld:keymeld examples/config.yaml /app/config/regtest.yaml
@@ -49,8 +50,8 @@ RUN if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "development" ]; then \
         ln -sf /app/config/example-regtest.yaml /app/config/config.yaml; \
     fi
 
-RUN chown keymeld:keymeld /usr/local/bin/keymeld-example && \
-    chmod +x /usr/local/bin/keymeld-example
+RUN chown keymeld:keymeld /usr/local/bin/keymeld_example /usr/local/bin/keymeld_adaptor_test && \
+    chmod +x /usr/local/bin/keymeld_example /usr/local/bin/keymeld_adaptor_test
 
 USER keymeld
 
@@ -67,4 +68,4 @@ RUN chmod +x /usr/local/bin/example-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/example-entrypoint.sh"]
 
-CMD ["--config", "/app/config/config.yaml", "--amount", "50000", "--destination", "bcrt1qh3qhjhd7s0p2vu257k3zjtgjxuy5jy0c4pn6wz"]
+CMD ["keymeld_example", "--config", "/app/config/config.yaml", "--amount", "50000", "--destination", "bcrt1qh3qhjhd7s0p2vu257k3zjtgjxuy5jy0c4pn6wz"]

@@ -77,7 +77,6 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
         test.participant_user_ids[0].as_str()
     );
 
-    // Approve for coordinator (requires approval)
     test.approve_signing_session(
         &signing_session_id,
         test.coordinator_user_id.as_str(),
@@ -85,7 +84,6 @@ async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
     )
     .await?;
 
-    // Approve for first participant (requires approval)
     test.approve_signing_session(
         &signing_session_id,
         test.participant_user_ids[0].as_str(),

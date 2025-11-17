@@ -176,7 +176,7 @@ impl KeygenSessionStatus {
             KeygenSessionStatus::Completed(ref mut completed) => {
                 &mut completed.registered_participants
             }
-            _ => return, // No participant data to merge for Failed state
+            _ => return,
         };
 
         for (user_id, fresh_participant) in fresh_participants {
@@ -210,7 +210,7 @@ impl KeygenSessionStatus {
             KeygenSessionStatus::Completed(ref mut completed) => {
                 &mut completed.registered_participants
             }
-            _ => return Ok(()), // No participant data to merge for Failed state
+            _ => return Ok(()),
         };
 
         validation::merge_participants(participants, fresh_participants)
@@ -219,8 +219,8 @@ impl KeygenSessionStatus {
     pub fn is_expired(&self) -> bool {
         let expires_at = match self {
             KeygenSessionStatus::CollectingParticipants(collecting) => collecting.expires_at,
-            KeygenSessionStatus::Completed(_) => return false, // Completed sessions don't expire
-            KeygenSessionStatus::Failed(_) => return false,    // Failed sessions don't expire
+            KeygenSessionStatus::Completed(_) => return false,
+            KeygenSessionStatus::Failed(_) => return false,
         };
 
         validation::is_expired(expires_at)

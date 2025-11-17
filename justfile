@@ -12,6 +12,13 @@ help:
     @echo "  just quickstart <amount> true - Quickstart with rebuild"
     @echo "  just demo [amount] [dest]    - Run demo with custom parameters"
     @echo ""
+    @echo "🔐 Adaptor Signatures:"
+    @echo "  just demo-adaptors [amount] [dest] - Run all adaptor signature types"
+    @echo "  just demo-adaptors-single [amount] [dest] - Run single adaptor only"
+    @echo "  just demo-adaptors-and [amount] [dest] - Run 'And' adaptor only"
+    @echo "  just demo-adaptors-or [amount] [dest] - Run 'Or' adaptor only"
+    @echo "  just demo-adaptors-only [amount] [dest] - Test adaptors without regular signing"
+    @echo ""
     @echo "🔧 Services:"
     @echo "  just start                   - Start all services"
     @echo "  just rebuild                 - Rebuild and start all KeyMeld containers"
@@ -200,6 +207,52 @@ demo amount="50000" destination="":
 
     docker compose --profile example run --rm -T example \
         --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR"
+
+# Run KeyMeld adaptor signatures demo on regtest
+demo-adaptors amount="50000" destination="" test_type="all":
+    #!/usr/bin/env bash
+    if ! curl -sf http://localhost:8080/api/v1/health >/dev/null 2>&1; then
+        echo "❌ KeyMeld not running. Start with: just start"
+        exit 1
+    fi
+
+    # Generate destination address if not provided
+    DEST_ADDR="{{destination}}"
+    if [ -z "$DEST_ADDR" ]; then
+        DEST_ADDR=$(docker compose exec -T bitcoin bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 getnewaddress 2>/dev/null || echo "bcrt1qdeszrlqksxy5570x6taves23j6as32tn6glhap")
+    fi
+
+    # Set up test flags based on test_type
+    TEST_FLAGS=""
+    case "{{test_type}}" in
+        "single") TEST_FLAGS="--single-only" ;;
+        "and") TEST_FLAGS="--and-only" ;;
+        "or") TEST_FLAGS="--or-only" ;;
+        "adaptor-only") TEST_FLAGS="--skip-regular-signing" ;;
+        "all") TEST_FLAGS="" ;;
+        *) TEST_FLAGS="" ;;
+    esac
+
+    echo "🔐 Running KeyMeld Adaptor Signatures demo on regtest"
+    echo "   Amount: {{amount}} sats"
+    echo "   Destination: $DEST_ADDR"
+    echo "   Test type: {{test_type}}"
+
+    docker compose --profile example run --rm -T example-adaptors \
+        --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR" $TEST_FLAGS
+
+# Run specific adaptor signature test types
+demo-adaptors-single amount="50000" destination="":
+    @just demo-adaptors {{amount}} "{{destination}}" "single"
+
+demo-adaptors-and amount="50000" destination="":
+    @just demo-adaptors {{amount}} "{{destination}}" "and"
+
+demo-adaptors-or amount="50000" destination="":
+    @just demo-adaptors {{amount}} "{{destination}}" "or"
+
+demo-adaptors-only amount="50000" destination="":
+    @just demo-adaptors {{amount}} "{{destination}}" "adaptor-only"
 
 # Internal: Run demo without rebuilding dependencies (used by quickstart)
 _demo-no-deps amount="50000" destination="":

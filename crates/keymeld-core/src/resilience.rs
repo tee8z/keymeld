@@ -267,7 +267,6 @@ mod tests {
             backoff_multiplier: 2.0,
         };
 
-        // After a few attempts, should cap at max_delay_ms
         let high_attempt_delay = config.delay_for_attempt(10);
         assert_eq!(high_attempt_delay, Duration::from_millis(5000));
     }

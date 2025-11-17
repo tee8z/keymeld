@@ -19,5 +19,13 @@ for i in {1..30}; do
     sleep 2
 done
 
-echo "Starting KeyMeld example..."
-exec keymeld-example "$@" < /dev/null
+# Determine which binary to run
+BINARY=${1:-keymeld_example}
+
+# If first argument is a binary name, shift it out
+if [ "$1" = "keymeld_example" ] || [ "$1" = "keymeld_adaptor_test" ]; then
+    shift
+fi
+
+echo "Starting KeyMeld example: $BINARY"
+exec "$BINARY" "$@" < /dev/null

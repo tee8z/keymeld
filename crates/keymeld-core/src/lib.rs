@@ -1,12 +1,20 @@
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
-use thiserror::Error;
-pub use tracing::{debug, error, info, warn};
-
+use crate::enclave::EnclaveManager;
+pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
+pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
+use musig::MusigError;
 pub use musig2::{
     secp256k1::PublicKey, AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext,
     PartialSignature, PubNonce, SecNonce, SecondRound,
 };
+use serde::{Deserialize, Serialize};
+pub use session::{
+    KeygenCollectingParticipants, KeygenCompleted, KeygenFailed, KeygenSessionStatus,
+    KeygenStatusKind, ParticipantData, SigningCollectingParticipants, SigningSessionFull,
+    SigningSessionStatus, SigningStatusKind,
+};
+use std::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
+use thiserror::Error;
+pub use tracing::{debug, error, info, warn};
 
 pub type AggregatePublicKey = Vec<u8>;
 
@@ -19,16 +27,6 @@ pub mod logging;
 pub mod musig;
 pub mod resilience;
 pub mod session;
-
-use musig::MusigError;
-
-pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
-pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
-pub use session::{
-    KeygenCollectingParticipants, KeygenCompleted, KeygenFailed, KeygenSessionStatus,
-    KeygenStatusKind, ParticipantData, SigningCollectingParticipants, SigningSessionFull,
-    SigningSessionStatus, SigningStatusKind,
-};
 
 #[derive(Error, Debug)]
 pub enum KeyMeldError {
@@ -99,5 +97,3 @@ pub struct HealthStatus {
     pub active_enclaves: Vec<EnclaveId>,
     pub version: String,
 }
-
-use crate::enclave::EnclaveManager;

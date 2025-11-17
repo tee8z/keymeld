@@ -20,7 +20,7 @@ impl Default for AttestationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_age_seconds: 300, // 5 minutes
+            max_age_seconds: 300,
             required_pcrs: BTreeMap::new(),
             allow_debug_mode: false,
             generate_attestations: true,
@@ -331,8 +331,8 @@ mod tests {
     #[test]
     fn test_validate_pcr_format() {
         let mut pcrs = BTreeMap::new();
-        pcrs.insert("PCR0".to_string(), vec![0u8; 48]); // Valid
-        pcrs.insert("PCR1".to_string(), vec![0u8; 32]); // Invalid length
+        pcrs.insert("PCR0".to_string(), vec![0u8; 48]);
+        pcrs.insert("PCR1".to_string(), vec![0u8; 32]);
 
         let result = utils::validate_pcr_format(&pcrs);
         assert!(result.is_err());

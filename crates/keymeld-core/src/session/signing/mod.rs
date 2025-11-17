@@ -59,7 +59,7 @@ impl From<SigningCollectingParticipants> for SigningSessionFull {
             message_hash: collecting.message_hash.clone(),
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
-            aggregate_public_key: None, // Will be set during processing
+            aggregate_public_key: None,
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
             encrypted_session_secret: collecting.encrypted_session_secret,
             created_at: collecting.created_at,
@@ -434,16 +434,16 @@ impl SigningSessionStatus {
                 status.expires_at,
                 status.participants_requiring_approval.clone(),
                 status.approved_participants.clone(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::SessionFull(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
                 None,
                 status.expires_at,
-                Vec::new(),    // No pending approvals in SessionFull
-                Vec::new(),    // Approval data not tracked beyond CollectingParticipants
-                String::new(), // No adaptor signatures yet
+                Vec::new(),
+                Vec::new(),
+                String::new(),
             ),
             SigningSessionStatus::GeneratingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -452,7 +452,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::CollectingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -461,7 +461,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::AggregatingNonces(ref status) => (
                 SigningStatusKind::from(self),
@@ -470,7 +470,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::GeneratingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
@@ -479,7 +479,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::CollectingPartialSignatures(ref status) => (
                 SigningStatusKind::from(self),
@@ -488,7 +488,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::FinalizingSignature(ref status) => (
                 SigningStatusKind::from(self),
@@ -497,7 +497,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // No adaptor signatures yet
+                String::new(),
             ),
             SigningSessionStatus::Completed(ref status) => (
                 SigningStatusKind::from(self),
@@ -506,7 +506,7 @@ impl SigningSessionStatus {
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(), // Adaptor signatures now stored in database structured data
+                String::new(),
             ),
             SigningSessionStatus::Failed(_) => (
                 SigningStatusKind::from(self),
@@ -709,7 +709,6 @@ impl fmt::Display for SigningStatusKind {
     }
 }
 
-// Additional methods for SigningSessionStatus
 impl SigningSessionStatus {
     pub fn validate_enclave_epochs(
         &self,
@@ -783,12 +782,11 @@ impl SigningSessionStatus {
     ) -> Result<(), KeyMeldError> {
         for (user_id, keygen_participant) in keygen_participants {
             let mut keygen_participant = keygen_participant.clone();
-            // Clear signing-specific data when inheriting from keygen
+
             keygen_participant.public_nonces = None;
             keygen_participant.partial_signature = None;
 
             if let Some(existing) = signing_participants.get(user_id) {
-                // Preserve any signing-specific data that was already set
                 keygen_participant.public_nonces = existing.public_nonces.clone();
                 keygen_participant.partial_signature = existing.partial_signature;
             }

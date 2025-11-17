@@ -198,7 +198,6 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
             self.registered_participants.len()
         );
 
-        // Generate nonces using the orchestration function
         let nonces = enclave_manager
             .orchestrate_nonce_generation(
                 &self.keygen_session_id,
@@ -210,7 +209,6 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingNonces {
                 KeyMeldError::EnclaveError(format!("Failed to orchestrate nonce generation: {}", e))
             })?;
 
-        // Store the generated nonces in participant data
         for (user_id, nonce) in nonces {
             if let Some(participant_data) = self.registered_participants.get_mut(&user_id) {
                 participant_data.public_nonces = Some(nonce);
@@ -237,7 +235,6 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingNonces {
             self.signing_session_id
         );
 
-        // Validate that all participants have provided nonces
         for (user_id, participant) in &self.registered_participants {
             if participant.public_nonces.is_none() {
                 return Err(KeyMeldError::ValidationError(format!(
@@ -267,7 +264,6 @@ impl Advanceable<SigningSessionStatus> for SigningAggregatingNonces {
             self.signing_session_id
         );
 
-        // For now, we'll collect the nonces but the actual aggregation happens at the protocol level
         let mut all_nonces_collected = true;
         for participant in self.registered_participants.values() {
             if participant.public_nonces.is_none() {
@@ -282,7 +278,6 @@ impl Advanceable<SigningSessionStatus> for SigningAggregatingNonces {
             ));
         }
 
-        // Get the actual aggregate nonce from the enclave manager
         let agg_nonce = enclave_manager
             .get_aggregate_nonce(&self.keygen_session_id, &self.signing_session_id)
             .await?;
@@ -311,7 +306,6 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingPartialSignatures {
             self.registered_participants.len()
         );
 
-        // Generate partial signatures using the orchestration function
         let aggregate_nonce = musig2::PubNonce::from_bytes(&self.aggregate_nonce)
             .map_err(|e| KeyMeldError::CryptoError(format!("Invalid aggregate nonce: {}", e)))?;
 
@@ -330,7 +324,6 @@ impl Advanceable<SigningSessionStatus> for SigningGeneratingPartialSignatures {
                 ))
             })?;
 
-        // Store the generated partial signatures
         for (user_id, partial_sig) in partial_signatures {
             if let Some(participant_data) = self.registered_participants.get_mut(&user_id) {
                 participant_data.partial_signature = Some(partial_sig);
@@ -354,7 +347,6 @@ impl Advanceable<SigningSessionStatus> for SigningCollectingPartialSignatures {
             self.signing_session_id
         );
 
-        // Validate that all participants have provided partial signatures
         for (user_id, participant) in &self.registered_participants {
             if participant.partial_signature.is_none() {
                 return Err(KeyMeldError::ValidationError(format!(
@@ -384,7 +376,6 @@ impl Advanceable<SigningSessionStatus> for SigningFinalizingSignature {
             self.signing_session_id
         );
 
-        // Collect all partial signatures
         let mut partial_signatures = std::collections::BTreeMap::new();
         for (user_id, participant) in &self.registered_participants {
             if let Some(partial_sig) = &participant.partial_signature {
@@ -392,12 +383,10 @@ impl Advanceable<SigningSessionStatus> for SigningFinalizingSignature {
             }
         }
 
-        // Get the encrypted signature from the enclave (already encrypted by the enclave)
         let encrypted_signature_bytes = enclave_manager
             .finalize_signature(&self.keygen_session_id, &self.signing_session_id)
             .await?;
 
-        // Encrypted signature is already base64-encoded by the enclave
         let final_signature_encrypted =
             String::from_utf8(encrypted_signature_bytes).map_err(|e| {
                 KeyMeldError::EnclaveError(format!("Invalid UTF-8 in encrypted signature: {}", e))

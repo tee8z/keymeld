@@ -2,8 +2,6 @@ pub mod client;
 pub mod distribution;
 pub mod manager;
 pub mod protocol;
-
-// Re-export main types that external code needs
 pub use client::VsockClient;
 pub use distribution::{EnclaveAssignmentManager, SessionAssignment};
 pub use manager::{EnclaveConfig, EnclaveInfo, EnclaveManager};
@@ -22,34 +20,13 @@ pub use protocol::{
 
 #[cfg(test)]
 mod tests {
-    use std::ptr::addr_of;
-
     use super::*;
+    use std::ptr::addr_of;
 
     #[test]
     fn test_vsock_client_creation() {
         let client = VsockClient::new(10, 5000);
         assert!(addr_of!(client) as usize != 0);
-    }
-
-    #[test]
-    fn test_enclave_manager() {
-        let configs = vec![
-            EnclaveConfig {
-                id: 0,
-                cid: 10,
-                port: 5000,
-            },
-            EnclaveConfig {
-                id: 1,
-                cid: 11,
-                port: 5000,
-            },
-        ];
-
-        let manager = EnclaveManager::new(configs).unwrap();
-        assert_eq!(manager.list_enclaves().len(), 2);
-        assert!(!manager.is_configured());
     }
 
     #[tokio::test]

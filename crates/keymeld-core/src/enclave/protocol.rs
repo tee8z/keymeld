@@ -1,12 +1,11 @@
 use crate::{
     api::TaprootTweak,
     identifiers::{EnclaveId, SessionId, UserId},
-    musig::AdaptorConfig,
     KeyMeldError,
 };
 use musig2::{PartialSignature, PubNonce};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +29,6 @@ pub enum EnclaveCommand {
     DistributeSessionSecret(DistributeSessionSecretCommand),
     BatchDistributeSessionSecrets(BatchDistributeSessionSecretsCommand),
     GetPublicInfo,
-    // NEW: Adaptor signature commands
     InitiateAdaptorSigning(InitiateAdaptorSigningCommand),
     SignAdaptorPartialSignature(SignAdaptorPartialSignatureCommand),
     ProcessAdaptorSignatures(ProcessAdaptorSignaturesCommand),
@@ -53,7 +51,6 @@ pub enum EnclaveResponse {
     KeygenInitialized(KeygenInitializedResponse),
     SessionSecret(SessionSecretResponse),
     Error(ErrorResponse),
-    // NEW: Adaptor signature responses
     AdaptorPartialSignature(AdaptorPartialSignatureResponse),
     AdaptorSignatures(AdaptorSignaturesResponse),
 }
@@ -85,7 +82,7 @@ pub struct InitSigningSessionCommand {
     pub timeout_secs: u64,
     pub taproot_tweak: TaprootTweak,
     pub expected_participant_count: usize,
-    pub adaptor_configs: Option<Vec<AdaptorConfig>>,
+    pub encrypted_adaptor_configs: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,8 +302,6 @@ pub struct SessionSecretResponse {
     pub enclave_id: EnclaveId,
 }
 
-// NEW: Adaptor signature commands
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitiateAdaptorSigningCommand {
     pub signing_session_id: SessionId,
@@ -323,8 +318,6 @@ pub struct SignAdaptorPartialSignatureCommand {
 pub struct ProcessAdaptorSignaturesCommand {
     pub signing_session_id: SessionId,
 }
-
-// NEW: Adaptor signature responses
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptorPartialSignatureResponse {
@@ -356,8 +349,8 @@ pub struct ErrorResponse {
     pub error: EnclaveError,
 }
 
-impl std::fmt::Display for ErrorResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ErrorResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.error)
     }
 }
@@ -430,7 +423,6 @@ pub enum EnclaveError {
     InvalidAttestation(String),
 }
 
-// Implement From conversions to preserve error details
 impl From<hex::FromHexError> for EnclaveError {
     fn from(err: hex::FromHexError) -> Self {
         EnclaveError::DataDecodingError(err.to_string())

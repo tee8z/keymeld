@@ -22,7 +22,6 @@ pub struct OperationInitData {
     pub aggregate_public_key: Vec<u8>,
     pub is_coordinator: bool,
     pub coordinator_private_key: Option<Vec<u8>>,
-    // Structured encrypted data from database (decrypted)
     pub session_encrypted_data: Option<SigningSessionData>,
     pub enclave_encrypted_data: Option<SigningEnclaveData>,
 }
@@ -37,7 +36,6 @@ pub struct OperationInitialized {
     pub aggregate_public_key: Vec<u8>,
     pub is_coordinator: bool,
     pub coordinator_private_key: Option<Vec<u8>>,
-    // Structured encrypted data for future use
     pub session_data: Option<SigningSessionData>,
     pub enclave_data: Option<SigningEnclaveData>,
 }
@@ -455,7 +453,7 @@ mod tests {
                 TaprootTweak::None,
                 vec![public_key1, public_key2],
                 Some(2),
-                None,
+                Vec::new(),
             )
             .unwrap();
 

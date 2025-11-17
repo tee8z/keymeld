@@ -206,6 +206,40 @@ services:
     profiles:
       - example
 
+  # KeyMeld Adaptor Signatures Example - Demo application for adaptor signatures
+  example-adaptors:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.example
+      network: host
+      args:
+        ENVIRONMENT: ${KEYMELD_ENV:-dev}
+    container_name: keymeld-example-adaptors
+    environment:
+      - RUST_LOG=info,keymeld_adaptor_test=debug
+      - GATEWAY_URL=http://gateway:8080
+      - ESPLORA_URL=http://esplora:3002/api
+      - BITCOIN_NETWORK=regtest
+      - NUM_SIGNERS=2
+    command: ["keymeld_adaptor_test"]
+
+    volumes:
+      - ./docker/config/example-regtest.yaml:/app/config.yaml:ro
+      - /tmp/keymeld-keys:/app/keys
+    networks:
+      - keymeld-network
+    depends_on:
+      gateway:
+        condition: service_healthy
+      enclave-0:
+        condition: service_healthy
+      enclave-1:
+        condition: service_healthy
+      enclave-2:
+        condition: service_healthy
+    profiles:
+      - example
+
 volumes:
   bitcoin-data:
     driver: local

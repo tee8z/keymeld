@@ -7,7 +7,6 @@ use crate::{
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Validates that all enclave epochs in the required set match current enclave epochs
 pub fn validate_enclave_epochs(
     required_epochs: &BTreeMap<EnclaveId, u64>,
     enclave_manager: &EnclaveManager,
@@ -15,7 +14,6 @@ pub fn validate_enclave_epochs(
     for (enclave_id, required_epoch) in required_epochs {
         match enclave_manager.get_enclave_key_epoch(enclave_id) {
             Some(current_epoch) if current_epoch == *required_epoch => {
-                // Epoch matches, this enclave is still valid
                 continue;
             }
             Some(current_epoch) => {
@@ -35,7 +33,6 @@ pub fn validate_enclave_epochs(
     Ok(())
 }
 
-/// Merges fresh participant data into existing participant map
 pub fn merge_participants(
     existing_participants: &mut BTreeMap<UserId, ParticipantData>,
     fresh_participants: BTreeMap<UserId, ParticipantData>,
@@ -46,7 +43,6 @@ pub fn merge_participants(
     Ok(())
 }
 
-/// Validates that all participants in a session have valid epochs
 pub fn validate_all_participants_epochs(
     participants: &BTreeMap<UserId, ParticipantData>,
     enclave_manager: &EnclaveManager,
@@ -57,7 +53,6 @@ pub fn validate_all_participants_epochs(
     Ok(())
 }
 
-/// Checks if a timestamp has expired
 pub fn is_expired(expires_at: u64) -> bool {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -66,7 +61,6 @@ pub fn is_expired(expires_at: u64) -> bool {
     now > expires_at
 }
 
-/// Creates an expiration timestamp from now + duration
 pub fn create_expiration(duration: Duration) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,7 +69,6 @@ pub fn create_expiration(duration: Duration) -> u64 {
     now + duration.as_secs()
 }
 
-/// Gets current timestamp in seconds since epoch
 pub fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -83,7 +76,6 @@ pub fn current_timestamp() -> u64 {
         .as_secs()
 }
 
-/// Validates that expected participants match registered participants
 pub fn validate_participant_completeness(
     expected_participants: &[UserId],
     registered_participants: &BTreeMap<UserId, ParticipantData>,
@@ -98,7 +90,6 @@ pub fn validate_participant_completeness(
         )));
     }
 
-    // Verify all expected participants are registered
     for expected_user in expected_participants {
         if !registered_participants.contains_key(expected_user) {
             return Err(KeyMeldError::ValidationError(format!(
@@ -111,12 +102,10 @@ pub fn validate_participant_completeness(
     Ok(())
 }
 
-/// Extracts user IDs from participant data
 pub fn extract_user_ids(participants: &BTreeMap<UserId, ParticipantData>) -> Vec<UserId> {
     participants.keys().cloned().collect()
 }
 
-/// Extracts enclave IDs from participant data
 pub fn extract_enclave_ids(participants: &BTreeMap<UserId, ParticipantData>) -> Vec<EnclaveId> {
     participants
         .values()
@@ -126,7 +115,6 @@ pub fn extract_enclave_ids(participants: &BTreeMap<UserId, ParticipantData>) -> 
         .collect()
 }
 
-/// Creates a map of enclave epochs from participants
 pub fn create_enclave_epochs_map(
     participants: &BTreeMap<UserId, ParticipantData>,
 ) -> BTreeMap<EnclaveId, u64> {
@@ -137,25 +125,21 @@ pub fn create_enclave_epochs_map(
     epochs
 }
 
-/// Validates session ID format and length
 pub fn validate_session_id(session_id: &SessionId) -> Result<(), KeyMeldError> {
     if session_id.to_string().is_empty() {
         return Err(KeyMeldError::ValidationError(
             "Session ID cannot be empty".to_string(),
         ));
     }
-    // Add more validation as needed
     Ok(())
 }
 
-/// Validates user ID format and length
 pub fn validate_user_id(user_id: &UserId) -> Result<(), KeyMeldError> {
     if user_id.to_string().is_empty() {
         return Err(KeyMeldError::ValidationError(
             "User ID cannot be empty".to_string(),
         ));
     }
-    // Add more validation as needed
     Ok(())
 }
 
@@ -171,15 +155,15 @@ mod tests {
             user_id,
             enclave_id,
             1,
-            "{}".to_string(),            // session_encrypted_data
-            "encrypted_key".to_string(), // enclave_encrypted_data
+            "{}".to_string(),
+            "encrypted_key".to_string(),
         )
     }
 
     #[test]
     fn test_is_expired() {
-        let past_timestamp = current_timestamp() - 3600; // 1 hour ago
-        let future_timestamp = current_timestamp() + 3600; // 1 hour from now
+        let past_timestamp = current_timestamp() - 3600;
+        let future_timestamp = current_timestamp() + 3600;
 
         assert!(is_expired(past_timestamp));
         assert!(!is_expired(future_timestamp));
@@ -191,7 +175,6 @@ mod tests {
         let expiration = create_expiration(duration);
         let expected = current_timestamp() + 3600;
 
-        // Allow for small timing differences
         assert!((expiration as i64 - expected as i64).abs() < 2);
     }
 
@@ -205,17 +188,14 @@ mod tests {
         let mut registered_participants = BTreeMap::new();
         registered_participants.insert(user1.clone(), create_test_participant(user1, enclave1));
 
-        // Should fail with insufficient participants
         assert!(validate_participant_completeness(
             &expected_participants,
             &registered_participants
         )
         .is_err());
 
-        // Add second participant
         registered_participants.insert(user2.clone(), create_test_participant(user2, enclave1));
 
-        // Should now succeed
         assert!(validate_participant_completeness(
             &expected_participants,
             &registered_participants

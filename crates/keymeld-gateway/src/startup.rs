@@ -267,7 +267,6 @@ impl Application {
             })
             .collect();
 
-        // Create timeout and retry configs using From implementations
         let timeout_config = TimeoutConfig::from(&config.enclaves);
         let retry_config = RetryConfig::from(&config.enclaves);
 
@@ -410,7 +409,7 @@ mod tests {
             environment: Environment::Development,
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 0, // Let OS assign port for testing
+                port: 0,
                 enable_cors: true,
                 enable_compression: true,
                 request_timeout_secs: Some(10),
@@ -478,7 +477,7 @@ mod tests {
             .expect("Failed to setup enclave manager");
 
         let health_result = enclave_manager.health_check().await;
-        // health_check now returns BTreeMap directly, so just verify it's not empty
+
         assert!(!health_result.is_empty() || health_result.is_empty());
     }
 

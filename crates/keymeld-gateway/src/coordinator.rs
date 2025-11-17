@@ -169,7 +169,7 @@ impl Coordinator {
             {
                 Ok(sessions) => {
                     if sessions.is_empty() {
-                        break; // No more sessions to process
+                        break;
                     }
 
                     let mut batch_processed_count = 0;
@@ -192,7 +192,6 @@ impl Coordinator {
 
                     offset += batch_size;
 
-                    // If we processed fewer than batch_size sessions, we've reached the end
                     if batch_processed_count < batch_size {
                         break;
                     }
@@ -256,7 +255,7 @@ impl Coordinator {
             {
                 Ok(sessions) => {
                     if sessions.is_empty() {
-                        break; // No more sessions to process
+                        break;
                     }
 
                     let mut batch_processed_count = 0;
@@ -278,7 +277,6 @@ impl Coordinator {
 
                     offset += batch_size;
 
-                    // If we processed fewer than batch_size sessions, we've reached the end
                     if batch_processed_count < batch_size {
                         break;
                     }
@@ -750,7 +748,6 @@ impl Coordinator {
                         }
                     };
 
-                    // Update structured data with adaptor signature results
                     let updated_data = data.with_adaptor_signatures(encrypted_adaptor_signatures);
                     self.db
                         .update_signing_session_structured_data(session_id, &updated_data)

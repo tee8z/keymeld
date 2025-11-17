@@ -1,6 +1,6 @@
-use crate::{resilience::TimeoutConfig, KeyMeldError};
+use crate::{identifiers::EnclaveId, resilience::TimeoutConfig, KeyMeldError};
 
-use std::time::Duration;
+use std::{env, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -9,7 +9,7 @@ use tokio::{
 use tokio_vsock::{VsockAddr, VsockStream};
 use tracing::error;
 
-use super::protocol::{EnclaveCommand, EnclaveResponse};
+use super::protocol::{ConfigureCommand, EnclaveCommand, EnclaveResponse};
 
 #[derive(Debug, Clone)]
 pub struct VsockClient {
@@ -29,10 +29,10 @@ impl VsockClient {
     }
 
     pub fn with_config(cid: u32, port: u32, timeout_config: &TimeoutConfig) -> Self {
-        let use_tcp_fallback = std::env::var("TEST_MODE").unwrap_or_default() == "true";
+        let use_tcp_fallback = env::var("TEST_MODE").unwrap_or_default() == "true";
         let tcp_host = if use_tcp_fallback {
             let env_key = format!("ENCLAVE_{}_HOST", cid);
-            let hostname = std::env::var(&env_key).unwrap_or_else(|_| "localhost".to_string());
+            let hostname = env::var(&env_key).unwrap_or_else(|_| "localhost".to_string());
             Some(hostname)
         } else {
             None
@@ -98,7 +98,6 @@ impl VsockClient {
                     .map_err(|_| KeyMeldError::EnclaveError("Command data too large".to_string()))?
                     .to_be_bytes();
 
-                // Write command length with timeout
                 match timeout(
                     self.network_write_timeout,
                     stream.write_all(&command_length),
@@ -120,7 +119,6 @@ impl VsockClient {
                     }
                 }
 
-                // Write command data with timeout
                 match timeout(self.network_write_timeout, stream.write_all(&command_data)).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
@@ -137,7 +135,6 @@ impl VsockClient {
                     }
                 }
 
-                // Flush the stream to ensure data is sent
                 match timeout(self.network_write_timeout, stream.flush()).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
@@ -156,7 +153,6 @@ impl VsockClient {
 
                 let mut length_buffer = [0u8; 4];
 
-                // Use longer timeout for reading response length to handle slow crypto operations
                 match timeout(
                     self.network_read_timeout,
                     stream.read_exact(&mut length_buffer),
@@ -189,7 +185,6 @@ impl VsockClient {
 
                 let mut response_buffer = vec![0u8; response_length];
 
-                // Use timeout for reading response data to prevent hanging
                 match timeout(
                     self.network_read_timeout,
                     stream.read_exact(&mut response_buffer),
@@ -278,9 +273,9 @@ impl VsockClient {
     pub async fn configure(
         &self,
         region: String,
-        enclave_id: crate::identifiers::EnclaveId,
+        enclave_id: EnclaveId,
     ) -> Result<(), KeyMeldError> {
-        let command = super::protocol::ConfigureCommand { region, enclave_id };
+        let command = ConfigureCommand { region, enclave_id };
         match self
             .send_command(EnclaveCommand::Configure(command))
             .await?
@@ -316,7 +311,6 @@ mod tests {
 
         let client = VsockClient::with_config(3, 8000, &custom_timeout_config);
 
-        // Verify that the client uses the configured timeouts
         assert_eq!(client.timeout, Duration::from_secs(120));
         assert_eq!(client.network_write_timeout, Duration::from_secs(10));
         assert_eq!(client.network_read_timeout, Duration::from_secs(600));

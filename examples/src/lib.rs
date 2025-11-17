@@ -1,7 +1,3 @@
-//! KeyMeld Examples Library
-//!
-//! Shared code and utilities for KeyMeld examples
-
 pub mod adaptor_utils;
 
 use anyhow::{anyhow, Result};
@@ -316,7 +312,7 @@ impl KeyMeldE2ETest {
         info!("📍 Coordinator address: {}", coordinator_address);
 
         let current_balance = self.coordinator_wallet.balance().total();
-        let required_amount = self.amount + 10_000; // Add fee buffer
+        let required_amount = self.amount + 10_000;
 
         if current_balance.to_sat() >= required_amount {
             info!(
@@ -388,7 +384,7 @@ impl KeyMeldE2ETest {
             .peek_address(KeychainKind::External, 0)
             .address;
 
-        let required_amount = self.amount + 5_000; // Add fee buffer
+        let required_amount = self.amount + 5_000;
         let funding_txid = self
             .rpc_client
             .send_to_address(
@@ -405,13 +401,11 @@ impl KeyMeldE2ETest {
 
         info!("📡 Funding transaction: {}", funding_txid);
 
-        // Generate a block to confirm
         let _ = self
             .rpc_client
             .generate_to_address(1, &coordinator_address)
             .map_err(|e| anyhow!("Failed to generate block: {e}"))?;
 
-        // Wait for confirmation
         loop {
             sleep(Duration::from_secs(1)).await;
 
@@ -532,7 +526,7 @@ impl KeyMeldE2ETest {
             keygen_session_id: keygen_session_id.clone().try_into().unwrap(),
             coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
             coordinator_encrypted_private_key: encrypted_key.to_hex_json()?,
-            coordinator_enclave_id: 1u32.into(), // TODO: Get from available enclaves
+            coordinator_enclave_id: 1u32.into(),
             expected_participants: vec![self.coordinator_user_id.clone().try_into().unwrap()],
             timeout_secs: 1800,
             encrypted_session_secret: session_secret.clone(),
@@ -826,7 +820,6 @@ impl KeyMeldE2ETest {
         self.session_secrets
             .insert(signing_session_id.clone(), session_secret.clone());
 
-        // Standard MuSig2 signing without adaptor signatures
         let encrypted_adaptor_configs = String::new();
 
         let request = CreateSigningSessionRequest {
@@ -1026,23 +1019,19 @@ impl KeyMeldE2ETest {
     pub fn generate_user_hmac(&self, user_id: &str, private_key: &SecretKey) -> Result<String> {
         use rand::RngCore;
 
-        // Generate a random nonce
         let mut nonce_bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
 
-        // Create message to sign: user_id:nonce
         let message = format!("{}:{}", user_id, nonce);
         let message_hash = sha256::Hash::hash(message.as_bytes());
 
-        // Sign with private key
         let secp = Secp256k1::new();
         let message = bitcoin::secp256k1::Message::from_digest_slice(message_hash.as_ref())
             .map_err(|e| anyhow!("Failed to create message from hash: {}", e))?;
         let signature = secp.sign_ecdsa(&message, private_key);
         let signature_bytes = signature.serialize_compact();
 
-        // Return format: user_id:nonce:signature
         Ok(format!(
             "{}:{}:{}",
             user_id,
@@ -1083,7 +1072,6 @@ impl KeyMeldE2ETest {
         Ok(())
     }
 
-    // Common configuration loading utilities
     pub fn load_basic_config() -> Result<(ExampleConfig, u64, String)> {
         let matches = Command::new("KeyMeld End-to-End Test")
             .version("1.0")

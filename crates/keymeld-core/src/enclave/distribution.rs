@@ -4,7 +4,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,8 +104,8 @@ impl EnclaveAssignmentManager {
             session_id: session_id.clone(),
             coordinator_enclave,
             user_enclave_assignments: user_assignments,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         };
@@ -134,7 +137,6 @@ impl EnclaveAssignmentManager {
             ));
         }
 
-        // Verify coordinator enclave is available
         if !self.available_enclaves.contains(&coordinator_enclave) {
             return Err(KeyMeldError::InvalidConfiguration(format!(
                 "Coordinator enclave {} is not available",
@@ -174,8 +176,8 @@ impl EnclaveAssignmentManager {
             session_id: session_id.clone(),
             coordinator_enclave,
             user_enclave_assignments: user_assignments,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         };
@@ -214,13 +216,12 @@ impl EnclaveAssignmentManager {
                     ))
                 })?;
 
-        // Create new assignment copying exact enclave assignments from keygen
         let signing_assignment = SessionAssignment {
             session_id: signing_session_id.clone(),
             coordinator_enclave: keygen_assignment.coordinator_enclave,
             user_enclave_assignments: keygen_assignment.user_enclave_assignments.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         };
@@ -409,18 +410,14 @@ mod tests {
             )
             .unwrap();
 
-        // Verify the specified coordinator was used
         assert_eq!(assignment.coordinator_enclave, specific_coordinator);
 
-        // Verify users were assigned to different enclaves (not the coordinator)
         for user_enclave in assignment.user_enclave_assignments.values() {
             assert_ne!(*user_enclave, specific_coordinator);
         }
 
-        // Verify assignment is stored
         assert!(manager.get_session_assignment(&session_id).is_some());
 
-        // Test invalid coordinator enclave
         let invalid_coordinator = EnclaveId::from(99);
         let result = manager.assign_enclaves_for_session_with_coordinator(
             SessionId::new_v7(),

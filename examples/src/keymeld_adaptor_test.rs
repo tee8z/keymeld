@@ -1,9 +1,3 @@
-//! KeyMeld Adaptor Signatures E2E Test
-//!
-//! This example demonstrates the complete adaptor signatures workflow alongside regular MuSig2 signing.
-//! It showcases all three adaptor signature types (Single, And, Or) and validates the entire
-//! client-side encryption/decryption flow.
-
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -14,7 +8,6 @@ use keymeld_core::api::{CreateSigningSessionRequest, SigningSessionStatusRespons
 use keymeld_core::musig::{AdaptorConfig, AdaptorSignatureResult};
 use keymeld_core::session::SigningStatusKind;
 
-// Re-use the main example's structures and helper functions
 use keymeld_examples::adaptor_utils::{
     create_test_adaptor_configs, print_success_summary, validate_adaptor_signatures,
     AdaptorTestConfig,
@@ -81,7 +74,6 @@ async fn run_adaptor_signatures_test(
     test.load_participants().await?;
     test.fund_coordinator_from_master().await?;
 
-    // Phase 1: Keygen (reuse existing workflow)
     info!("🔑 Starting Phase 1: Keygen Session");
     let keygen_session_id = test.create_keygen_session().await?;
     test.register_keygen_participants(&keygen_session_id)
@@ -101,7 +93,6 @@ async fn run_adaptor_signatures_test(
         adaptor_configs.len()
     );
 
-    // Display configuration details
     for (i, config) in adaptor_configs.iter().enumerate() {
         info!(
             "  Config {}: {:?} with {} points",
@@ -116,7 +107,6 @@ async fn run_adaptor_signatures_test(
         test_signing_session_with_adaptors(test, &keygen_session_id, &psbt, &adaptor_configs)
             .await?;
 
-    // Handle approvals (reuse existing approval logic)
     test.approve_signing_session(
         &signing_session_id,
         test.coordinator_user_id.as_str(),
@@ -155,7 +145,6 @@ async fn test_signing_session_with_adaptors(
     let signing_session_id = uuid::Uuid::now_v7().to_string();
     let sighash = test.calculate_taproot_sighash(psbt)?;
 
-    // Get session secret for encryption
     let session_secret = test
         .session_secrets
         .get(keygen_session_id)
@@ -403,7 +392,6 @@ fn load_config() -> Result<(ExampleConfig, u64, String, AdaptorTestConfig)> {
     // Configure adaptor test settings
     let mut adaptor_config = AdaptorTestConfig::default();
 
-    // Handle exclusive options
     if matches.get_flag("single-only") {
         adaptor_config.test_single = true;
         adaptor_config.test_and = false;
@@ -417,7 +405,6 @@ fn load_config() -> Result<(ExampleConfig, u64, String, AdaptorTestConfig)> {
         adaptor_config.test_and = false;
         adaptor_config.test_or = true;
     } else {
-        // Use individual flags or defaults
         adaptor_config.test_single = matches.get_flag("test-single") || adaptor_config.test_single;
         adaptor_config.test_and = matches.get_flag("test-and") || adaptor_config.test_and;
         adaptor_config.test_or = matches.get_flag("test-or") || adaptor_config.test_or;

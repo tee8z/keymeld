@@ -3,19 +3,21 @@ use crate::{
     enclave::{
         protocol::EnclavePublicKeyInfo, AddNonceCommand, AddPartialSignatureCommand,
         GenerateNonceCommand, InitKeygenSessionCommand, InitSigningSessionCommand,
-        ParitialSignatureCommand,
+        InitiateAdaptorSigningCommand, ParitialSignatureCommand, ProcessAdaptorSignaturesCommand,
+        SignAdaptorPartialSignatureCommand,
     },
     identifiers::{EnclaveId, SessionId, UserId},
     resilience::{RetryConfig, TimeoutConfig},
     AggregatePublicKey, KeyMeldError, ParticipantData,
 };
 use governor::{clock::DefaultClock, Quota, RateLimiter};
-use musig2::PubNonce;
+use musig2::{AggNonce, PubNonce};
 use std::num::NonZeroU32;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    mem,
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -92,15 +94,6 @@ pub struct EnclaveManager {
 }
 
 impl EnclaveManager {
-    pub fn new(enclave_configs: Vec<EnclaveConfig>) -> Result<Self, KeyMeldError> {
-        Self::new_with_config(
-            enclave_configs,
-            TimeoutConfig::default(),
-            RetryConfig::default(),
-            50, // Default max connections per enclave
-        )
-    }
-
     async fn collect_enclave_public_keys(
         &self,
         enclave_ids: &[EnclaveId],
@@ -346,9 +339,8 @@ impl EnclaveManager {
         enclave_id: &EnclaveId,
         command: EnclaveCommand,
     ) -> Result<EnclaveResponse, KeyMeldError> {
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
-        // Check rate limiter before proceeding - clone the Arc for thread safety
         let rate_limiter = self
             .rate_limiters
             .get(enclave_id)
@@ -361,7 +353,6 @@ impl EnclaveManager {
             })?
             .clone();
 
-        // Check if we can proceed (non-blocking check)
         match rate_limiter.check() {
             Ok(_) => {}
             Err(_) => {
@@ -385,7 +376,7 @@ impl EnclaveManager {
                     "Command successful to enclave {} in {:?}, response type: {:?}",
                     enclave_id,
                     elapsed,
-                    std::mem::discriminant(&response)
+                    mem::discriminant(&response)
                 );
                 Ok(response)
             }
@@ -497,8 +488,6 @@ impl EnclaveManager {
         &self,
         enclave_id: &EnclaveId,
     ) -> Result<(String, Option<AttestationResponse>, u32, u64, u64, u64), KeyMeldError> {
-        use super::protocol::{EnclaveCommand, EnclaveResponse};
-
         match self
             .send_command_to_enclave(enclave_id, EnclaveCommand::GetPublicInfo)
             .await?
@@ -667,7 +656,6 @@ impl EnclaveManager {
                 signer_index: self.calculate_signer_index(user_id, participants)?,
             };
 
-            // Use standardized retry logic with exponential backoff
             let public_nonce = self
                 .execute_with_retry(
                     &participant.enclave_id,
@@ -746,7 +734,6 @@ impl EnclaveManager {
         keygen_session_id: &SessionId,
         signing_session_id: &SessionId,
     ) -> Result<musig2::AggNonce, KeyMeldError> {
-        // Get the session assignment to find the coordinator enclave
         let session_assignment =
             self.get_session_assignment(keygen_session_id)?
                 .ok_or_else(|| {
@@ -763,15 +750,13 @@ impl EnclaveManager {
             keygen_session_id: keygen_session_id.clone(),
         };
 
-        // Use the coordinator enclave where the aggregate nonce is stored
         match self
             .send_command_to_enclave(&coordinator_enclave, EnclaveCommand::GetAggregateNonce(cmd))
             .await
         {
             Ok(EnclaveResponse::AggregateNonce(resp)) => {
-                // Convert PubNonce back to AggNonce
                 let serialized = resp.aggregate_nonce.serialize();
-                let agg_nonce = musig2::AggNonce::from_bytes(&serialized).map_err(|e| {
+                let agg_nonce = AggNonce::from_bytes(&serialized).map_err(|e| {
                     KeyMeldError::CryptoError(format!("Invalid aggregate nonce: {}", e))
                 })?;
                 Ok(agg_nonce)
@@ -793,7 +778,6 @@ impl EnclaveManager {
         keygen_session_id: &SessionId,
         signing_session_id: &SessionId,
     ) -> Result<Vec<u8>, KeyMeldError> {
-        // Get the session assignment to find the coordinator enclave
         let session_assignment =
             self.get_session_assignment(keygen_session_id)?
                 .ok_or_else(|| {
@@ -810,7 +794,6 @@ impl EnclaveManager {
             keygen_session_id: keygen_session_id.clone(),
         };
 
-        // Use the coordinator enclave where the final signature aggregation happens
         match self
             .send_command_to_enclave(&coordinator_enclave, EnclaveCommand::Finalize(cmd))
             .await
@@ -846,7 +829,6 @@ impl EnclaveManager {
         let mut successful_signatures = 0;
 
         for (user_id, participant) in participants {
-            // Check if participant already has a signature
             if participant.partial_signature.is_some() {
                 debug!(
                     "User {} already has partial signature, skipping generation",
@@ -978,7 +960,7 @@ impl EnclaveManager {
 
         let mut enclave_participants: BTreeMap<EnclaveId, Vec<(&UserId, &ParticipantData)>> =
             BTreeMap::new();
-        let mut all_required_enclaves = std::collections::BTreeSet::new();
+        let mut all_required_enclaves = BTreeSet::new();
 
         for (user_id, participant_data) in &params.participants {
             enclave_participants
@@ -988,8 +970,7 @@ impl EnclaveManager {
             all_required_enclaves.insert(participant_data.enclave_id);
         }
 
-        // Initialize sessions in all enclaves that have participants
-        let mut successfully_initialized_enclaves = std::collections::BTreeSet::new();
+        let mut successfully_initialized_enclaves = BTreeSet::new();
         for enclave_id in enclave_participants.keys() {
             let init_cmd = InitSigningSessionCommand {
                 keygen_session_id: params.keygen_session_id.clone(),
@@ -1008,12 +989,10 @@ impl EnclaveManager {
                 timeout_secs: self.timeout_config.session_init_timeout_secs,
                 taproot_tweak: params.taproot_tweak.clone(),
                 expected_participant_count: params.participants.len(),
-                adaptor_configs: if params.encrypted_adaptor_configs.is_empty() {
+                encrypted_adaptor_configs: if params.encrypted_adaptor_configs.is_empty() {
                     None
                 } else {
-                    // Pass encrypted adaptor configs to enclaves - they will decrypt
-                    // Gateway manager should not decrypt, only forward encrypted data
-                    None // Enclaves will handle decryption with session secret
+                    Some(params.encrypted_adaptor_configs.clone())
                 },
             };
 
@@ -1033,7 +1012,7 @@ impl EnclaveManager {
                         "CRITICAL: Failed to initialize signing session on enclave {}: {}",
                         enclave_id, e
                     );
-                    // DO NOT skip this enclave - we need all enclaves to work
+
                     return Err(KeyMeldError::EnclaveError(format!(
                         "Failed to initialize signing session on required enclave {}: {}. Cannot proceed without all enclaves.",
                         enclave_id, e
@@ -1042,7 +1021,6 @@ impl EnclaveManager {
             }
         }
 
-        // Add participants only to their assigned enclaves for optimal distribution
         debug!(
             "Adding participants to their assigned enclaves for signing session {}",
             params.signing_session_id
@@ -1054,7 +1032,6 @@ impl EnclaveManager {
         for (user_id, participant) in &params.participants {
             let assigned_enclave_id = participant.enclave_id;
 
-            // Only process if this enclave was successfully initialized
             if !successfully_initialized_enclaves.contains(&assigned_enclave_id) {
                 error!(
                     "Skipping participant {} - assigned enclave {} was not successfully initialized",
@@ -1114,7 +1091,7 @@ impl EnclaveManager {
                                 user_id, assigned_enclave_id, MAX_ATTEMPTS, e
                             );
                             failed_enclaves.push((assigned_enclave_id, user_id.clone(), e));
-                            break; // Exit retry loop for this participant
+                            break;
                         } else {
                             warn!("Failed to add participant {} to enclave {} (attempt {}), retrying: {}",
                                 user_id, assigned_enclave_id, attempts, e);
@@ -1142,7 +1119,6 @@ impl EnclaveManager {
                 );
             }
 
-            // If any participants failed to be added, the session cannot proceed
             return Err(KeyMeldError::EnclaveError(format!(
                 "Signing session initialization failed: {} participants could not be added to their assigned enclaves",
                 failed_enclaves.len()
@@ -1156,7 +1132,6 @@ impl EnclaveManager {
             ));
         }
 
-        // Verify all participants were successfully added to their assigned enclaves
         if successful_additions != params.participants.len() {
             error!(
                 "🚨 Participant distribution incomplete: {}/{} participants successfully added",
@@ -1223,7 +1198,6 @@ impl EnclaveManager {
             .collect_enclave_public_keys(&enclaves_with_participants)
             .await?;
 
-        // Phase 1: Initialize keygen sessions on all enclaves
         let mut coordinator_encrypted_secrets = Vec::new();
         for enclave_id in &enclaves_with_participants {
             let init_cmd = InitKeygenSessionCommand {
@@ -1244,7 +1218,7 @@ impl EnclaveManager {
                 enclave_public_keys: if *enclave_id == *coordinator_enclave_id {
                     all_enclave_public_keys.clone()
                 } else {
-                    vec![] // Non-coordinator enclaves don't need other enclave keys
+                    vec![]
                 },
             };
 
@@ -1276,7 +1250,6 @@ impl EnclaveManager {
             }
         }
 
-        // Phase 2: Distribute session secrets to non-coordinator enclaves
         for encrypted_secret in coordinator_encrypted_secrets {
             let command = DistributeSessionSecretCommand {
                 keygen_session_id: keygen_session_id.clone(),
@@ -1305,9 +1278,6 @@ impl EnclaveManager {
             }
         }
 
-        // Add participant data to all involved enclaves for aggregate key computation
-        // NOTE: In MuSig2 keygen, involved enclaves need participant public keys
-        // for aggregate key computation. Private keys are only sent to assigned enclaves.
         info!(
             "Adding {} participants to {} enclaves for keygen session {} (MuSig2 aggregate key computation)",
             participants.len(),
@@ -1326,8 +1296,6 @@ impl EnclaveManager {
                     "Adding participant {} to enclave {} (participant's assigned enclave: {})",
                     user_id, enclave_id, participant.enclave_id
                 );
-                // Only provide private key material to the participant's assigned enclave
-                // Public key data is shared as needed for MuSig2 operations
                 let enclave_encrypted_data = if *enclave_id == participant.enclave_id {
                     debug!(
                         "Providing private key data for user {} to their assigned enclave {}",
@@ -1418,21 +1386,20 @@ impl EnclaveManager {
             signing_session_id
         );
 
-        // Step 1: Initiate adaptor signing on coordinator enclave
         let coordinator_enclave_id = participants
             .values()
             .next()
             .map(|p| p.enclave_id)
             .ok_or_else(|| KeyMeldError::EnclaveError("No participants found".to_string()))?;
 
-        let initiate_cmd = crate::enclave::InitiateAdaptorSigningCommand {
+        let initiate_cmd = InitiateAdaptorSigningCommand {
             signing_session_id: signing_session_id.clone(),
         };
 
         let initiate_response = self
             .send_command_to_enclave(
                 &coordinator_enclave_id,
-                crate::enclave::EnclaveCommand::InitiateAdaptorSigning(initiate_cmd),
+                EnclaveCommand::InitiateAdaptorSigning(initiate_cmd),
             )
             .await
             .map_err(|e| {
@@ -1440,7 +1407,7 @@ impl EnclaveManager {
             })?;
 
         match initiate_response {
-            crate::enclave::EnclaveResponse::Success(_) => {}
+            EnclaveResponse::Success(_) => {}
             _ => {
                 return Err(KeyMeldError::EnclaveError(
                     "Unexpected response from initiate adaptor signing".to_string(),
@@ -1448,17 +1415,15 @@ impl EnclaveManager {
             }
         }
 
-        // Step 2: Parse adaptor configs to get adaptor IDs
         let configs: Vec<crate::musig::AdaptorConfig> = if !adaptor_configs.is_empty() {
             crate::api::validation::decrypt_adaptor_configs(adaptor_configs, "placeholder_secret")?
         } else {
             Vec::new()
         };
 
-        // Step 3: Generate partial adaptor signatures for each participant and adaptor
         for (user_id, participant) in participants {
             for config in &configs {
-                let partial_cmd = crate::enclave::SignAdaptorPartialSignatureCommand {
+                let partial_cmd = SignAdaptorPartialSignatureCommand {
                     signing_session_id: signing_session_id.clone(),
                     user_id: user_id.clone(),
                     adaptor_id: config.adaptor_id,
@@ -1467,7 +1432,7 @@ impl EnclaveManager {
                 let partial_response = self
                     .send_command_to_enclave(
                         &participant.enclave_id,
-                        crate::enclave::EnclaveCommand::SignAdaptorPartialSignature(partial_cmd),
+                        EnclaveCommand::SignAdaptorPartialSignature(partial_cmd),
                     )
                     .await
                     .map_err(|e| {
@@ -1478,7 +1443,7 @@ impl EnclaveManager {
                     })?;
 
                 match partial_response {
-                    crate::enclave::EnclaveResponse::AdaptorPartialSignature(_) => {}
+                    EnclaveResponse::AdaptorPartialSignature(_) => {}
                     _ => {
                         return Err(KeyMeldError::EnclaveError(format!(
                             "Unexpected response from adaptor partial signing for user {}",
@@ -1489,15 +1454,14 @@ impl EnclaveManager {
             }
         }
 
-        // Step 4: Process and aggregate all adaptor signatures
-        let process_cmd = crate::enclave::ProcessAdaptorSignaturesCommand {
+        let process_cmd = ProcessAdaptorSignaturesCommand {
             signing_session_id: signing_session_id.clone(),
         };
 
         let process_response = self
             .send_command_to_enclave(
                 &coordinator_enclave_id,
-                crate::enclave::EnclaveCommand::ProcessAdaptorSignatures(process_cmd),
+                EnclaveCommand::ProcessAdaptorSignatures(process_cmd),
             )
             .await
             .map_err(|e| {
@@ -1505,7 +1469,7 @@ impl EnclaveManager {
             })?;
 
         match process_response {
-            crate::enclave::EnclaveResponse::AdaptorSignatures(response) => {
+            EnclaveResponse::AdaptorSignatures(response) => {
                 info!(
                     "Successfully processed adaptor signatures for session {}",
                     signing_session_id
@@ -1528,8 +1492,10 @@ mod tests {
         identifiers::{EnclaveId, SessionId, UserId},
         ParticipantData,
     };
-    use std::collections::{BTreeMap, HashSet};
-    use std::sync::{Arc, RwLock};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        sync::{Arc, RwLock},
+    };
 
     fn create_test_manager() -> EnclaveManager {
         let assignment_manager = RwLock::new(EnclaveAssignmentManager::new(vec![

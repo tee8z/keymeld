@@ -8,6 +8,8 @@ use serde_json;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+use crate::musig::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateKeygenSessionRequest {
@@ -423,7 +425,7 @@ pub mod validation {
     pub fn decrypt_adaptor_configs(
         encrypted_configs_hex: &str,
         session_secret: &str,
-    ) -> Result<Vec<crate::musig::AdaptorConfig>, KeyMeldError> {
+    ) -> Result<Vec<AdaptorConfig>, KeyMeldError> {
         if encrypted_configs_hex.is_empty() {
             return Ok(Vec::new());
         }
@@ -444,7 +446,7 @@ pub mod validation {
     }
 
     pub fn encrypt_adaptor_configs_for_client(
-        configs: &[crate::musig::AdaptorConfig],
+        configs: &[AdaptorConfig],
         session_secret: &str,
     ) -> Result<String, KeyMeldError> {
         if configs.is_empty() {
@@ -463,25 +465,25 @@ pub mod validation {
     }
 
     pub fn validate_decrypted_adaptor_configs(
-        configs: &[crate::musig::AdaptorConfig],
+        configs: &[AdaptorConfig],
     ) -> Result<(), KeyMeldError> {
         for config in configs {
             match config.adaptor_type {
-                crate::musig::AdaptorType::Single => {
+                AdaptorType::Single => {
                     if config.adaptor_points.len() != 1 {
                         return Err(KeyMeldError::InvalidConfiguration(
                             "Single adaptor requires exactly 1 point".to_string(),
                         ));
                     }
                 }
-                crate::musig::AdaptorType::And => {
+                AdaptorType::And => {
                     if config.adaptor_points.len() < 2 {
                         return Err(KeyMeldError::InvalidConfiguration(
                             "And adaptor requires at least 2 points".to_string(),
                         ));
                     }
                 }
-                crate::musig::AdaptorType::Or => {
+                AdaptorType::Or => {
                     if config.adaptor_points.len() < 2 {
                         return Err(KeyMeldError::InvalidConfiguration(
                             "Or adaptor requires at least 2 points".to_string(),
@@ -496,10 +498,60 @@ pub mod validation {
             }
 
             for point_hex in &config.adaptor_points {
-                if hex::decode(point_hex).is_err() {
+                if point_hex.len() != 66 {
                     return Err(KeyMeldError::InvalidConfiguration(
-                        "Invalid hex in adaptor point".to_string(),
+                        "Adaptor point must be 66 hex characters (33 bytes compressed secp256k1)"
+                            .to_string(),
                     ));
+                }
+
+                let point_bytes = match hex::decode(point_hex) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Adaptor point must be valid hex".to_string(),
+                        ))
+                    }
+                };
+
+                if point_bytes[0] != 0x02 && point_bytes[0] != 0x03 {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Adaptor point must be a valid compressed secp256k1 point".to_string(),
+                    ));
+                }
+            }
+
+            if let Some(hints) = &config.hints {
+                for hint in hints {
+                    match hint {
+                        AdaptorHint::Scalar(bytes) => {
+                            if bytes.len() != 32 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Scalar hint must be 32 bytes".to_string(),
+                                ));
+                            }
+                        }
+                        AdaptorHint::Point(bytes) => {
+                            if bytes.len() != 33 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Point hint must be 33 bytes".to_string(),
+                                ));
+                            }
+                            if bytes[0] != 0x02 && bytes[0] != 0x03 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Point hint must be a valid compressed secp256k1 point"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        AdaptorHint::Hash(bytes) => {
+                            if bytes.len() != 32 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Hash hint must be 32 bytes".to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -509,7 +561,7 @@ pub mod validation {
     pub fn decrypt_adaptor_signatures_with_secret(
         encrypted_signatures_hex: &str,
         session_secret: &str,
-    ) -> Result<Vec<crate::musig::AdaptorSignatureResult>, KeyMeldError> {
+    ) -> Result<Vec<AdaptorSignatureResult>, KeyMeldError> {
         if encrypted_signatures_hex.is_empty() {
             return Ok(Vec::new());
         }
