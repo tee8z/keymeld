@@ -10,12 +10,8 @@ name = "keymeld_examples"
 path = "src/lib.rs"
 
 [[bin]]
-name = "keymeld_example"
-path = "src/keymeld_example.rs"
-
-[[bin]]
-name = "keymeld_adaptor_test"
-path = "src/keymeld_adaptor_test.rs"
+name = "keymeld_demo"
+path = "src/main.rs"
 
 
 

@@ -31,7 +31,7 @@ use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use bitcoin::hashes::{sha256, Hash};
-use clap::{Arg, Command};
+
 use rand::RngCore;
 use std::collections::HashMap;
 use std::fs;
@@ -194,12 +194,12 @@ impl KeyMeldE2ETest {
             0,
         )?;
 
-        let coordinator_user_id = format!("coord_{}", coordinator.fingerprint());
+        let coordinator_user_id = uuid::Uuid::now_v7().to_string();
         info!("👤 Coordinator user ID: {}", coordinator_user_id);
 
         let mut participant_user_ids = vec![coordinator_user_id.clone()];
-        for i in 1..config.num_signers {
-            let user_id = format!("participant_{}", i);
+        for _ in 1..config.num_signers {
+            let user_id = uuid::Uuid::now_v7().to_string();
             participant_user_ids.push(user_id);
         }
 
@@ -618,18 +618,19 @@ impl KeyMeldE2ETest {
             require_signing_approval: true,
         };
 
-        let user_hmac = self.generate_user_hmac(
+        let session_hmac = self.generate_session_hmac(
+            keygen_session_id,
             &self.coordinator_user_id,
-            &self.coordinator_derived_private_key,
+            &session_secret,
         )?;
 
         let response = self
             .client
             .post(format!(
-                "{}/api/v1/keygen/register",
-                self.config.gateway_url
+                "{}/api/v1/keygen/{}/participants",
+                self.config.gateway_url, keygen_session_id
             ))
-            .header("X-User-HMAC", user_hmac)
+            .header("X-Session-HMAC", session_hmac)
             .json(&request)
             .send()
             .await?;
@@ -678,16 +679,16 @@ impl KeyMeldE2ETest {
             require_signing_approval: requires_approval,
         };
 
-        let user_hmac =
-            self.generate_user_hmac(&participant.user_id, &participant.derived_private_key)?;
+        let session_hmac =
+            self.generate_session_hmac(keygen_session_id, &participant.user_id, &session_secret)?;
 
         let response = self
             .client
             .post(format!(
-                "{}/api/v1/keygen/register",
-                self.config.gateway_url
+                "{}/api/v1/keygen/{}/participants",
+                self.config.gateway_url, keygen_session_id
             ))
-            .header("X-User-HMAC", user_hmac)
+            .header("X-Session-HMAC", session_hmac)
             .json(&request)
             .send()
             .await?;
@@ -707,10 +708,22 @@ impl KeyMeldE2ETest {
     async fn verify_keygen_participants_registered(&self, keygen_session_id: &str) -> Result<()> {
         info!("🔍 Verifying all participants are registered...");
 
+        let session_secret = self
+            .session_secrets
+            .get(keygen_session_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Session secret not found for keygen session: {}",
+                    keygen_session_id
+                )
+            })?
+            .clone();
+
         loop {
-            let user_hmac = self.generate_user_hmac(
+            let session_hmac = self.generate_session_hmac(
+                keygen_session_id,
                 &self.coordinator_user_id,
-                &self.coordinator_derived_private_key,
+                &session_secret,
             )?;
 
             let response = self
@@ -719,7 +732,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
-                .header("X-User-HMAC", user_hmac)
+                .header("X-Session-HMAC", session_hmac)
                 .send()
                 .await?;
 
@@ -753,10 +766,22 @@ impl KeyMeldE2ETest {
     pub async fn wait_for_keygen_completion(&mut self, keygen_session_id: &str) -> Result<String> {
         info!("⏳ Waiting for keygen completion...");
 
+        let session_secret = self
+            .session_secrets
+            .get(keygen_session_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Session secret not found for keygen session: {}",
+                    keygen_session_id
+                )
+            })?
+            .clone();
+
         loop {
-            let user_hmac = self.generate_user_hmac(
+            let session_hmac = self.generate_session_hmac(
+                keygen_session_id,
                 &self.coordinator_user_id,
-                &self.coordinator_derived_private_key,
+                &session_secret,
             )?;
 
             let response = self
@@ -765,7 +790,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
-                .header("X-User-HMAC", user_hmac)
+                .header("X-Session-HMAC", session_hmac)
                 .send()
                 .await?;
 
@@ -1053,10 +1078,10 @@ impl KeyMeldE2ETest {
         let response = self
             .client
             .post(format!(
-                "{}/api/v1/signing/{}/approve",
+                "{}/api/v1/signing/{}",
                 self.config.gateway_url, signing_session_id
             ))
-            .header("X-User-HMAC", user_hmac)
+            .header("X-Signing-HMAC", user_hmac)
             .send()
             .await?;
 
@@ -1070,64 +1095,5 @@ impl KeyMeldE2ETest {
 
         info!("✅ Signing session approved for user: {}", user_id);
         Ok(())
-    }
-
-    pub fn load_basic_config() -> Result<(ExampleConfig, u64, String)> {
-        let matches = Command::new("KeyMeld End-to-End Test")
-            .version("1.0")
-            .about("End-to-end test of KeyMeld distributed MuSig2 signing")
-            .arg(
-                Arg::new("config")
-                    .short('c')
-                    .long("config")
-                    .value_name("FILE")
-                    .default_value("examples/config.yaml")
-                    .help("Configuration file path"),
-            )
-            .arg(
-                Arg::new("amount")
-                    .short('a')
-                    .long("amount")
-                    .value_name("SATS")
-                    .required(true)
-                    .help("Amount to send in satoshis"),
-            )
-            .arg(
-                Arg::new("destination")
-                    .short('d')
-                    .long("destination")
-                    .value_name("ADDRESS")
-                    .required(true)
-                    .help("Destination address for the transaction"),
-            )
-            .get_matches();
-
-        Self::parse_config_from_matches(&matches)
-    }
-
-    pub fn parse_config_from_matches(
-        matches: &clap::ArgMatches,
-    ) -> Result<(ExampleConfig, u64, String)> {
-        let config_path = matches.get_one::<String>("config").unwrap();
-        let amount_str = matches.get_one::<String>("amount").unwrap();
-        let destination = matches.get_one::<String>("destination").unwrap().clone();
-
-        let amount = amount_str
-            .parse::<u64>()
-            .map_err(|e| anyhow!("Invalid amount '{amount_str}': {e}"))?;
-
-        if !Path::new(config_path).exists() {
-            return Err(anyhow!(
-                "Configuration file '{config_path}' not found. Please create it with all required settings.",
-            ));
-        }
-
-        let config_content = read_to_string(config_path)
-            .map_err(|e| anyhow!("Failed to read config file {config_path}: {e}",))?;
-
-        let config = serde_yaml::from_str::<ExampleConfig>(&config_content)
-            .map_err(|e| anyhow!("Failed to parse config file: {e}"))?;
-
-        Ok((config, amount, destination))
     }
 }

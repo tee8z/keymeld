@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Starting KeyMeld Example..."
+echo "Starting KeyMeld Demo..."
 
 # Wait for gateway to be ready
 GATEWAY_URL=${GATEWAY_URL:-http://gateway:8080}
@@ -19,13 +19,5 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Determine which binary to run
-BINARY=${1:-keymeld_example}
-
-# If first argument is a binary name, shift it out
-if [ "$1" = "keymeld_example" ] || [ "$1" = "keymeld_adaptor_test" ]; then
-    shift
-fi
-
-echo "Starting KeyMeld example: $BINARY"
-exec "$BINARY" "$@" < /dev/null
+echo "Starting KeyMeld demo: $*"
+exec "$@" < /dev/null

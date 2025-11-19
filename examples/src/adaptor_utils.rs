@@ -205,11 +205,6 @@ pub fn print_success_summary(
     println!("\n🎉 All Adaptor Signature Tests Completed Successfully!");
     println!("===============================================");
     println!("✅ Aggregate key: {}", aggregate_key);
-    println!("✅ Regular MuSig2 signing completed");
-    println!("✅ Adaptor signatures processed automatically");
-    println!("✅ Client-side encryption/decryption validated");
-    println!("✅ Zero-knowledge privacy verified (gateway remained blind to business logic)");
-    println!();
 
     for (i, (_, signature)) in configs.iter().zip(signatures.iter()).enumerate() {
         println!("📋 Adaptor Signature {} Details:", i + 1);
@@ -236,10 +231,4 @@ pub fn print_success_summary(
         );
         println!();
     }
-
-    println!("🔒 Privacy Features Verified:");
-    println!("   ✅ Gateway cannot see adaptor IDs or business logic");
-    println!("   ✅ All sensitive data encrypted with session secrets");
-    println!("   ✅ Automatic workflow progression maintained");
-    println!("   ✅ Backward compatibility with regular MuSig2");
 }

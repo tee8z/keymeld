@@ -206,7 +206,7 @@ demo amount="50000" destination="":
     echo "   Destination: $DEST_ADDR"
 
     docker compose --profile example run --rm -T example \
-        --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR"
+        keymeld_demo plain --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR"
 
 # Run KeyMeld adaptor signatures demo on regtest
 demo-adaptors amount="50000" destination="" test_type="all":
@@ -239,7 +239,7 @@ demo-adaptors amount="50000" destination="" test_type="all":
     echo "   Test type: {{test_type}}"
 
     docker compose --profile example run --rm -T example-adaptors \
-        --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR" $TEST_FLAGS
+        keymeld_demo adaptor --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR" $TEST_FLAGS
 
 # Run specific adaptor signature test types
 demo-adaptors-single amount="50000" destination="":
@@ -269,7 +269,7 @@ _demo-no-deps amount="50000" destination="":
 
     # Use --no-deps to avoid rebuilding already-built services
     docker compose --profile example run --rm --no-deps -T example \
-        --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR"
+        keymeld_demo plain --config /app/config.yaml --amount {{amount}} --destination "$DEST_ADDR"
 
 # ==================================================================================
 # Bitcoin Utilities

@@ -221,7 +221,7 @@ services:
       - ESPLORA_URL=http://esplora:3002/api
       - BITCOIN_NETWORK=regtest
       - NUM_SIGNERS=2
-    command: ["keymeld_adaptor_test"]
+    command: ["keymeld_demo", "adaptor"]
 
     volumes:
       - ./docker/config/example-regtest.yaml:/app/config.yaml:ro

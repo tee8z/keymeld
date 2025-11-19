@@ -1,18 +1,17 @@
 use anyhow::{anyhow, Result};
-use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{error, info};
-
-use clap::{Arg, Command};
 use keymeld_core::api::{CreateSigningSessionRequest, SigningSessionStatusResponse};
 use keymeld_core::musig::{AdaptorConfig, AdaptorSignatureResult};
 use keymeld_core::session::SigningStatusKind;
-
 use keymeld_examples::adaptor_utils::{
     create_test_adaptor_configs, print_success_summary, validate_adaptor_signatures,
     AdaptorTestConfig,
 };
-use keymeld_examples::{ExampleConfig, KeyMeldE2ETest};
+use keymeld_examples::ExampleConfig;
+use keymeld_examples::KeyMeldE2ETest;
+use std::fs::read_to_string;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::{error, info};
 
 fn init() {
     tracing_subscriber::fmt()
@@ -23,11 +22,36 @@ fn init() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run_with_args(
+    config_path: String,
+    amount: u64,
+    destination: String,
+    single_only: bool,
+    and_only: bool,
+    or_only: bool,
+    skip_regular_signing: bool,
+) -> Result<()> {
     init();
 
-    let (config, amount, destination, adaptor_config) = load_config()?;
+    let config_content = read_to_string(&config_path)?;
+    let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+
+    let mut adaptor_config = AdaptorTestConfig::default();
+    if single_only {
+        adaptor_config.test_single = true;
+        adaptor_config.test_and = false;
+        adaptor_config.test_or = false;
+    } else if and_only {
+        adaptor_config.test_single = false;
+        adaptor_config.test_and = true;
+        adaptor_config.test_or = false;
+    } else if or_only {
+        adaptor_config.test_single = false;
+        adaptor_config.test_and = false;
+        adaptor_config.test_or = true;
+    }
+    adaptor_config.skip_regular_signing = skip_regular_signing;
+
     info!("Loaded configuration for adaptor signatures test");
 
     let mut test = KeyMeldE2ETest::new(config, amount, destination).await?;
@@ -36,10 +60,10 @@ async fn main() -> Result<()> {
         result = run_adaptor_signatures_test(&mut test, adaptor_config) => {
             match result {
                 Ok(()) => {
-                    println!("\n🎉 KeyMeld Adaptor Signatures E2E Test Completed Successfully!");
+                    println!("\n✅ KeyMeld adaptor signatures test completed successfully!");
                 }
                 Err(e) => {
-                    error!("Adaptor signatures E2E test failed: {e}");
+                    error!("Adaptor signatures test failed: {e}");
                     std::process::exit(1);
                 }
             }
@@ -312,105 +336,4 @@ async fn wait_for_signing_with_adaptors(
 
         sleep(Duration::from_secs(2)).await;
     }
-}
-
-fn load_config() -> Result<(ExampleConfig, u64, String, AdaptorTestConfig)> {
-    let matches = Command::new("KeyMeld Adaptor Signatures E2E Test")
-        .version("1.0")
-        .about("End-to-end test of KeyMeld adaptor signatures with distributed MuSig2 signing")
-        .arg(
-            Arg::new("config")
-                .short('c')
-                .long("config")
-                .value_name("FILE")
-                .default_value("examples/config.yaml")
-                .help("Configuration file path"),
-        )
-        .arg(
-            Arg::new("amount")
-                .short('a')
-                .long("amount")
-                .value_name("SATS")
-                .required(true)
-                .help("Amount to send in satoshis"),
-        )
-        .arg(
-            Arg::new("destination")
-                .short('d')
-                .long("destination")
-                .value_name("ADDRESS")
-                .required(true)
-                .help("Destination address for the transaction"),
-        )
-        .arg(
-            Arg::new("test-single")
-                .long("test-single")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test single adaptor signatures (default: true)"),
-        )
-        .arg(
-            Arg::new("test-and")
-                .long("test-and")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test 'And' adaptor signatures (default: true)"),
-        )
-        .arg(
-            Arg::new("test-or")
-                .long("test-or")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test 'Or' adaptor signatures (default: true)"),
-        )
-        .arg(
-            Arg::new("skip-regular-signing")
-                .long("skip-regular-signing")
-                .action(clap::ArgAction::SetTrue)
-                .help("Skip regular MuSig2 signing and transaction broadcast"),
-        )
-        .arg(
-            Arg::new("single-only")
-                .long("single-only")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test only single adaptor signatures"),
-        )
-        .arg(
-            Arg::new("and-only")
-                .long("and-only")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test only 'And' adaptor signatures"),
-        )
-        .arg(
-            Arg::new("or-only")
-                .long("or-only")
-                .action(clap::ArgAction::SetTrue)
-                .help("Test only 'Or' adaptor signatures"),
-        )
-        .get_matches();
-
-    // Parse basic config using shared utility
-    let (config, amount, destination) = KeyMeldE2ETest::parse_config_from_matches(&matches)?;
-
-    // Configure adaptor test settings
-    let mut adaptor_config = AdaptorTestConfig::default();
-
-    if matches.get_flag("single-only") {
-        adaptor_config.test_single = true;
-        adaptor_config.test_and = false;
-        adaptor_config.test_or = false;
-    } else if matches.get_flag("and-only") {
-        adaptor_config.test_single = false;
-        adaptor_config.test_and = true;
-        adaptor_config.test_or = false;
-    } else if matches.get_flag("or-only") {
-        adaptor_config.test_single = false;
-        adaptor_config.test_and = false;
-        adaptor_config.test_or = true;
-    } else {
-        adaptor_config.test_single = matches.get_flag("test-single") || adaptor_config.test_single;
-        adaptor_config.test_and = matches.get_flag("test-and") || adaptor_config.test_and;
-        adaptor_config.test_or = matches.get_flag("test-or") || adaptor_config.test_or;
-    }
-
-    adaptor_config.skip_regular_signing = matches.get_flag("skip-regular-signing");
-
-    Ok((config, amount, destination, adaptor_config))
 }

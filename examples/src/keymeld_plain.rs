@@ -3,16 +3,19 @@ use keymeld_examples::KeyMeldE2ETest;
 use tracing::{error, info};
 use tracing_subscriber::fmt::init;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run_with_args(config_path: String, amount: u64, destination: String) -> Result<()> {
+    use keymeld_examples::ExampleConfig;
+    use std::fs::read_to_string;
+
     init();
 
-    let (config, amount, destination) = KeyMeldE2ETest::load_basic_config()?;
-    info!("Loaded configuration");
+    let config_content = read_to_string(&config_path)?;
+    let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+    info!("Loaded configuration from {}", config_path);
     let mut test = KeyMeldE2ETest::new(config, amount, destination).await?;
 
     tokio::select! {
-        result = run(&mut test) => {
+        result = run_test(&mut test) => {
             match result {
                 Ok(()) => {
                     println!("\n✅ KeyMeld end-to-end test completed successfully!");
@@ -32,7 +35,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(test: &mut KeyMeldE2ETest) -> Result<()> {
+async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
     info!("🧪 KeyMeld End-to-End Test - Two-Phase Flow");
     info!("============================================");
     info!("Network: {}", test.config.network);
