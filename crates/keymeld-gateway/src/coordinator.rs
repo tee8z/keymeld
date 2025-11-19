@@ -724,11 +724,7 @@ impl Coordinator {
                     // Call enclave manager to orchestrate adaptor signature processing
                     let encrypted_adaptor_signatures = match self
                         .enclave_manager
-                        .orchestrate_adaptor_signature_processing(
-                            session_id,
-                            adaptor_configs,
-                            &participants,
-                        )
+                        .orchestrate_adaptor_signature_processing(session_id, &participants)
                         .await
                     {
                         Ok(signatures) => {

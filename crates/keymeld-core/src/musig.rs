@@ -1182,7 +1182,6 @@ impl MusigProcessor {
         Ok(agg_pubkey.serialize().to_vec())
     }
 
-    /// Apply the specified taproot tweak configuration to a KeyAggContext
     fn apply_taproot_tweak(
         key_agg_ctx: KeyAggContext,
         config: &TaprootTweak,

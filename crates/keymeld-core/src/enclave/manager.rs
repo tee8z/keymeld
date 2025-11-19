@@ -4,7 +4,6 @@ use crate::{
         protocol::EnclavePublicKeyInfo, AddNonceCommand, AddPartialSignatureCommand,
         GenerateNonceCommand, InitKeygenSessionCommand, InitSigningSessionCommand,
         InitiateAdaptorSigningCommand, ParitialSignatureCommand, ProcessAdaptorSignaturesCommand,
-        SignAdaptorPartialSignatureCommand,
     },
     identifiers::{EnclaveId, SessionId, UserId},
     resilience::{RetryConfig, TimeoutConfig},
@@ -1378,7 +1377,6 @@ impl EnclaveManager {
     pub async fn orchestrate_adaptor_signature_processing(
         &self,
         signing_session_id: &SessionId,
-        adaptor_configs: &str,
         participants: &BTreeMap<UserId, ParticipantData>,
     ) -> Result<String, KeyMeldError> {
         info!(
@@ -1415,44 +1413,8 @@ impl EnclaveManager {
             }
         }
 
-        let configs: Vec<crate::musig::AdaptorConfig> = if !adaptor_configs.is_empty() {
-            crate::api::validation::decrypt_adaptor_configs(adaptor_configs, "placeholder_secret")?
-        } else {
-            Vec::new()
-        };
-
-        for (user_id, participant) in participants {
-            for config in &configs {
-                let partial_cmd = SignAdaptorPartialSignatureCommand {
-                    signing_session_id: signing_session_id.clone(),
-                    user_id: user_id.clone(),
-                    adaptor_id: config.adaptor_id,
-                };
-
-                let partial_response = self
-                    .send_command_to_enclave(
-                        &participant.enclave_id,
-                        EnclaveCommand::SignAdaptorPartialSignature(partial_cmd),
-                    )
-                    .await
-                    .map_err(|e| {
-                        KeyMeldError::EnclaveError(format!(
-                            "Failed to sign adaptor partial for user {}: {}",
-                            user_id, e
-                        ))
-                    })?;
-
-                match partial_response {
-                    EnclaveResponse::AdaptorPartialSignature(_) => {}
-                    _ => {
-                        return Err(KeyMeldError::EnclaveError(format!(
-                            "Unexpected response from adaptor partial signing for user {}",
-                            user_id
-                        )));
-                    }
-                }
-            }
-        }
+        // The enclave already has the decrypted adaptor configs from session initialization
+        // and will handle all adaptor signature processing internally
 
         let process_cmd = ProcessAdaptorSignaturesCommand {
             signing_session_id: signing_session_id.clone(),

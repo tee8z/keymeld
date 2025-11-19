@@ -29,7 +29,7 @@ enclaves:
   vsock_timeout_secs: 600
   aws_region: "us-west-2"
 coordinator:
-  processing_interval_ms: 100
+  processing_interval_ms: 5000
   batch_size: 100
   max_retries: 5
   processing_timeout_mins: 1

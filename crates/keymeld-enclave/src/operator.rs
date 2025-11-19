@@ -433,7 +433,6 @@ impl EnclaveOperator {
     ) -> Result<EnclaveResponse, EnclaveError> {
         let session_id = cmd.signing_session_id.clone();
 
-        // Clear any existing session state first (important for retries)
         if let Err(e) = self.clear_session(session_id.clone()).await {
             warn!("Failed to clear existing session state: {}", e);
         }
@@ -528,7 +527,6 @@ impl EnclaveOperator {
                 ))
             })?;
 
-        // Decrypt coordinator private key if provided
         let coordinator_private_key =
             if let Some(encrypted_key) = &cmd.coordinator_encrypted_private_key {
                 match self
@@ -1734,16 +1732,53 @@ impl EnclaveOperator {
                 EnclaveError::SigningError(format!("Failed to generate adaptor nonces: {}", e))
             })?;
 
+        // Generate all partial signatures for all participants and adaptors internally
+        let session_metadata = session_state
+            .musig_processor
+            .get_session_metadata_public(&cmd.signing_session_id)
+            .ok_or_else(|| {
+                EnclaveError::SessionNotFound(format!(
+                    "No metadata found for session {}",
+                    cmd.signing_session_id
+                ))
+            })?;
+
+        let adaptor_configs = session_metadata.adaptor_configs.clone();
+        let participants = session_metadata.expected_participants.clone();
+
+        for user_id in &participants {
+            let key_material = session_state
+                .get_user_key_material(user_id)
+                .ok_or_else(|| {
+                    EnclaveError::KeyError(format!("Key material not found for user {}", user_id))
+                })?;
+
+            for config in &adaptor_configs {
+                session_state
+                    .musig_processor
+                    .sign_adaptor_for_user(
+                        &cmd.signing_session_id,
+                        user_id,
+                        &config.adaptor_id,
+                        &key_material,
+                    )
+                    .map_err(|e| {
+                        EnclaveError::SigningError(format!(
+                            "Failed to sign adaptor partial for user {} adaptor {}: {}",
+                            user_id, config.adaptor_id, e
+                        ))
+                    })?;
+            }
+        }
+
         info!(
-            "Adaptor signing initiated for session {}",
+            "Adaptor signing initiated and all partial signatures generated for session {}",
             cmd.signing_session_id
         );
 
-        Ok(EnclaveResponse::Success(
-            keymeld_core::enclave::SuccessResponse {
-                message: "Adaptor signing initiated".to_string(),
-            },
-        ))
+        Ok(EnclaveResponse::Success(SuccessResponse {
+            message: "Adaptor signing initiated and partial signatures generated".to_string(),
+        }))
     }
 
     async fn handle_sign_adaptor_partial_signature(

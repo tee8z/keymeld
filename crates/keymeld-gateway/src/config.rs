@@ -587,6 +587,17 @@ id = 2
 cid = 12
 port = 5002
 
+[coordinator]
+processing_interval_ms = 1000
+cleanup_interval_secs = 3600
+batch_size = 10
+
+[logging]
+level = "info"
+format = "compact"
+enable_json = false
+component = "keymeld_gateway"
+
 [security]
 enable_attestation = false
 strict_validation = false

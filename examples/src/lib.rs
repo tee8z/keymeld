@@ -187,19 +187,19 @@ impl KeyMeldE2ETest {
             .map_err(|e| anyhow!("Failed to create RPC client: {e}"))?;
 
         let coordinator_mnemonic = Self::load_or_create_coordinator_private_key(&config)?;
+        let coordinator_user_id = Uuid::now_v7().to_string();
+        info!("👤 Coordinator user ID: {}", coordinator_user_id);
+
         let coordinator = Participant::new(
-            "coordinator".to_string(),
+            coordinator_user_id.clone(),
             coordinator_mnemonic,
             config.network,
             0,
         )?;
 
-        let coordinator_user_id = uuid::Uuid::now_v7().to_string();
-        info!("👤 Coordinator user ID: {}", coordinator_user_id);
-
         let mut participant_user_ids = vec![coordinator_user_id.clone()];
         for _ in 1..config.num_signers {
-            let user_id = uuid::Uuid::now_v7().to_string();
+            let user_id = Uuid::now_v7().to_string();
             participant_user_ids.push(user_id);
         }
 
@@ -261,7 +261,7 @@ impl KeyMeldE2ETest {
         info!("👥 Loading participant keys...");
         self.participants.clear();
 
-        for i in 1..self.config.num_signers {
+        for i in 1..self.config.num_signers as usize {
             let key_file = format!("{}/participant_{}.key", self.config.key_files_dir, i);
             let mnemonic = if Path::new(&key_file).exists() {
                 info!("📁 Loading participant {} key from {}", i, key_file);
@@ -287,13 +287,12 @@ impl KeyMeldE2ETest {
                 info!("💾 Participant {} key saved to {}", i, key_file);
                 mnemonic
             };
-
-            let participant = Participant::new(
-                format!("participant_{}", i),
-                mnemonic,
-                self.config.network,
-                i,
-            )?;
+            let user_id = self
+                .participant_user_ids
+                .get(i)
+                .ok_or_else(|| anyhow!("No user ID found for participant index {}", i))?
+                .clone();
+            let participant = Participant::new(user_id, mnemonic, self.config.network, i as u32)?;
 
             self.participants.push(participant);
         }
@@ -1032,18 +1031,32 @@ impl KeyMeldE2ETest {
         session_secret: &str,
     ) -> Result<String> {
         use hmac::{Hmac, Mac};
+        use rand::RngCore;
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(session_secret.as_bytes())
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut nonce_bytes);
+        let nonce = hex::encode(nonce_bytes);
+
+        // Create the message in the format expected by the enclave: session_id:user_id:nonce
+        let message_data = format!("{}:{}:{}", session_id, user_id, nonce);
+
+        // Use hex-decoded session secret as the HMAC key
+        let secret_bytes = hex::decode(session_secret)
+            .map_err(|e| anyhow!("Failed to hex-decode session secret: {e}"))?;
+
+        let mut mac = HmacSha256::new_from_slice(&secret_bytes)
             .map_err(|e| anyhow!("HMAC key error: {e}"))?;
 
-        mac.update(session_id.as_bytes());
-        mac.update(user_id.as_bytes());
-
+        mac.update(message_data.as_bytes());
         let result = mac.finalize();
-        Ok(hex::encode(result.into_bytes()))
+        let hmac = hex::encode(result.into_bytes());
+
+        // Return in nonce:hmac format
+        Ok(format!("{}:{}", nonce, hmac))
     }
 
     pub fn generate_user_hmac(&self, user_id: &str, private_key: &SecretKey) -> Result<String> {

@@ -1183,9 +1183,15 @@ mod tests {
             .expect("Client should encrypt adaptor configs");
 
         assert!(!encrypted.is_empty());
-        assert!(encrypted.contains("ciphertext"));
-        assert!(encrypted.contains("nonce"));
-        assert!(encrypted.contains("adaptor_configs"));
+        // The encrypted string is hex-encoded JSON, so decode and check the JSON structure
+        let decoded_bytes = hex::decode(&encrypted).expect("Should decode hex");
+        let decoded_json = String::from_utf8(decoded_bytes).expect("Should decode UTF-8");
+        let json_value: serde_json::Value =
+            serde_json::from_str(&decoded_json).expect("Should parse JSON");
+
+        assert!(json_value.get("ciphertext").is_some());
+        assert!(json_value.get("nonce").is_some());
+        assert!(json_value.get("context").is_some());
 
         assert!(!encrypted.contains(&client_adaptor_configs[0].adaptor_id.to_string()));
         assert!(!encrypted.contains(&client_adaptor_configs[1].adaptor_id.to_string()));
@@ -1273,9 +1279,18 @@ mod tests {
         assert!(!encrypted_config_2.contains(&adaptor_config_1[0].adaptor_id.to_string()));
         assert!(!encrypted_config_3.contains(&adaptor_config_3[0].adaptor_id.to_string()));
 
-        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_config_1).is_ok());
-        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_config_2).is_ok());
-        assert!(serde_json::from_str::<serde_json::Value>(&encrypted_config_3).is_ok());
+        // The encrypted strings are hex-encoded JSON, so decode and check the JSON structure
+        let decoded_1 = hex::decode(&encrypted_config_1).expect("Should decode hex");
+        let json_1 = String::from_utf8(decoded_1).expect("Should decode UTF-8");
+        assert!(serde_json::from_str::<serde_json::Value>(&json_1).is_ok());
+
+        let decoded_2 = hex::decode(&encrypted_config_2).expect("Should decode hex");
+        let json_2 = String::from_utf8(decoded_2).expect("Should decode UTF-8");
+        assert!(serde_json::from_str::<serde_json::Value>(&json_2).is_ok());
+
+        let decoded_3 = hex::decode(&encrypted_config_3).expect("Should decode hex");
+        let json_3 = String::from_utf8(decoded_3).expect("Should decode UTF-8");
+        assert!(serde_json::from_str::<serde_json::Value>(&json_3).is_ok());
 
         assert_ne!(encrypted_config_1, encrypted_config_2);
         assert_ne!(encrypted_config_2, encrypted_config_3);
@@ -1286,9 +1301,15 @@ mod tests {
             &encrypted_config_2,
             &encrypted_config_3,
         ] {
-            assert!(encrypted.contains("ciphertext"));
-            assert!(encrypted.contains("nonce"));
-            assert!(encrypted.contains("adaptor_configs"));
+            // The encrypted strings are hex-encoded JSON, so decode and check the JSON structure
+            let decoded_bytes = hex::decode(encrypted).expect("Should decode hex");
+            let decoded_json = String::from_utf8(decoded_bytes).expect("Should decode UTF-8");
+            let json_value: serde_json::Value =
+                serde_json::from_str(&decoded_json).expect("Should parse JSON");
+
+            assert!(json_value.get("ciphertext").is_some());
+            assert!(json_value.get("nonce").is_some());
+            assert!(json_value.get("context").is_some());
         }
 
         println!("Zero-knowledge privacy verified: Gateway remains blind to all contract details");
