@@ -75,7 +75,7 @@ services:
 
     volumes:
       - ./data:/data
-      - ./docker/config/keymeld-regtest.yaml:/app/config.yaml:ro
+      - ./config/development.yaml:/app/config.yaml:ro
     networks:
       - keymeld-network
     depends_on:
@@ -190,7 +190,7 @@ services:
       - NUM_SIGNERS=2
 
     volumes:
-      - ./docker/config/example-regtest.yaml:/app/config.yaml:ro
+      - ./docker/config/example.yaml:/app/config.yaml:ro
       - /tmp/keymeld-keys:/app/keys
     networks:
       - keymeld-network
@@ -224,7 +224,7 @@ services:
     command: ["keymeld_demo", "adaptor"]
 
     volumes:
-      - ./docker/config/example-regtest.yaml:/app/config.yaml:ro
+      - ./docker/config/example.yaml:/app/config.yaml:ro
       - /tmp/keymeld-keys:/app/keys
     networks:
       - keymeld-network

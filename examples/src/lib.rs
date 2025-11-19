@@ -522,12 +522,17 @@ impl KeyMeldE2ETest {
             "private_key",
         )?;
 
+        let mut expected_participants = vec![self.coordinator_user_id.clone().try_into().unwrap()];
+        for participant in &self.participants {
+            expected_participants.push(participant.user_id.clone().try_into().unwrap());
+        }
+
         let request = CreateKeygenSessionRequest {
             keygen_session_id: keygen_session_id.clone().try_into().unwrap(),
             coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
             coordinator_encrypted_private_key: encrypted_key.to_hex_json()?,
             coordinator_enclave_id: 1u32.into(),
-            expected_participants: vec![self.coordinator_user_id.clone().try_into().unwrap()],
+            expected_participants,
             timeout_secs: 1800,
             encrypted_session_secret: session_secret.clone(),
             max_signing_sessions: None,

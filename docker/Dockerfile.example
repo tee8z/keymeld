@@ -35,19 +35,8 @@ RUN mkdir -p /app/keys /app/config /app/data && \
 
 COPY --from=builder /app/target/release/keymeld_demo /usr/local/bin/keymeld_demo
 
-# Copy all example configs
-COPY --chown=keymeld:keymeld examples/config.yaml /app/config/regtest.yaml
-COPY --chown=keymeld:keymeld docker/config/example-regtest.yaml /app/config/example-regtest.yaml
-COPY --chown=keymeld:keymeld docker/config/example-signet.yaml /app/config/example-signet.yaml
-
-# Create symlink based on environment
-RUN if [ "$ENVIRONMENT" = "dev" ] || [ "$ENVIRONMENT" = "development" ]; then \
-        ln -sf /app/config/example-regtest.yaml /app/config/config.yaml; \
-    elif [ "$ENVIRONMENT" = "prod" ] || [ "$ENVIRONMENT" = "production" ]; then \
-        ln -sf /app/config/example-signet.yaml /app/config/config.yaml; \
-    else \
-        ln -sf /app/config/example-regtest.yaml /app/config/config.yaml; \
-    fi
+# Copy example config
+COPY --chown=keymeld:keymeld docker/config/example.yaml /app/config/config.yaml
 
 RUN chown keymeld:keymeld /usr/local/bin/keymeld_demo && \
     chmod +x /usr/local/bin/keymeld_demo

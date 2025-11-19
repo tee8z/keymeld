@@ -218,14 +218,12 @@ The example supports multiple Bitcoin networks:
 just quickstart  # Uses regtest with local Bitcoin Core
 ```
 
-### Mutinynet Signet (Testing)
-```bash
-just quickstart-prod  # Uses Mutinynet signet
-```
+### Alternative Networks
+
+To use other Bitcoin networks (testnet, signet, mainnet), modify the `network` field in `docker/config/example.yaml` and update the Bitcoin RPC connection details accordingly.
 
 Configuration files:
-- `config.yaml` - Regtest configuration
-- `docker/config/example-signet.yaml` - Mutinynet configuration
+- `docker/config/example.yaml` - Example configuration for regtest development
 
 ## Successful Run Output
 
