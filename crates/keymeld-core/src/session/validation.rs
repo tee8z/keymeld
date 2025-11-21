@@ -155,6 +155,7 @@ mod tests {
             user_id,
             enclave_id,
             1,
+            vec![2; 33], // Mock compressed public key
             "{}".to_string(),
             "encrypted_key".to_string(),
         )

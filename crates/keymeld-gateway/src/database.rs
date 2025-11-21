@@ -402,8 +402,9 @@ impl Database {
         sqlx::query(
             "INSERT INTO keygen_participants (
                 keygen_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
-                registered_at, require_signing_approval, session_encrypted_data, enclave_encrypted_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                registered_at, require_signing_approval, session_encrypted_data, enclave_encrypted_data,
+                participant_public_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(keygen_session_id.as_string())
         .bind(request.user_id.as_str())
@@ -413,6 +414,7 @@ impl Database {
         .bind(request.require_signing_approval)
         .bind(session_encrypted_data)
         .bind(enclave_encrypted_data)
+        .bind(request.public_key.as_slice())
         .execute(&self.pool)
         .await?;
 
@@ -425,7 +427,8 @@ impl Database {
     ) -> Result<Vec<ParticipantData>, ApiError> {
         let rows = sqlx::query_as::<_, KeygenParticipantRow>(
             "SELECT user_id, assigned_enclave_id, enclave_key_epoch, registered_at,
-                    require_signing_approval, session_encrypted_data, enclave_encrypted_data
+                    require_signing_approval, session_encrypted_data, enclave_encrypted_data,
+                    participant_public_key
              FROM keygen_participants
              WHERE keygen_session_id = ?
              ORDER BY registered_at ASC",
@@ -1151,6 +1154,7 @@ pub struct KeygenParticipantRow {
     pub require_signing_approval: bool,
     pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
+    pub participant_public_key: Option<Vec<u8>>,
 }
 
 impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
@@ -1169,6 +1173,7 @@ impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
         let require_signing_approval: bool = row.try_get("require_signing_approval")?;
         let session_encrypted_data: String = row.try_get("session_encrypted_data")?;
         let enclave_encrypted_data: String = row.try_get("enclave_encrypted_data")?;
+        let participant_public_key: Option<Vec<u8>> = row.try_get("participant_public_key").ok();
 
         Ok(KeygenParticipantRow {
             user_id,
@@ -1178,6 +1183,7 @@ impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
             require_signing_approval,
             session_encrypted_data,
             enclave_encrypted_data,
+            participant_public_key,
         })
     }
 }
@@ -1188,6 +1194,7 @@ impl From<KeygenParticipantRow> for Option<ParticipantData> {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
             enclave_key_epoch: row.enclave_key_epoch,
+            participant_public_key: row.participant_public_key.unwrap_or_default(),
             public_nonces: None,
             partial_signature: None,
             session_encrypted_data: row.session_encrypted_data,
@@ -1273,6 +1280,7 @@ impl From<SigningParticipantRow> for ParticipantData {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
             enclave_key_epoch: row.enclave_key_epoch,
+            participant_public_key: vec![], // Signing participants don't store public key in this table
             public_nonces,
             partial_signature,
             session_encrypted_data: row.session_encrypted_data,

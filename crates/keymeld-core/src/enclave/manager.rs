@@ -519,6 +519,7 @@ impl EnclaveManager {
             keygen_session_id: Some(session_id.clone()),
             signing_session_id: None,
             user_id: user_id.clone(),
+            participant_public_key: vec![], // This method doesn't have access to public key
             session_encrypted_data,
             enclave_encrypted_data,
         };
@@ -979,6 +980,7 @@ impl EnclaveManager {
                 keygen_session_id: Some(params.keygen_session_id.clone()),
                 signing_session_id: Some(params.signing_session_id.clone()),
                 user_id: user_id.clone(),
+                participant_public_key: participant.participant_public_key.clone(),
                 session_encrypted_data: participant.session_encrypted_data.clone(),
                 enclave_encrypted_data: participant.enclave_encrypted_data.clone(),
             };
@@ -1239,6 +1241,7 @@ impl EnclaveManager {
                     keygen_session_id: Some(keygen_session_id.clone()),
                     signing_session_id: None,
                     user_id: user_id.clone(),
+                    participant_public_key: participant.participant_public_key.clone(),
                     session_encrypted_data: participant.session_encrypted_data.clone(),
                     enclave_encrypted_data,
                 };
@@ -1454,6 +1457,7 @@ mod tests {
                 user_id: user_id.clone(),
                 enclave_id: EnclaveId::from(i),
                 enclave_key_epoch: 1,
+                participant_public_key: vec![2; 33], // Mock compressed public key
                 public_nonces: None,
                 partial_signature: None,
                 session_encrypted_data: format!("session_data_{}", i),

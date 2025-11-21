@@ -13,6 +13,7 @@ pub struct ParticipantData {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
     pub enclave_key_epoch: u64,
+    pub participant_public_key: Vec<u8>,
     #[schema(value_type = String)]
     pub public_nonces: Option<PubNonce>,
     #[schema(value_type = String)]
@@ -40,6 +41,7 @@ impl ParticipantData {
         user_id: UserId,
         enclave_id: EnclaveId,
         enclave_key_epoch: u64,
+        participant_public_key: Vec<u8>,
         session_encrypted_data: String,
         enclave_encrypted_data: String,
     ) -> Self {
@@ -47,6 +49,7 @@ impl ParticipantData {
             user_id,
             enclave_id,
             enclave_key_epoch,
+            participant_public_key,
             public_nonces: None,
             partial_signature: None,
             session_encrypted_data,

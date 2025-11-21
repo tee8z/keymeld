@@ -273,6 +273,7 @@ pub async fn create_keygen_session(
         expires_at: current_time + request.timeout_secs,
         enclave_epochs: HashMap::new(),
         session_secret,
+        session_public_key: request.session_public_key,
     };
 
     Ok(Json(response))

@@ -990,12 +990,7 @@ impl KeyMeldE2ETest {
         info!("⏳ Waiting for signing completion...");
 
         loop {
-            let _user_hmac = self.generate_user_hmac(
-                &self.coordinator_user_id,
-                &self.coordinator_derived_private_key,
-            )?;
-
-            let user_signature = self.generate_user_raw_signature(
+            let user_signature = self.generate_user_signature(
                 signing_session_id,
                 &self.coordinator_derived_private_key,
             )?;
@@ -1179,28 +1174,6 @@ impl KeyMeldE2ETest {
         Ok(format!("{}:{}", nonce, signature_hex))
     }
 
-    pub fn generate_user_hmac(&self, user_id: &UserId, private_key: &SecretKey) -> Result<String> {
-        let mut nonce_bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut nonce_bytes);
-        let nonce = hex::encode(nonce_bytes);
-
-        let message = format!("{}:{}", user_id, nonce);
-        let message_hash = sha256::Hash::hash(message.as_bytes());
-
-        let secp = Secp256k1::new();
-        let message = bitcoin::secp256k1::Message::from_digest_slice(message_hash.as_ref())
-            .map_err(|e| anyhow!("Failed to create message from hash: {}", e))?;
-        let signature = secp.sign_ecdsa(&message, private_key);
-        let signature_bytes = signature.serialize_compact();
-
-        Ok(format!(
-            "{}:{}:{}",
-            user_id,
-            nonce,
-            hex::encode(signature_bytes)
-        ))
-    }
-
     pub async fn approve_signing_session(
         &self,
         signing_session_id: &SessionId,
@@ -1209,7 +1182,7 @@ impl KeyMeldE2ETest {
     ) -> Result<()> {
         info!("✅ Approving signing session for user: {}", user_id);
 
-        let user_signature = self.generate_user_raw_signature(signing_session_id, private_key)?;
+        let user_signature = self.generate_user_signature(signing_session_id, private_key)?;
 
         let response = self
             .client
@@ -1248,8 +1221,8 @@ impl KeyMeldE2ETest {
         Ok(PublicKey::from_secret_key(&secp, &private_key))
     }
 
-    /// Generate raw ECDSA signature for user approval
-    pub fn generate_user_raw_signature(
+    /// Generate ECDSA signature for user approval
+    pub fn generate_user_signature(
         &self,
         signing_session_id: &SessionId,
         private_key: &SecretKey,

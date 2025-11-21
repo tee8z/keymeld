@@ -297,19 +297,15 @@ impl EnclaveOperator {
                 EnclaveError::DecryptionFailed(format!("Failed to decrypt session secret: {}", e))
             })?;
 
-            let session_secret_str = String::from_utf8_lossy(&decrypted_secret_bytes);
-            let secret_bytes = hex::decode(session_secret_str.as_ref()).map_err(|e| {
-                EnclaveError::DataDecodingError(format!("Hex decode failed: {}", e))
-            })?;
-
-            if secret_bytes.len() != 32 {
+            // The decrypted bytes are already the raw session secret (32 bytes)
+            if decrypted_secret_bytes.len() != 32 {
                 return Err(EnclaveError::InvalidSessionSecret(format!(
                     "Invalid length: expected 32 bytes, got {}",
-                    secret_bytes.len()
+                    decrypted_secret_bytes.len()
                 )));
             }
             let mut secret_array = [0u8; 32];
-            secret_array.copy_from_slice(&secret_bytes);
+            secret_array.copy_from_slice(&decrypted_secret_bytes);
             Some(SessionSecret::from_bytes(secret_array))
         } else {
             None
@@ -600,7 +596,7 @@ impl EnclaveOperator {
             EnclaveError::SessionNotFound(session_id.to_string())
         })?;
 
-        let (participant_public_key, encrypted_private_key_hex) = {
+        let (derived_public_key, encrypted_private_key_hex) = {
             let session_state = session_arc.lock().map_err(|e| {
                 error!(
                     "Failed to acquire session lock for participant validation: {}",
@@ -643,7 +639,7 @@ impl EnclaveOperator {
                 None
             };
 
-            let participant_public_key = vec![]; // Will be derived from encrypted private key if available
+            let participant_public_key = cmd.participant_public_key.clone(); // Use the public key from the command
 
             let encrypted_private_key_hex = if !cmd.enclave_encrypted_data.is_empty() {
                 let encrypted_bytes = hex::decode(&cmd.enclave_encrypted_data).map_err(|e| {
@@ -767,7 +763,7 @@ impl EnclaveOperator {
                     .insert(cmd.user_id.clone(), secure_key);
             }
 
-            let public_key = PublicKey::from_slice(&participant_public_key).map_err(|e| {
+            let public_key = PublicKey::from_slice(&derived_public_key).map_err(|e| {
                 EnclaveError::InvalidPublicKey(format!("Invalid public key: {}", e))
             })?;
 
@@ -1195,18 +1191,8 @@ impl EnclaveOperator {
             cmd.user_id, cmd.keygen_session_id, cmd.signing_session_id
         );
 
-        // Parse the user signature (format: user_id:nonce:signature_hex)
-        let signature_parts: Vec<&str> = cmd.user_signature.split(':').collect();
-        if signature_parts.len() != 3 {
-            return Ok(EnclaveResponse::ValidateUserSignature(
-                ValidateUserSignatureResponse {
-                    is_valid: false,
-                    user_id: cmd.user_id,
-                },
-            ));
-        }
-
-        let signature_hex = signature_parts[2];
+        // Parse the user signature (format: signature_hex)
+        let signature_hex = cmd.user_signature.as_str();
 
         // For now, we'll use a simplified validation approach
         // In a full implementation, this would:

@@ -236,10 +236,8 @@ async fn wait_for_signing_with_adaptors(
     info!("⏳ Waiting for signing completion with adaptor processing...");
 
     loop {
-        let user_signature = test.generate_user_raw_signature(
-            signing_session_id,
-            &test.coordinator_derived_private_key,
-        )?;
+        let user_signature = test
+            .generate_user_signature(signing_session_id, &test.coordinator_derived_private_key)?;
 
         let response = test
             .client

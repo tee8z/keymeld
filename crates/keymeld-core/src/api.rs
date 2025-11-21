@@ -52,6 +52,7 @@ pub struct CreateKeygenSessionResponse {
     pub expires_at: u64,
     pub enclave_epochs: HashMap<EnclaveId, u64>,
     pub session_secret: String,
+    pub session_public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

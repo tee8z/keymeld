@@ -88,6 +88,7 @@ pub struct AddParticipantCommand {
     pub keygen_session_id: Option<SessionId>,
     pub signing_session_id: Option<SessionId>,
     pub user_id: UserId,
+    pub participant_public_key: Vec<u8>,
     pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
 }
