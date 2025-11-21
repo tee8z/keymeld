@@ -115,8 +115,8 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
         (url = "/api/v1", description = "KeyMeld Gateway API v1")
     ),
     security(
-        ("SessionHmac" = []),
-        ("SigningHmac" = [])
+        ("SessionSignature" = []),
+        ("UserSignature" = [])
     ),
     modifiers(&SecurityAddon)
 )]
@@ -130,13 +130,13 @@ impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
-                "SessionHmac",
-                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-HMAC"))),
+                "SessionSignature",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-Signature"))),
             );
 
             components.add_security_scheme(
-                "SigningHmac",
-                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Signing-HMAC"))),
+                "UserSignature",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-User-Signature"))),
             );
         }
     }
@@ -302,11 +302,11 @@ impl Application {
             )
             .route("/signing", post(handlers::create_signing_session))
             .route(
-                "/signing/{signing_session_id}",
+                "/signing/{signing_session_id}/approve/{user_id}",
                 post(handlers::approve_signing_session),
             )
             .route(
-                "/signing/{signing_session_id}/status",
+                "/signing/{signing_session_id}/status/{user_id}",
                 get(handlers::get_signing_status),
             )
             .route("/enclaves", get(handlers::list_enclaves))

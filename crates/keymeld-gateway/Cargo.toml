@@ -38,6 +38,7 @@ config = { version = "0.14", features = ["yaml", "toml"] }
 dotenv = "0.15"
 uuid = { version = "1.11", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["serde", "macros", "formatting"] }
+bitcoin = "0.32"
 secp256k1 = { version = "0.31.0", features = ["rand", "serde"] }
 bitcoin_hashes = "0.14.0"
 hex = "0.4.3"

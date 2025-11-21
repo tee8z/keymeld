@@ -280,6 +280,7 @@ impl Database {
             keygen_session_id: request.keygen_session_id.clone(),
             coordinator_pubkey,
             coordinator_encrypted_private_key: request.coordinator_encrypted_private_key.clone(),
+            session_public_key: request.session_public_key.clone(),
             coordinator_enclave_id: request.coordinator_enclave_id,
             expected_participants: request.expected_participants.clone(),
             encrypted_session_secret: request.encrypted_session_secret.clone(),
@@ -307,8 +308,9 @@ impl Database {
             "INSERT INTO keygen_sessions (
                 keygen_session_id, status_name, coordinator_enclave_id, created_at,
                 expires_at, updated_at, retry_count, max_signing_sessions,
-                expected_participants, status, session_encrypted_data, enclave_encrypted_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                expected_participants, status, session_encrypted_data, enclave_encrypted_data,
+                session_public_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request.keygen_session_id.as_string())
         .bind(status_name.to_string())
@@ -322,6 +324,7 @@ impl Database {
         .bind(status_json)
         .bind(session_encrypted)
         .bind(enclave_encrypted)
+        .bind(request.session_public_key.as_slice())
         .execute(&self.pool)
         .await?;
 
@@ -360,6 +363,26 @@ impl Database {
                 }
 
                 Ok(Some(status))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn get_session_public_key(
+        &self,
+        keygen_session_id: &SessionId,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let row = sqlx::query(
+            "SELECT session_public_key FROM keygen_sessions WHERE keygen_session_id = ?",
+        )
+        .bind(keygen_session_id.as_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => {
+                let public_key: Option<Vec<u8>> = row.get("session_public_key");
+                Ok(public_key)
             }
             None => Ok(None),
         }
@@ -429,25 +452,6 @@ impl Database {
         .await?;
 
         Ok(count as usize)
-    }
-
-    pub async fn get_keygen_encrypted_session_secret(
-        &self,
-        keygen_session_id: &SessionId,
-    ) -> Result<Option<String>, ApiError> {
-        let row = sqlx::query(
-            "SELECT enclave_encrypted_data FROM keygen_sessions WHERE keygen_session_id = ?",
-        )
-        .bind(keygen_session_id.as_string())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(row) = row {
-            let enclave_encrypted: String = row.get("enclave_encrypted_data");
-            Ok(Some(enclave_encrypted))
-        } else {
-            Ok(None)
-        }
     }
 
     pub async fn update_keygen_session_status(
@@ -1088,39 +1092,6 @@ impl Database {
         Ok(user_ids)
     }
 
-    pub async fn get_user_public_key_from_keygen(
-        &self,
-        keygen_session_id: &SessionId,
-        user_id: &UserId,
-    ) -> Result<Option<Vec<u8>>, ApiError> {
-        let row = sqlx::query(
-            "SELECT session_encrypted_data FROM keygen_participants
-             WHERE keygen_session_id = ? AND user_id = ?",
-        )
-        .bind(keygen_session_id.as_string())
-        .bind(user_id.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(row) = row {
-            let session_encrypted: String = row.get("session_encrypted_data");
-
-            let session_data = serde_json::from_str::<
-                keymeld_core::encrypted_data::KeygenParticipantSessionData,
-            >(&session_encrypted)
-            .map_err(|e| {
-                ApiError::Serialization(format!(
-                    "Failed to deserialize keygen participant session data: {}",
-                    e
-                ))
-            })?;
-
-            Ok(Some(session_data.public_key))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub async fn get_signing_session_structured_data(
         &self,
         signing_session_id: &SessionId,
@@ -1420,19 +1391,32 @@ mod tests {
         let coordinator_enclave_id = EnclaveId::new(1);
         let user_id = UserId::new_v7();
 
+        // Generate a cryptographically secure seed and derive public key
+        let seed = keymeld_core::crypto::SecureCrypto::generate_session_seed().unwrap();
+        let session_public_key =
+            keymeld_core::crypto::SecureCrypto::derive_public_key_from_seed(&seed).unwrap();
+
+        // Use the coordinator public key as enclave public key for encryption
+        let coordinator_pubkey_bytes = vec![
+            2, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2, 155,
+            252, 219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152,
+        ];
+        let enclave_public_key =
+            secp256k1::PublicKey::from_slice(&coordinator_pubkey_bytes).unwrap();
+        let encrypted_seed =
+            keymeld_core::crypto::SecureCrypto::ecies_encrypt(&enclave_public_key, &seed).unwrap();
+
         let request = CreateKeygenSessionRequest {
             keygen_session_id: keygen_session_id.clone(),
-            coordinator_pubkey: vec![
-                2, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2,
-                155, 252, 219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152,
-            ],
+            coordinator_pubkey: coordinator_pubkey_bytes,
             coordinator_encrypted_private_key: "encrypted_coordinator_key".to_string(),
             coordinator_enclave_id,
             expected_participants: vec![user_id.clone()],
             timeout_secs: 3600,
-            encrypted_session_secret: "encrypted_session_secret".to_string(),
+            session_public_key: session_public_key.serialize().to_vec(),
+            encrypted_session_secret: hex::encode(encrypted_seed),
             max_signing_sessions: Some(10),
-            taproot_tweak_config: keymeld_core::api::TaprootTweak::None,
+            taproot_tweak_config: Default::default(),
         };
 
         // Create keygen session
@@ -1452,8 +1436,7 @@ mod tests {
         };
 
         // Create mock encrypted data for testing
-        let session_data =
-            KeygenParticipantSessionData::new(participant_request.public_key.clone());
+        let session_data = KeygenParticipantSessionData::new();
         let session_encrypted_json = serde_json::to_string(&session_data).unwrap();
 
         let enclave_data =
@@ -1485,11 +1468,6 @@ mod tests {
         // Verify structured data is stored and parsed correctly
         assert!(!participant.session_encrypted_data.is_empty());
         assert!(!participant.enclave_encrypted_data.is_empty());
-
-        // Verify we can deserialize the session data (stored as JSON)
-        let session_data: KeygenParticipantSessionData =
-            serde_json::from_str(&participant.session_encrypted_data).unwrap();
-        assert_eq!(session_data.public_key, participant_request.public_key);
 
         // Verify enclave data is hex-encoded (simulating encrypted data)
         let enclave_hex = &participant.enclave_encrypted_data;

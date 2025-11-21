@@ -67,7 +67,7 @@ services:
       - KEYMELD_PORT=8080
       - KEYMELD_DATABASE_PATH=/data/keymeld.db
 
-      - CONFIG_PATH=/app/config/config.yaml
+      - CONFIG_PATH=/app/config.yaml
       - TEST_MODE=true
       - ENCLAVE_3_HOST=enclave-0
       - ENCLAVE_4_HOST=enclave-1
@@ -87,10 +87,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # KeyMeld Enclave 0
   enclave-0:
@@ -113,11 +113,11 @@ services:
       - keymeld-network
 
     healthcheck:
-      test: ["CMD", "timeout", "3", "bash", "-c", "</dev/tcp/localhost/5000"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      test: ["CMD", "timeout", "10", "bash", "-c", "</dev/tcp/localhost/5000"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # KeyMeld Enclave 1
   enclave-1:
@@ -140,11 +140,11 @@ services:
       - keymeld-network
 
     healthcheck:
-      test: ["CMD", "timeout", "3", "bash", "-c", "</dev/tcp/localhost/5001"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      test: ["CMD", "timeout", "10", "bash", "-c", "</dev/tcp/localhost/5001"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # KeyMeld Enclave 2
   enclave-2:
@@ -167,11 +167,11 @@ services:
       - keymeld-network
 
     healthcheck:
-      test: ["CMD", "timeout", "3", "bash", "-c", "</dev/tcp/localhost/5002"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      test: ["CMD", "timeout", "10", "bash", "-c", "</dev/tcp/localhost/5002"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # KeyMeld Example - Demo application
   example:

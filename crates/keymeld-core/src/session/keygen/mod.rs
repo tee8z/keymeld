@@ -20,6 +20,7 @@ pub struct KeygenCollectingParticipants {
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
     pub coordinator_encrypted_private_key: String,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
@@ -37,6 +38,7 @@ pub struct KeygenCompleted {
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
     pub coordinator_encrypted_private_key: String,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
@@ -62,6 +64,7 @@ impl KeygenCompleted {
             keygen_session_id: collecting.keygen_session_id,
             coordinator_pubkey: collecting.coordinator_pubkey,
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
+            session_public_key: collecting.session_public_key,
             encrypted_session_secret: collecting.encrypted_session_secret,
             coordinator_enclave_id: collecting.coordinator_enclave_id,
             expected_participants: collecting.expected_participants,
@@ -82,6 +85,7 @@ pub struct KeygenFailed {
     #[schema(value_type = String)]
     pub coordinator_pubkey: Option<PublicKey>,
     pub coordinator_encrypted_private_key: Option<String>,
+    pub session_public_key: Option<Vec<u8>>,
     pub coordinator_enclave_id: Option<EnclaveId>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,

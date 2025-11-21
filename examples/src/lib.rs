@@ -1,5 +1,4 @@
 pub mod adaptor_utils;
-
 use anyhow::{anyhow, Result};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use bdk_wallet::{
@@ -8,7 +7,8 @@ use bdk_wallet::{
         bip32::{ChildNumber, Xpriv},
         key::TweakedPublicKey,
         psbt::Psbt,
-        secp256k1::{PublicKey, Secp256k1, SecretKey},
+        secp256k1::{schnorr::Signature, PublicKey, Secp256k1, SecretKey},
+        taproot::Signature as TaprootSignature,
         transaction::Version,
         Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapSighashType, Transaction, TxIn,
         TxOut, Witness,
@@ -17,22 +17,24 @@ use bdk_wallet::{
     template::Bip86,
     KeychainKind, Wallet,
 };
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::Message;
 use bitcoin::sighash::{Prevouts, SighashCache};
-
 use keymeld_core::{
     api::{
         CreateKeygenSessionRequest, CreateKeygenSessionResponse, CreateSigningSessionRequest,
-        KeygenSessionStatusResponse, RegisterKeygenParticipantRequest,
-        SigningSessionStatusResponse, TaprootTweak,
+        EnclavePublicKeyResponse, GetAvailableSlotsResponse, KeygenSessionStatusResponse,
+        RegisterKeygenParticipantRequest, SigningSessionStatusResponse, TaprootTweak,
     },
+    crypto::SecureCrypto,
+    identifiers::UserId,
     session::{KeygenStatusKind, SigningStatusKind},
+    SessionId,
 };
-use reqwest::Client;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-use bitcoin::hashes::{sha256, Hash};
-
 use rand::RngCore;
+use reqwest::Client;
+use secp256k1::PublicKey as Secp256k1PublicKey;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::read_to_string;
@@ -97,19 +99,13 @@ pub mod network_serde {
 
 #[derive(Debug)]
 pub struct Participant {
-    pub user_id: String,
     pub wallet: Wallet,
     pub derived_private_key: SecretKey,
     pub public_key: PublicKey,
 }
 
 impl Participant {
-    pub fn new(
-        user_id: String,
-        mnemonic: Mnemonic,
-        network: Network,
-        derivation_index: u32,
-    ) -> Result<Self> {
+    pub fn new(mnemonic: Mnemonic, network: Network, derivation_index: u32) -> Result<Self> {
         let seed = mnemonic.to_seed("");
         let master_xpriv = Xpriv::new_master(network, &seed)?;
 
@@ -127,19 +123,16 @@ impl Participant {
 
         let derived_xpriv = master_xpriv.derive_priv(&secp, &derivation_path)?;
         let derived_private_key = derived_xpriv.private_key;
-        let public_key = derived_private_key.public_key(&secp);
 
         let external_descriptor = Bip86(derived_xpriv, KeychainKind::External);
         let internal_descriptor = Bip86(derived_xpriv, KeychainKind::Internal);
         let wallet = Wallet::create(external_descriptor, internal_descriptor)
             .network(network)
             .create_wallet_no_persist()?;
-
         Ok(Self {
-            user_id,
             wallet,
             derived_private_key,
-            public_key,
+            public_key: PublicKey::from_secret_key(&secp, &derived_private_key),
         })
     }
 
@@ -161,12 +154,13 @@ pub struct KeyMeldE2ETest {
     pub coordinator_wallet: Wallet,
     pub coordinator_derived_private_key: SecretKey,
     pub coordinator_public_key: PublicKey,
-    pub coordinator_user_id: String,
-    pub participant_user_ids: Vec<String>,
+    pub coordinator_user_id: UserId,
+    pub participant_user_ids: Vec<UserId>,
     pub rpc_client: RpcClient,
     pub amount: u64,
     pub destination: String,
-    pub session_secrets: HashMap<String, String>,
+    pub session_secrets: HashMap<SessionId, String>,
+    pub session_private_keys: HashMap<SessionId, secp256k1::SecretKey>,
 }
 
 impl KeyMeldE2ETest {
@@ -187,21 +181,12 @@ impl KeyMeldE2ETest {
             .map_err(|e| anyhow!("Failed to create RPC client: {e}"))?;
 
         let coordinator_mnemonic = Self::load_or_create_coordinator_private_key(&config)?;
-        let coordinator_user_id = Uuid::now_v7().to_string();
+        let coordinator_user_id = Uuid::now_v7().into();
         info!("👤 Coordinator user ID: {}", coordinator_user_id);
 
-        let coordinator = Participant::new(
-            coordinator_user_id.clone(),
-            coordinator_mnemonic,
-            config.network,
-            0,
-        )?;
+        let coordinator = Participant::new(coordinator_mnemonic, config.network, 0)?;
 
-        let mut participant_user_ids = vec![coordinator_user_id.clone()];
-        for _ in 1..config.num_signers {
-            let user_id = Uuid::now_v7().to_string();
-            participant_user_ids.push(user_id);
-        }
+        let participant_user_ids: Vec<UserId> = Vec::new();
 
         Ok(Self {
             config,
@@ -216,6 +201,7 @@ impl KeyMeldE2ETest {
             amount,
             destination,
             session_secrets: HashMap::new(),
+            session_private_keys: HashMap::new(),
         })
     }
 
@@ -287,12 +273,7 @@ impl KeyMeldE2ETest {
                 info!("💾 Participant {} key saved to {}", i, key_file);
                 mnemonic
             };
-            let user_id = self
-                .participant_user_ids
-                .get(i)
-                .ok_or_else(|| anyhow!("No user ID found for participant index {}", i))?
-                .clone();
-            let participant = Participant::new(user_id, mnemonic, self.config.network, i as u32)?;
+            let participant = Participant::new(mnemonic, self.config.network, i as u32)?;
 
             self.participants.push(participant);
         }
@@ -506,48 +487,132 @@ impl KeyMeldE2ETest {
         Ok(psbt)
     }
 
-    pub async fn create_keygen_session(&mut self) -> Result<String> {
+    pub async fn create_keygen_session(&mut self) -> Result<SessionId> {
         info!("🔑 Creating keygen session...");
 
-        let keygen_session_id = Uuid::now_v7().to_string();
-        let session_secret = keymeld_core::api::validation::generate_session_secret()?;
+        let keygen_session_id: SessionId = Uuid::now_v7().into();
+
+        // Generate cryptographically secure seed for session authentication
+        let seed = keymeld_core::crypto::SecureCrypto::generate_session_seed()
+            .map_err(|e| anyhow!("Failed to generate session seed: {}", e))?;
+
+        // Derive private and public keys from the seed
+        let session_private_key =
+            keymeld_core::crypto::SecureCrypto::derive_private_key_from_seed(&seed)
+                .map_err(|e| anyhow!("Failed to derive private key from seed: {}", e))?;
+        let session_public_key =
+            keymeld_core::crypto::SecureCrypto::derive_public_key_from_seed(&seed)
+                .map_err(|e| anyhow!("Failed to derive public key from seed: {}", e))?;
+
+        let session_secret = hex::encode(&seed); // Keep for internal tracking
+
+        info!("🔐 Generated session seed and keys:");
+        info!("🔐 Seed length: {} bytes", seed.len());
+        info!(
+            "🔐 Public key: {}",
+            hex::encode(session_public_key.serialize())
+        );
+        info!("🔐 Private key available for signing");
+
+        let mut participant_user_ids = Vec::new();
+        for _ in 0..self.participants.len() {
+            participant_user_ids.push(UserId::new_v7());
+        }
+
+        self.coordinator_user_id = UserId::new_v7();
+        self.participant_user_ids = participant_user_ids;
+
+        info!(
+            "🔐 Generated session secret length: {} chars",
+            session_secret.len()
+        );
+        info!("🔐 Session secret sample: {}...", &session_secret[..8]);
 
         self.session_secrets
             .insert(keygen_session_id.clone(), session_secret.clone());
+        self.session_private_keys
+            .insert(keygen_session_id.clone(), session_private_key);
 
-        let session_secret_obj = keymeld_core::crypto::SessionSecret::from_hex(&session_secret)?;
-        let encrypted_key = session_secret_obj.encrypt(
-            &self.coordinator_derived_private_key.secret_bytes(),
-            "private_key",
-        )?;
+        let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
 
-        let mut expected_participants = vec![self.coordinator_user_id.clone().try_into().unwrap()];
-        for participant in &self.participants {
-            expected_participants.push(participant.user_id.clone().try_into().unwrap());
+        let coordinator_enclave_id = 1u32.into();
+
+        // Get the coordinator enclave's public key
+        let enclave_public_key_response: EnclavePublicKeyResponse = self
+            .client
+            .get(format!(
+                "{}/api/v1/enclaves/{}/public-key",
+                self.config.gateway_url, 1
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        // Encrypt the session secret with the coordinator enclave's public key
+        let enclave_public_key_bytes = hex::decode(&enclave_public_key_response.public_key)
+            .map_err(|e| anyhow!("Failed to decode enclave public key: {}", e))?;
+        let enclave_public_key = Secp256k1PublicKey::from_slice(&enclave_public_key_bytes)
+            .map_err(|e| anyhow!("Invalid enclave public key: {}", e))?;
+
+        info!("🔐 Seed length: {} bytes", seed.len());
+        info!("🔐 Session secret (hex): {}", session_secret);
+        info!(
+            "🔐 Enclave public key length: {} bytes",
+            enclave_public_key_bytes.len()
+        );
+
+        // Encrypt the seed (not the hex-encoded session_secret) to the coordinator enclave
+        let encrypted_session_secret_bytes =
+            SecureCrypto::ecies_encrypt(&enclave_public_key, &seed)
+                .map_err(|e| anyhow!("Failed to encrypt session seed: {}", e))?;
+
+        info!(
+            "🔐 Encrypted seed length: {} bytes",
+            encrypted_session_secret_bytes.len()
+        );
+        let encrypted_session_secret = hex::encode(&encrypted_session_secret_bytes);
+        info!(
+            "🔐 Encrypted seed hex length: {} chars",
+            encrypted_session_secret.len()
+        );
+
+        // Encrypt the coordinator private key with the same enclave public key
+        let encrypted_coordinator_key_bytes =
+            SecureCrypto::ecies_encrypt(&enclave_public_key, &coordinator_private_key_bytes)
+                .map_err(|e| anyhow!("Failed to encrypt coordinator private key: {}", e))?;
+        let encrypted_key = hex::encode(&encrypted_coordinator_key_bytes);
+
+        info!(
+            "🔐 Encrypted coordinator key length: {} bytes -> {} hex chars",
+            encrypted_coordinator_key_bytes.len(),
+            encrypted_key.len()
+        );
+
+        let mut expected_participants = vec![self.coordinator_user_id.clone()];
+        for user_id in &self.participant_user_ids {
+            expected_participants.push(user_id.clone());
         }
 
         let request = CreateKeygenSessionRequest {
-            keygen_session_id: keygen_session_id.clone().try_into().unwrap(),
+            keygen_session_id: keygen_session_id.clone(),
             coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
-            coordinator_encrypted_private_key: encrypted_key.to_hex_json()?,
-            coordinator_enclave_id: 1u32.into(),
+            coordinator_encrypted_private_key: encrypted_key,
+            coordinator_enclave_id,
             expected_participants,
             timeout_secs: 1800,
-            encrypted_session_secret: session_secret.clone(),
+            session_public_key: session_public_key.serialize().to_vec(),
+            encrypted_session_secret,
             max_signing_sessions: None,
             taproot_tweak_config: TaprootTweak::None,
         };
 
-        let session_hmac = self.generate_session_hmac(
-            &keygen_session_id,
-            &self.coordinator_user_id,
-            &session_secret,
-        )?;
+        let session_signature = self.generate_session_signature(&keygen_session_id)?;
 
         let response = self
             .client
             .post(format!("{}/api/v1/keygen", self.config.gateway_url))
-            .header("X-Session-HMAC", session_hmac)
+            .header("X-Session-Signature", session_signature)
             .json(&request)
             .send()
             .await?;
@@ -573,27 +638,55 @@ impl KeyMeldE2ETest {
         info!("🔗 Secret: {}", &session_secret[..8]);
     }
 
-    pub async fn register_keygen_participants(&mut self, keygen_session_id: &str) -> Result<()> {
+    pub async fn register_keygen_participants(
+        &mut self,
+        keygen_session_id: &SessionId,
+    ) -> Result<()> {
         info!("📝 Registering keygen participants...");
 
-        let keygen_session_id_clone = keygen_session_id.to_string();
-        self.register_keygen_coordinator(&keygen_session_id_clone)
+        // Get available slots to determine enclave assignments
+        let slots_response: GetAvailableSlotsResponse = self
+            .client
+            .get(format!(
+                "{}/api/v1/keygen/{}/slots",
+                self.config.gateway_url, keygen_session_id
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        info!(
+            "Found {} available slots for keygen session",
+            slots_response.available_slots.len()
+        );
+
+        self.register_keygen_coordinator(keygen_session_id, &slots_response)
             .await?;
 
         let participants_len = self.participants.len();
         for i in 0..participants_len {
-            self.register_keygen_participant(&keygen_session_id_clone, i)
+            self.register_keygen_participant(keygen_session_id, i, &slots_response)
                 .await?;
         }
 
-        self.verify_keygen_participants_registered(&keygen_session_id_clone)
+        self.verify_keygen_participants_registered(keygen_session_id)
             .await?;
 
         Ok(())
     }
 
-    async fn register_keygen_coordinator(&mut self, keygen_session_id: &str) -> Result<()> {
+    async fn register_keygen_coordinator(
+        &mut self,
+        keygen_session_id: &SessionId,
+        slots: &GetAvailableSlotsResponse,
+    ) -> Result<()> {
         info!("👤 Registering coordinator...");
+
+        let coordinator_slot = slots
+            .available_slots
+            .first()
+            .ok_or_else(|| anyhow!("No available slots for coordinator"))?;
 
         let session_secret = self
             .session_secrets
@@ -608,25 +701,37 @@ impl KeyMeldE2ETest {
 
         self.share_session_secret_out_of_band(&session_secret);
 
-        let session_secret_obj = keymeld_core::crypto::SessionSecret::from_hex(&session_secret)?;
-        let encrypted_key = session_secret_obj.encrypt(
-            &self.coordinator_derived_private_key.secret_bytes(),
-            "private_key",
-        )?;
+        // Get the coordinator's assigned enclave public key
+        let enclave_public_key_response: EnclavePublicKeyResponse = self
+            .client
+            .get(format!(
+                "{}/api/v1/enclaves/{}/public-key",
+                self.config.gateway_url,
+                coordinator_slot.enclave_id.as_u32()
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        // Encrypt the coordinator private key with ECIES using assigned enclave public key
+        let encrypted_private_key = {
+            let encrypted_data = SecureCrypto::ecies_encrypt_from_hex(
+                &enclave_public_key_response.public_key,
+                self.coordinator_derived_private_key.secret_bytes().as_ref(),
+            )?;
+            hex::encode(encrypted_data)
+        };
 
         let request = RegisterKeygenParticipantRequest {
-            keygen_session_id: keygen_session_id.try_into().unwrap(),
-            user_id: self.coordinator_user_id.clone().try_into().unwrap(),
-            encrypted_private_key: encrypted_key.to_hex_json()?,
+            keygen_session_id: keygen_session_id.clone(),
+            user_id: self.coordinator_user_id.clone(),
+            encrypted_private_key,
             public_key: self.coordinator_public_key.serialize().to_vec(),
             require_signing_approval: true,
         };
 
-        let session_hmac = self.generate_session_hmac(
-            keygen_session_id,
-            &self.coordinator_user_id,
-            &session_secret,
-        )?;
+        let session_signature = self.generate_session_signature(keygen_session_id)?;
 
         let response = self
             .client
@@ -634,7 +739,7 @@ impl KeyMeldE2ETest {
                 "{}/api/v1/keygen/{}/participants",
                 self.config.gateway_url, keygen_session_id
             ))
-            .header("X-Session-HMAC", session_hmac)
+            .header("X-Session-Signature", session_signature)
             .json(&request)
             .send()
             .await?;
@@ -652,39 +757,51 @@ impl KeyMeldE2ETest {
 
     async fn register_keygen_participant(
         &mut self,
-        keygen_session_id: &str,
+        keygen_session_id: &SessionId,
         participant_index: usize,
+        slots: &GetAvailableSlotsResponse,
     ) -> Result<()> {
-        let session_secret = self
-            .session_secrets
-            .get(keygen_session_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Session secret not found for keygen session: {}",
-                    keygen_session_id
-                )
-            })?
-            .clone();
-
         let participant = &self.participants[participant_index];
-        let session_secret_obj = keymeld_core::crypto::SessionSecret::from_hex(&session_secret)?;
-        let encrypted_key = session_secret_obj.encrypt(
-            &participant.derived_private_key.secret_bytes(),
-            "private_key",
-        )?;
+
+        // Get participant's assigned slot (coordinator takes slot 0, so participant gets slot index + 1)
+        let participant_slot = slots
+            .available_slots
+            .get(participant_index + 1)
+            .ok_or_else(|| anyhow!("No available slot for participant {}", participant_index))?;
+
+        // Get the assigned enclave's public key
+        let enclave_public_key_response: EnclavePublicKeyResponse = self
+            .client
+            .get(format!(
+                "{}/api/v1/enclaves/{}/public-key",
+                self.config.gateway_url,
+                participant_slot.enclave_id.as_u32()
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        // Encrypt the participant private key with ECIES using assigned enclave public key
+        let encrypted_private_key = {
+            let encrypted_data = SecureCrypto::ecies_encrypt_from_hex(
+                &enclave_public_key_response.public_key,
+                participant.derived_private_key.secret_bytes().as_ref(),
+            )?;
+            hex::encode(encrypted_data)
+        };
 
         let requires_approval = participant_index == 0;
 
         let request = RegisterKeygenParticipantRequest {
-            keygen_session_id: keygen_session_id.try_into().unwrap(),
-            user_id: participant.user_id.clone().try_into().unwrap(),
-            encrypted_private_key: encrypted_key.to_hex_json()?,
+            keygen_session_id: keygen_session_id.clone(),
+            user_id: self.participant_user_ids[participant_index].clone(),
+            encrypted_private_key,
             public_key: participant.public_key.serialize().to_vec(),
             require_signing_approval: requires_approval,
         };
 
-        let session_hmac =
-            self.generate_session_hmac(keygen_session_id, &participant.user_id, &session_secret)?;
+        let session_signature = self.generate_session_signature(keygen_session_id)?;
 
         let response = self
             .client
@@ -692,7 +809,7 @@ impl KeyMeldE2ETest {
                 "{}/api/v1/keygen/{}/participants",
                 self.config.gateway_url, keygen_session_id
             ))
-            .header("X-Session-HMAC", session_hmac)
+            .header("X-Session-Signature", session_signature)
             .json(&request)
             .send()
             .await?;
@@ -700,35 +817,26 @@ impl KeyMeldE2ETest {
         if !response.status().is_success() {
             return Err(anyhow!(
                 "Failed to register participant {}: {}",
-                participant.user_id,
+                self.participant_user_ids[participant_index],
                 response.text().await?
             ));
         }
 
-        info!("✅ Participant {} registered", participant.user_id);
+        info!(
+            "✅ Participant {} registered",
+            self.participant_user_ids[participant_index]
+        );
         Ok(())
     }
 
-    async fn verify_keygen_participants_registered(&self, keygen_session_id: &str) -> Result<()> {
+    async fn verify_keygen_participants_registered(
+        &self,
+        keygen_session_id: &SessionId,
+    ) -> Result<()> {
         info!("🔍 Verifying all participants are registered...");
 
-        let session_secret = self
-            .session_secrets
-            .get(keygen_session_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Session secret not found for keygen session: {}",
-                    keygen_session_id
-                )
-            })?
-            .clone();
-
         loop {
-            let session_hmac = self.generate_session_hmac(
-                keygen_session_id,
-                &self.coordinator_user_id,
-                &session_secret,
-            )?;
+            let session_signature = self.generate_session_signature(keygen_session_id)?;
 
             let response = self
                 .client
@@ -736,7 +844,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
-                .header("X-Session-HMAC", session_hmac)
+                .header("X-Session-Signature", session_signature)
                 .send()
                 .await?;
 
@@ -767,26 +875,14 @@ impl KeyMeldE2ETest {
         Ok(())
     }
 
-    pub async fn wait_for_keygen_completion(&mut self, keygen_session_id: &str) -> Result<String> {
+    pub async fn wait_for_keygen_completion(
+        &mut self,
+        keygen_session_id: &SessionId,
+    ) -> Result<String> {
         info!("⏳ Waiting for keygen completion...");
 
-        let session_secret = self
-            .session_secrets
-            .get(keygen_session_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Session secret not found for keygen session: {}",
-                    keygen_session_id
-                )
-            })?
-            .clone();
-
         loop {
-            let session_hmac = self.generate_session_hmac(
-                keygen_session_id,
-                &self.coordinator_user_id,
-                &session_secret,
-            )?;
+            let session_signature = self.generate_session_signature(keygen_session_id)?;
 
             let response = self
                 .client
@@ -794,7 +890,7 @@ impl KeyMeldE2ETest {
                     "{}/api/v1/keygen/{}/status",
                     self.config.gateway_url, keygen_session_id
                 ))
-                .header("X-Session-HMAC", session_hmac)
+                .header("X-Session-Signature", session_signature)
                 .send()
                 .await?;
 
@@ -829,10 +925,10 @@ impl KeyMeldE2ETest {
 
     pub async fn create_signing_session(
         &mut self,
-        keygen_session_id: &str,
+        keygen_session_id: &SessionId,
         psbt: &Psbt,
-    ) -> Result<String> {
-        let signing_session_id = Uuid::now_v7().to_string();
+    ) -> Result<SessionId> {
+        let signing_session_id: SessionId = Uuid::now_v7().into();
         let sighash = self.calculate_taproot_sighash(psbt)?;
 
         let session_secret = self
@@ -851,25 +947,26 @@ impl KeyMeldE2ETest {
 
         let encrypted_adaptor_configs = String::new();
 
+        info!("🔍 DEBUG: Sighash being sent to signing session:");
+        info!("🔍 DEBUG: Sighash bytes: {:?}", sighash);
+        info!("🔍 DEBUG: Sighash hex: {}", hex::encode(&sighash[..]));
+        info!("🔍 DEBUG: Sighash length: {} bytes", sighash.len());
+
         let request = CreateSigningSessionRequest {
-            signing_session_id: signing_session_id.clone().try_into().unwrap(),
-            keygen_session_id: keygen_session_id.try_into().unwrap(),
+            signing_session_id: signing_session_id.clone(),
+            keygen_session_id: keygen_session_id.clone(),
             message_hash: sighash.to_vec(),
             encrypted_message: Some(hex::encode(&sighash[..])),
             timeout_secs: 1800,
             encrypted_adaptor_configs,
         };
 
-        let session_hmac = self.generate_session_hmac(
-            keygen_session_id,
-            self.coordinator_user_id.as_str(),
-            &session_secret,
-        )?;
+        let session_signature = self.generate_session_signature(keygen_session_id)?;
 
         let response = self
             .client
             .post(format!("{}/api/v1/signing", self.config.gateway_url))
-            .header("X-Session-HMAC", session_hmac)
+            .header("X-Session-Signature", session_signature)
             .json(&request)
             .send()
             .await?;
@@ -887,24 +984,29 @@ impl KeyMeldE2ETest {
 
     pub async fn wait_for_signing_completion(
         &mut self,
-        signing_session_id: &str,
-        keygen_session_id: &str,
+        signing_session_id: &SessionId,
+        keygen_session_id: &SessionId,
     ) -> Result<Vec<u8>> {
         info!("⏳ Waiting for signing completion...");
 
         loop {
-            let user_hmac = self.generate_user_hmac(
-                self.coordinator_user_id.as_str(),
+            let _user_hmac = self.generate_user_hmac(
+                &self.coordinator_user_id,
+                &self.coordinator_derived_private_key,
+            )?;
+
+            let user_signature = self.generate_user_raw_signature(
+                signing_session_id,
                 &self.coordinator_derived_private_key,
             )?;
 
             let response = self
                 .client
                 .get(format!(
-                    "{}/api/v1/signing/{}/status",
-                    self.config.gateway_url, signing_session_id
+                    "{}/api/v1/signing/{}/status/{}",
+                    self.config.gateway_url, signing_session_id, self.coordinator_user_id
                 ))
-                .header("X-Signing-HMAC", user_hmac)
+                .header("X-User-Signature", user_signature)
                 .send()
                 .await?;
 
@@ -985,8 +1087,30 @@ impl KeyMeldE2ETest {
             ));
         }
 
-        let signature_bytes = signature.to_vec();
-        psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[signature_bytes]));
+        info!("🔍 DEBUG: Signature being applied to transaction:");
+        info!("🔍 DEBUG: Signature bytes: {:?}", signature);
+        info!("🔍 DEBUG: Signature hex: {}", hex::encode(signature));
+        info!("🔍 DEBUG: Signature length: {} bytes", signature.len());
+
+        let signature = Signature::from_slice(signature)
+            .map_err(|e| anyhow!("Failed to parse signature: {}", e))?;
+
+        if psbt.inputs.is_empty() {
+            return Err(anyhow!("PSBT has no inputs"));
+        }
+
+        let taproot_sig = TaprootSignature {
+            signature,
+            sighash_type: TapSighashType::Default,
+        };
+
+        psbt.inputs[0].tap_key_sig = Some(taproot_sig);
+
+        // For taproot key-path spending, witness should contain just the signature
+        // Create witness with a single stack item containing the 64-byte signature
+        let mut witness = Witness::new();
+        witness.push(signature.as_ref());
+        psbt.inputs[0].final_script_witness = Some(witness);
 
         let signed_tx = psbt.extract_tx()?;
         info!("✅ Transaction signed successfully");
@@ -1024,44 +1148,38 @@ impl KeyMeldE2ETest {
         Ok(sighash.to_byte_array())
     }
 
-    pub fn generate_session_hmac(
-        &self,
-        session_id: &str,
-        user_id: &str,
-        session_secret: &str,
-    ) -> Result<String> {
-        use hmac::{Hmac, Mac};
-        use rand::RngCore;
-        use sha2::Sha256;
-
-        type HmacSha256 = Hmac<Sha256>;
+    pub fn generate_session_signature(&self, session_id: &SessionId) -> Result<String> {
+        // Get the stored private key for this session
+        let private_key = self
+            .session_private_keys
+            .get(session_id)
+            .ok_or_else(|| anyhow!("Session private key not found for session: {}", session_id))?;
 
         // Generate a random nonce
         let mut nonce_bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
 
-        // Create the message in the format expected by the enclave: session_id:user_id:nonce
-        let message_data = format!("{}:{}:{}", session_id, user_id, nonce);
+        // Create the message to sign: session_id:nonce
+        let message = format!("{}:{}", session_id, nonce);
+        let message_hash = sha256::Hash::hash(message.as_bytes());
+        let message_secp = Message::from_digest(message_hash.to_byte_array());
 
-        // Use hex-decoded session secret as the HMAC key
-        let secret_bytes = hex::decode(session_secret)
-            .map_err(|e| anyhow!("Failed to hex-decode session secret: {e}"))?;
+        // Convert secp256k1::SecretKey to bitcoin::secp256k1::SecretKey
+        let private_key_bytes = private_key.secret_bytes();
+        let bitcoin_private_key = bitcoin::secp256k1::SecretKey::from_slice(&private_key_bytes)
+            .map_err(|e| anyhow!("Failed to convert private key: {}", e))?;
 
-        let mut mac = HmacSha256::new_from_slice(&secret_bytes)
-            .map_err(|e| anyhow!("HMAC key error: {e}"))?;
+        // Sign the message with the session private key
+        let secp = Secp256k1::new();
+        let signature = secp.sign_ecdsa(&message_secp, &bitcoin_private_key);
+        let signature_hex = hex::encode(signature.serialize_compact());
 
-        mac.update(message_data.as_bytes());
-        let result = mac.finalize();
-        let hmac = hex::encode(result.into_bytes());
-
-        // Return in nonce:hmac format
-        Ok(format!("{}:{}", nonce, hmac))
+        // Return in format "nonce:signature"
+        Ok(format!("{}:{}", nonce, signature_hex))
     }
 
-    pub fn generate_user_hmac(&self, user_id: &str, private_key: &SecretKey) -> Result<String> {
-        use rand::RngCore;
-
+    pub fn generate_user_hmac(&self, user_id: &UserId, private_key: &SecretKey) -> Result<String> {
         let mut nonce_bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
@@ -1085,21 +1203,21 @@ impl KeyMeldE2ETest {
 
     pub async fn approve_signing_session(
         &self,
-        signing_session_id: &str,
-        user_id: &str,
+        signing_session_id: &SessionId,
+        user_id: &UserId,
         private_key: &SecretKey,
     ) -> Result<()> {
         info!("✅ Approving signing session for user: {}", user_id);
 
-        let user_hmac = self.generate_user_hmac(user_id, private_key)?;
+        let user_signature = self.generate_user_raw_signature(signing_session_id, private_key)?;
 
         let response = self
             .client
             .post(format!(
-                "{}/api/v1/signing/{}",
-                self.config.gateway_url, signing_session_id
+                "{}/api/v1/signing/{}/approve/{}",
+                self.config.gateway_url, signing_session_id, user_id
             ))
-            .header("X-Signing-HMAC", user_hmac)
+            .header("X-User-Signature", user_signature)
             .send()
             .await?;
 
@@ -1113,5 +1231,39 @@ impl KeyMeldE2ETest {
 
         info!("✅ Signing session approved for user: {}", user_id);
         Ok(())
+    }
+
+    /// Derive a shared private key from the session secret for authentication
+    fn derive_session_auth_key(&self, session_secret: &str) -> Result<SecretKey> {
+        // Use session secret as seed to deterministically derive private key
+        let key_material = sha256::Hash::hash(session_secret.as_bytes());
+        SecretKey::from_slice(key_material.as_ref())
+            .map_err(|e| anyhow!("Failed to derive auth key from session secret: {}", e))
+    }
+
+    /// Get the public key for session authentication (for gateway validation)
+    pub fn get_session_auth_public_key(&self, session_secret: &str) -> Result<PublicKey> {
+        let private_key = self.derive_session_auth_key(session_secret)?;
+        let secp = Secp256k1::new();
+        Ok(PublicKey::from_secret_key(&secp, &private_key))
+    }
+
+    /// Generate raw ECDSA signature for user approval
+    pub fn generate_user_raw_signature(
+        &self,
+        signing_session_id: &SessionId,
+        private_key: &SecretKey,
+    ) -> Result<String> {
+        // Create the message to sign: the signing session ID
+        let message = signing_session_id.as_string();
+        let message_hash = sha256::Hash::hash(message.as_bytes());
+        let message_secp = Message::from_digest(message_hash.to_byte_array());
+
+        // Sign the message with the user's private key
+        let secp = Secp256k1::new();
+        let signature = secp.sign_ecdsa(&message_secp, private_key);
+        let signature_hex = hex::encode(signature.serialize_compact());
+
+        Ok(signature_hex)
     }
 }

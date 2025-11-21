@@ -20,8 +20,6 @@ pub enum EnclaveCommand {
     AddNonce(AddNonceCommand),
     GetAggregateNonce(GetAggregateNonceCommand),
     GetAggregatePublicKey(GetAggregatePublicKeyCommand),
-    ValidateSessionHmac(ValidateSessionHmacCommand),
-    ValidateKeygenParticipantHmac(ValidateKeygenParticipantHmacCommand),
     SignPartialSignature(ParitialSignatureCommand),
     AddPartialSignature(AddPartialSignatureCommand),
     Finalize(FinalizeCommand),
@@ -32,6 +30,7 @@ pub enum EnclaveCommand {
     InitiateAdaptorSigning(InitiateAdaptorSigningCommand),
     SignAdaptorPartialSignature(SignAdaptorPartialSignatureCommand),
     ProcessAdaptorSignatures(ProcessAdaptorSignaturesCommand),
+    ValidateUserSignature(ValidateUserSignatureCommand),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,12 +46,11 @@ pub enum EnclaveResponse {
     PublicInfo(PublicInfoResponse),
     Attestation(AttestationResponse),
     BatchSessionSecrets(BatchSessionSecretsResponse),
-    EnclavePublicKeys(EnclavePublicKeysResponse),
     KeygenInitialized(KeygenInitializedResponse),
-    SessionSecret(SessionSecretResponse),
-    Error(ErrorResponse),
     AdaptorPartialSignature(AdaptorPartialSignatureResponse),
     AdaptorSignatures(AdaptorSignaturesResponse),
+    ValidateUserSignature(ValidateUserSignatureResponse),
+    Error(ErrorResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,24 +148,6 @@ pub struct GetAggregateNonceCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetAggregatePublicKeyCommand {
     pub keygen_session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidateSessionHmacCommand {
-    pub signing_session_id: Option<SessionId>,
-    pub keygen_session_id: Option<SessionId>,
-    pub user_id: UserId,
-    pub message_hash: Vec<u8>,
-    pub session_hmac: String,
-    pub encrypted_session_secret: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidateKeygenParticipantHmacCommand {
-    pub keygen_session_id: SessionId,
-    pub user_id: UserId,
-    pub session_hmac: String,
-    pub encrypted_session_secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,12 +251,17 @@ pub struct AttestationResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionHmacValidationResponse {
-    pub signing_session_id: SessionId,
+pub struct ValidateUserSignatureCommand {
     pub keygen_session_id: SessionId,
+    pub signing_session_id: SessionId,
     pub user_id: UserId,
+    pub user_signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateUserSignatureResponse {
     pub is_valid: bool,
-    pub message: String,
+    pub user_id: UserId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

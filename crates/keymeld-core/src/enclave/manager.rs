@@ -1,9 +1,10 @@
 use crate::{
     api::TaprootTweak,
     enclave::{
-        protocol::EnclavePublicKeyInfo, AddNonceCommand, AddPartialSignatureCommand,
-        GenerateNonceCommand, InitKeygenSessionCommand, InitSigningSessionCommand,
-        InitiateAdaptorSigningCommand, ParitialSignatureCommand, ProcessAdaptorSignaturesCommand,
+        protocol::{EnclavePublicKeyInfo, ValidateUserSignatureCommand},
+        AddNonceCommand, AddPartialSignatureCommand, GenerateNonceCommand,
+        InitKeygenSessionCommand, InitSigningSessionCommand, InitiateAdaptorSigningCommand,
+        ParitialSignatureCommand, ProcessAdaptorSignaturesCommand,
     },
     identifiers::{EnclaveId, SessionId, UserId},
     resilience::{RetryConfig, TimeoutConfig},
@@ -27,20 +28,8 @@ use super::{
     protocol::{
         AddParticipantCommand, AttestationResponse, DistributeSessionSecretCommand, EnclaveCommand,
         EnclaveResponse, FinalizeCommand, GetAggregateNonceCommand, GetAggregatePublicKeyCommand,
-        ValidateKeygenParticipantHmacCommand, ValidateSessionHmacCommand,
     },
 };
-
-#[derive(Debug, Clone)]
-pub struct SessionHmacValidationParams {
-    pub enclave_id: EnclaveId,
-    pub signing_session_id: Option<SessionId>,
-    pub keygen_session_id: Option<SessionId>,
-    pub user_id: UserId,
-    pub message_hash: Vec<u8>,
-    pub session_hmac: String,
-    pub encrypted_session_secret: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct SigningSessionInitParams {
@@ -550,69 +539,6 @@ impl EnclaveManager {
             _ => Err(KeyMeldError::EnclaveError(format!(
                 "Unexpected response from enclave {} when adding participant",
                 enclave_id
-            ))),
-        }
-    }
-
-    pub async fn validate_session_hmac(
-        &self,
-        params: SessionHmacValidationParams,
-    ) -> Result<(), KeyMeldError> {
-        let cmd = ValidateSessionHmacCommand {
-            signing_session_id: params.signing_session_id,
-            keygen_session_id: params.keygen_session_id,
-            user_id: params.user_id,
-            message_hash: params.message_hash,
-            session_hmac: params.session_hmac,
-            encrypted_session_secret: params.encrypted_session_secret,
-        };
-
-        match self
-            .send_command_to_enclave(&params.enclave_id, EnclaveCommand::ValidateSessionHmac(cmd))
-            .await?
-        {
-            EnclaveResponse::Success(_) => Ok(()),
-            EnclaveResponse::Error(err) => Err(KeyMeldError::EnclaveError(format!(
-                "HMAC validation failed in enclave {}: {}",
-                params.enclave_id, err
-            ))),
-            response => Err(KeyMeldError::EnclaveError(format!(
-                "Unexpected response from enclave {} for HMAC validation: {:?}",
-                params.enclave_id, response
-            ))),
-        }
-    }
-
-    pub async fn validate_keygen_participant_hmac(
-        &self,
-        enclave_id: &EnclaveId,
-        keygen_session_id: &SessionId,
-        user_id: &UserId,
-        session_hmac: &str,
-        encrypted_session_secret: &str,
-    ) -> Result<(), KeyMeldError> {
-        let validate_cmd = ValidateKeygenParticipantHmacCommand {
-            keygen_session_id: keygen_session_id.clone(),
-            user_id: user_id.clone(),
-            session_hmac: session_hmac.to_string(),
-            encrypted_session_secret: encrypted_session_secret.to_string(),
-        };
-
-        match self
-            .send_command_to_enclave(
-                enclave_id,
-                EnclaveCommand::ValidateKeygenParticipantHmac(validate_cmd),
-            )
-            .await?
-        {
-            EnclaveResponse::Success(_) => Ok(()),
-            EnclaveResponse::Error(err) => Err(KeyMeldError::EnclaveError(format!(
-                "Keygen participant HMAC validation failed in enclave {}: {}",
-                enclave_id, err
-            ))),
-            response => Err(KeyMeldError::EnclaveError(format!(
-                "Unexpected response from enclave {} for keygen participant HMAC validation: {:?}",
-                enclave_id, response
             ))),
         }
     }
@@ -1441,6 +1367,48 @@ impl EnclaveManager {
             _ => Err(KeyMeldError::EnclaveError(
                 "Unexpected response from process adaptor signatures".to_string(),
             )),
+        }
+    }
+
+    /// Validate user signature using enclave-stored participant data
+    pub async fn validate_user_signature(
+        &self,
+        keygen_session_id: &SessionId,
+        signing_session_id: &SessionId,
+        user_id: &UserId,
+        user_signature: &str,
+    ) -> Result<bool, KeyMeldError> {
+        // For now, use the coordinator enclave (enclave 1) as a fallback
+        // In a full implementation, this should query the keygen_participants table
+        let enclave_id = EnclaveId::new(1);
+
+        let command = ValidateUserSignatureCommand {
+            keygen_session_id: keygen_session_id.clone(),
+            signing_session_id: signing_session_id.clone(),
+            user_id: user_id.clone(),
+            user_signature: user_signature.to_string(),
+        };
+
+        let response = self
+            .send_command_to_enclave(&enclave_id, EnclaveCommand::ValidateUserSignature(command))
+            .await?;
+
+        match response {
+            EnclaveResponse::ValidateUserSignature(resp) => Ok(resp.is_valid),
+            EnclaveResponse::Error(error) => {
+                warn!(
+                    "Enclave {} returned error for user signature validation: {}",
+                    enclave_id, error.error
+                );
+                Ok(false)
+            }
+            _ => {
+                warn!(
+                    "Enclave {} returned unexpected response for user signature validation",
+                    enclave_id
+                );
+                Ok(false)
+            }
         }
     }
 }

@@ -425,7 +425,7 @@ mod tests {
         let init_data = OperationInitData {
             session_id: session_id.clone(),
             session_secret,
-            message,
+            message: message.clone(),
             message_hash: message_hash.clone(),
             participant_keys,
             aggregate_public_key: aggregate_key,
@@ -449,7 +449,7 @@ mod tests {
         processor
             .init_session(
                 &session_id,
-                message_hash.clone(),
+                message.clone(),
                 TaprootTweak::None,
                 vec![public_key1, public_key2],
                 Some(2),

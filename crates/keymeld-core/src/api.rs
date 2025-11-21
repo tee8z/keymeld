@@ -19,6 +19,7 @@ pub struct CreateKeygenSessionRequest {
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
     pub timeout_secs: u64,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub max_signing_sessions: Option<u32>,
     #[serde(default)]
@@ -338,28 +339,24 @@ pub mod validation {
             .map_err(|e| KeyMeldError::CryptoError(format!("Invalid UTF-8: {e}")))
     }
 
-    pub fn validate_session_hmac(
+    pub fn validate_session_signature(
         session_id: &str,
-        user_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
+        signature_header: &str,
+        session_public_key: &[u8],
     ) -> Result<(), KeyMeldError> {
-        SecureCrypto::validate_session_hmac(session_id, user_id, provided_hmac, session_secret)
-    }
+        // Parse "nonce:signature" format
+        let (nonce, signature_hex) = signature_header.split_once(':').ok_or_else(|| {
+            KeyMeldError::ValidationError(
+                "Invalid signature format, expected 'nonce:signature'".to_string(),
+            )
+        })?;
 
-    pub fn generate_registration_hmac(
-        data: &str,
-        session_secret: &str,
-    ) -> Result<String, KeyMeldError> {
-        SecureCrypto::generate_registration_hmac(data, session_secret)
-    }
-
-    pub fn validate_user_hmac(
-        user_id: &str,
-        user_hmac: &str,
-        user_public_key: &[u8],
-    ) -> Result<(), KeyMeldError> {
-        SecureCrypto::validate_user_hmac(user_id, user_hmac, user_public_key)
+        SecureCrypto::validate_session_signature(
+            session_id,
+            nonce,
+            signature_hex,
+            session_public_key,
+        )
     }
 
     pub fn validate_create_keygen_session_request(
@@ -384,6 +381,12 @@ pub mod validation {
             "Expected participants",
         )?;
         Validator::validate_timeout_range(Some(request.timeout_secs))?;
+        Validator::validate_vec_length(
+            &request.session_public_key,
+            Some(33),
+            Some(65),
+            "Session public key",
+        )?;
         Validator::validate_non_empty_string(
             &request.encrypted_session_secret,
             "Encrypted session secret",
@@ -393,14 +396,14 @@ pub mod validation {
 
     pub fn validate_register_keygen_participant_request(
         request: &RegisterKeygenParticipantRequest,
-        session_hmac: &str,
+        session_signature: &str,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_non_empty_string(
             &request.encrypted_private_key,
             "Encrypted private key",
         )?;
         Validator::validate_vec_length(&request.public_key, Some(33), Some(65), "Public key")?;
-        Validator::validate_non_empty_string(session_hmac, "Session HMAC")?;
+        Validator::validate_non_empty_string(session_signature, "Session signature")?;
         Ok(())
     }
 

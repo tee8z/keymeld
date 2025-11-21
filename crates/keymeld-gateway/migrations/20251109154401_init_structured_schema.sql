@@ -23,7 +23,8 @@ CREATE TABLE keygen_sessions (
     status TEXT NOT NULL,
     error_message TEXT,
     session_encrypted_data TEXT NOT NULL DEFAULT '{}',
-    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}'
+    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}',
+    session_public_key BLOB
 );
 
 CREATE TABLE keygen_participants (
@@ -111,6 +112,7 @@ CREATE TABLE enclave_public_keys (
 
 -- Indexes
 CREATE INDEX idx_keygen_sessions_status_expires ON keygen_sessions(status_name, expires_at, updated_at);
+CREATE INDEX idx_keygen_sessions_public_key ON keygen_sessions(session_public_key) WHERE session_public_key IS NOT NULL;
 CREATE INDEX idx_keygen_participants_session ON keygen_participants(keygen_session_id);
 
 CREATE INDEX idx_signing_sessions_keygen ON signing_sessions(keygen_session_id);

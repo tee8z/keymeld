@@ -10,7 +10,6 @@ license = "MIT"
 keymeld-core = { path = "../keymeld-core", features = ["enclave"] }
 musig2 = { version = "0.3.1", features = ["secp256k1", "rand", "serde"] }
 sha2 = { version = "0.10", default-features = false }
-hmac = "0.12.1"
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5.2" }
 hyper = "1.7.0"

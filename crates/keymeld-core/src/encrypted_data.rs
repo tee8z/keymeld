@@ -27,7 +27,7 @@ impl KeygenSessionData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeygenEnclaveData {
     pub coordinator_private_key: String,
-    pub session_secret: String,
+    pub session_secret: String, // Contains the encrypted seed used for both auth and encryption
 }
 
 impl KeygenEnclaveData {
@@ -41,12 +41,19 @@ impl KeygenEnclaveData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeygenParticipantSessionData {
-    pub public_key: Vec<u8>,
+    // Removed public_key to prevent privacy leak - user public keys should not be stored in plaintext
+    // User signature validation should happen in enclave using encrypted participant data
+}
+
+impl Default for KeygenParticipantSessionData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KeygenParticipantSessionData {
-    pub fn new(public_key: Vec<u8>) -> Self {
-        Self { public_key }
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
@@ -98,7 +105,7 @@ impl SigningSessionData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningEnclaveData {
     pub coordinator_private_key: String,
-    pub session_secret: String,
+    pub session_secret: String, // Contains the encrypted seed used for both auth and encryption
 }
 
 impl SigningEnclaveData {
@@ -112,12 +119,19 @@ impl SigningEnclaveData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningParticipantSessionData {
-    pub public_key: Vec<u8>,
+    // Removed public_key to prevent privacy leak - user public keys should not be stored in plaintext
+    // User signature validation should happen in enclave using encrypted participant data
+}
+
+impl Default for SigningParticipantSessionData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SigningParticipantSessionData {
-    pub fn new(public_key: Vec<u8>) -> Self {
-        Self { public_key }
+    pub fn new() -> Self {
+        Self {}
     }
 }
 

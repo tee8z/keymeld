@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
+use keymeld_core::api::validation::encrypt_adaptor_configs_for_client;
 use keymeld_core::api::{CreateSigningSessionRequest, SigningSessionStatusResponse};
 use keymeld_core::musig::{AdaptorConfig, AdaptorSignatureResult};
 use keymeld_core::session::SigningStatusKind;
+use keymeld_core::SessionId;
 use keymeld_examples::adaptor_utils::{
     create_test_adaptor_configs, print_success_summary, validate_adaptor_signatures,
     AdaptorTestConfig,
@@ -133,13 +135,13 @@ async fn run_adaptor_signatures_test(
 
     test.approve_signing_session(
         &signing_session_id,
-        test.coordinator_user_id.as_str(),
+        &test.coordinator_user_id,
         &test.coordinator_derived_private_key,
     )
     .await?;
     test.approve_signing_session(
         &signing_session_id,
-        test.participant_user_ids[0].as_str(),
+        &test.participant_user_ids[0],
         &test.participants[0].derived_private_key,
     )
     .await?;
@@ -162,11 +164,11 @@ async fn run_adaptor_signatures_test(
 
 async fn test_signing_session_with_adaptors(
     test: &mut KeyMeldE2ETest,
-    keygen_session_id: &str,
+    keygen_session_id: &SessionId,
     psbt: &bitcoin::psbt::Psbt,
     adaptor_configs: &[AdaptorConfig],
-) -> Result<String> {
-    let signing_session_id = uuid::Uuid::now_v7().to_string();
+) -> Result<SessionId> {
+    let signing_session_id: SessionId = uuid::Uuid::now_v7().into();
     let sighash = test.calculate_taproot_sighash(psbt)?;
 
     let session_secret = test
@@ -188,33 +190,26 @@ async fn test_signing_session_with_adaptors(
         adaptor_configs.len()
     );
     let encrypted_adaptor_configs =
-        keymeld_core::api::validation::encrypt_adaptor_configs_for_client(
-            adaptor_configs,
-            &session_secret,
-        )
-        .map_err(|e| anyhow!("Failed to encrypt adaptor configs: {}", e))?;
+        encrypt_adaptor_configs_for_client(adaptor_configs, &session_secret)
+            .map_err(|e| anyhow!("Failed to encrypt adaptor configs: {}", e))?;
 
     info!("✅ Verified zero-knowledge privacy: gateway cannot see adaptor IDs or business logic");
 
     let request = CreateSigningSessionRequest {
-        signing_session_id: signing_session_id.clone().try_into().unwrap(),
-        keygen_session_id: keygen_session_id.try_into().unwrap(),
+        signing_session_id: signing_session_id.clone(),
+        keygen_session_id: keygen_session_id.clone(),
         message_hash: sighash.to_vec(),
         encrypted_message: Some(hex::encode(&sighash[..])),
         timeout_secs: 1800,
         encrypted_adaptor_configs,
     };
 
-    let session_hmac = test.generate_session_hmac(
-        keygen_session_id,
-        test.coordinator_user_id.as_str(),
-        &session_secret,
-    )?;
+    let session_signature = test.generate_session_signature(keygen_session_id)?;
 
     let response = test
         .client
         .post(format!("{}/api/v1/signing", test.config.gateway_url))
-        .header("X-Session-HMAC", session_hmac)
+        .header("X-Session-Signature", session_signature)
         .json(&request)
         .send()
         .await?;
@@ -235,24 +230,24 @@ async fn test_signing_session_with_adaptors(
 
 async fn wait_for_signing_with_adaptors(
     test: &mut KeyMeldE2ETest,
-    signing_session_id: &str,
-    keygen_session_id: &str,
+    signing_session_id: &SessionId,
+    keygen_session_id: &SessionId,
 ) -> Result<(Vec<u8>, Vec<AdaptorSignatureResult>)> {
     info!("⏳ Waiting for signing completion with adaptor processing...");
 
     loop {
-        let user_hmac = test.generate_user_hmac(
-            test.coordinator_user_id.as_str(),
+        let user_signature = test.generate_user_raw_signature(
+            signing_session_id,
             &test.coordinator_derived_private_key,
         )?;
 
         let response = test
             .client
             .get(format!(
-                "{}/api/v1/signing/{}/status",
-                test.config.gateway_url, signing_session_id
+                "{}/api/v1/signing/{}/status/{}",
+                test.config.gateway_url, signing_session_id, test.coordinator_user_id
             ))
-            .header("X-Signing-HMAC", user_hmac)
+            .header("X-User-Signature", user_signature)
             .send()
             .await?;
 

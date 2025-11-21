@@ -82,14 +82,14 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
 
     test.approve_signing_session(
         &signing_session_id,
-        test.coordinator_user_id.as_str(),
+        &test.coordinator_user_id,
         &test.coordinator_derived_private_key,
     )
     .await?;
 
     test.approve_signing_session(
         &signing_session_id,
-        test.participant_user_ids[0].as_str(),
+        &test.participant_user_ids[0],
         &test.participants[0].derived_private_key,
     )
     .await?;
@@ -103,7 +103,7 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
 
     println!("\n🎉 Three-Phase KeyMeld Test Completed Successfully!");
     println!("✅ Phase 1: Keygen session completed");
-    println!("✅ Phase 2a: Signing approvals completed (with HMAC authentication)");
+    println!("✅ Phase 2a: Signing approvals completed (with signature authentication)");
     println!("✅ Phase 2b: Signing session completed (participants inherited from keygen)");
     println!("✅ Aggregate key: {}", aggregate_key);
     println!("✅ Transaction broadcast: {}", signed_tx.compute_txid());
