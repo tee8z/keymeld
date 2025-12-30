@@ -3,23 +3,36 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use anyhow::{anyhow, Result};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+
 use rand::{rngs::OsRng as RandOsRng, TryRngCore};
-use secp256k1::{ecdh::SharedSecret, PublicKey, SecretKey, SECP256K1};
+use secp256k1::{ecdh::SharedSecret, ecdsa::Signature, Message, PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
+use serde_cbor::Value as CborValue;
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Formatter, Result as FmtResult},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use subtle::ConstantTimeEq;
-use tracing::{trace, warn};
+use tracing::warn;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct KeyMaterial {
-    #[zeroize(skip)]
     private_key: Vec<u8>,
     key_id: Option<String>,
+}
+
+impl Debug for KeyMaterial {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("KeyMaterial")
+            .field("private_key", &"<redacted>")
+            .field("key_id", &self.key_id)
+            .finish()
+    }
 }
 
 impl KeyMaterial {
@@ -122,8 +135,8 @@ impl SecureCrypto {
         hasher.update(session_id.as_bytes());
         hasher.update(user_id.as_bytes());
         hasher.update(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map_err(KeyMeldError::TimeError)?
                 .as_nanos()
                 .to_le_bytes(),
@@ -221,7 +234,9 @@ impl SecureCrypto {
         for (pcr_index, expected_value) in expected_pcr_measurements {
             let actual_value = pcrs
                 .get(pcr_index)
-                .ok_or_else(|| KeyMeldError::CryptoError(format!("Missing PCR {pcr_index}")))?;
+                .ok_or(KeyMeldError::CryptoError(format!(
+                    "Missing PCR {pcr_index}"
+                )))?;
 
             if actual_value != expected_value {
                 return Err(KeyMeldError::CryptoError(format!(
@@ -240,15 +255,10 @@ impl SecureCrypto {
     ) -> Result<HashMap<String, String>, KeyMeldError> {
         let mut pcrs = HashMap::new();
 
-        if let serde_cbor::Value::Map(map) = doc {
-            if let Some(serde_cbor::Value::Map(pcr_map)) =
-                map.get(&serde_cbor::Value::Text("pcrs".to_string()))
-            {
+        if let CborValue::Map(map) = doc {
+            if let Some(CborValue::Map(pcr_map)) = map.get(&CborValue::Text("pcrs".to_string())) {
                 for (key, value) in pcr_map {
-                    if let (
-                        serde_cbor::Value::Integer(pcr_idx),
-                        serde_cbor::Value::Bytes(pcr_value),
-                    ) = (key, value)
+                    if let (CborValue::Integer(pcr_idx), CborValue::Bytes(pcr_value)) = (key, value)
                     {
                         pcrs.insert(pcr_idx.to_string(), hex::encode(pcr_value));
                     }
@@ -262,17 +272,17 @@ impl SecureCrypto {
     fn extract_public_key_from_attestation(
         doc: &serde_cbor::Value,
     ) -> Result<String, KeyMeldError> {
-        if let serde_cbor::Value::Map(map) = doc {
-            if let Some(serde_cbor::Value::Bytes(user_data)) =
-                map.get(&serde_cbor::Value::Text("user_data".to_string()))
+        if let CborValue::Map(map) = doc {
+            if let Some(CborValue::Bytes(user_data)) =
+                map.get(&CborValue::Text("user_data".to_string()))
             {
                 let user_data_str = String::from_utf8(user_data.clone()).map_err(|e| {
                     KeyMeldError::CryptoError(format!("Invalid user_data UTF-8: {e}"))
                 })?;
 
-                let user_data_json: serde_json::Value = serde_json::from_str(&user_data_str)
-                    .map_err(|e| {
-                        KeyMeldError::CryptoError(format!("Invalid user_data JSON: {}", e))
+                let user_data_json: JsonValue =
+                    serde_json::from_str(&user_data_str).map_err(|e| {
+                        KeyMeldError::CryptoError(format!("Invalid user_data JSON: {e}"))
                     })?;
 
                 if let Some(public_key) = user_data_json.get("enclave_public_key") {
@@ -295,8 +305,8 @@ impl SecureCrypto {
     ) -> Result<AttestedPublicKey, KeyMeldError> {
         let public_key_hex = hex::encode(public_key.serialize());
         let attestation_hex = hex::encode(&attestation_doc);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map_err(KeyMeldError::TimeError)?
             .as_secs();
 
@@ -320,7 +330,7 @@ impl SecureCrypto {
         user_id: &str,
     ) -> Result<[u8; 32], KeyMeldError> {
         let salt = b"keymeld-session-secret-v1";
-        let info = format!("{}:{}", session_id, user_id);
+        let info = format!("{session_id}:{user_id}");
         let hk = Hkdf::<Sha256>::new(Some(salt), info.as_bytes());
 
         let mut key = [0u8; 32];
@@ -339,15 +349,14 @@ impl SecureCrypto {
         encrypted_secret: Option<&str>,
         stored_hash: Option<&str>,
     ) -> Result<(), KeyMeldError> {
-        let encrypted = encrypted_secret
-            .ok_or_else(|| KeyMeldError::ValidationError("Session secret required".to_string()))?;
-        let stored = stored_hash.ok_or_else(|| {
-            KeyMeldError::ValidationError("Session secret hash missing".to_string())
-        })?;
+        let encrypted = encrypted_secret.ok_or(KeyMeldError::ValidationError(
+            "Session secret required".to_string(),
+        ))?;
+        let stored = stored_hash.ok_or(KeyMeldError::ValidationError(
+            "Session secret hash missing".to_string(),
+        ))?;
 
         let provided_hash = Self::hash_encrypted_secret(encrypted);
-
-        trace!("Session secret validation - hash comparison");
 
         if provided_hash.as_bytes().ct_eq(stored.as_bytes()).into() {
             Ok(())
@@ -360,23 +369,27 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_signature_data(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         let ciphertext = encrypted_data_json
             .get("ciphertext")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing ciphertext field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing ciphertext field".to_string(),
+            ))?;
 
         let nonce = encrypted_data_json
             .get("nonce")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
 
         let context = encrypted_data_json
             .get("context")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing context field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing context field".to_string(),
+            ))?;
 
         if context != "signature" {
             return Err(KeyMeldError::CryptoError(
@@ -401,7 +414,7 @@ impl SecureCrypto {
         }
 
         let secret_bytes = hex::decode(session_secret).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {}", e))
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
         })?;
 
         if secret_bytes.len() != 32 {
@@ -427,23 +440,27 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_message_data(
-        encrypted_data_json: &serde_json::Value,
+        encrypted_data_json: &JsonValue,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         let ciphertext = encrypted_data_json
             .get("ciphertext")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing ciphertext field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing ciphertext field".to_string(),
+            ))?;
 
         let nonce = encrypted_data_json
             .get("nonce")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
 
         let context = encrypted_data_json
             .get("context")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| KeyMeldError::CryptoError("Missing context field".to_string()))?;
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing context field".to_string(),
+            ))?;
 
         if context != "message" {
             return Err(KeyMeldError::CryptoError(
@@ -468,7 +485,7 @@ impl SecureCrypto {
         }
 
         let secret_bytes = hex::decode(session_secret).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {}", e))
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
         })?;
 
         if secret_bytes.len() != 32 {
@@ -499,129 +516,11 @@ impl SecureCrypto {
         hasher.finalize().to_vec()
     }
 
-    pub fn generate_message_hmac(
-        message_hash: &[u8],
-        session_secret: &str,
-    ) -> Result<String, KeyMeldError> {
-        type HmacSha256 = Hmac<Sha256>;
-
-        let secret_bytes = hex::decode(session_secret).map_err(KeyMeldError::HexDecodeError)?;
-
-        let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&secret_bytes)
-            .map_err(|e| KeyMeldError::HmacError(e.to_string()))?;
-
-        mac.update(message_hash);
-        let result = mac.finalize();
-
-        Ok(hex::encode(result.into_bytes()))
-    }
-
-    pub fn validate_message_hmac(
-        message_hash: &[u8],
-        provided_hmac: &str,
-        session_secret: &str,
-    ) -> Result<(), KeyMeldError> {
-        let expected_hmac = Self::generate_message_hmac(message_hash, session_secret)?;
-
-        if provided_hmac
-            .as_bytes()
-            .ct_eq(expected_hmac.as_bytes())
-            .into()
-        {
-            Ok(())
-        } else {
-            Err(KeyMeldError::ValidationError(
-                "Invalid session message HMAC".to_string(),
-            ))
-        }
-    }
-
-    pub fn validate_session_hmac(
-        session_id: &str,
-        user_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
-    ) -> Result<(), KeyMeldError> {
-        Self::validate_consolidated_hmac(session_id, user_id, provided_hmac, session_secret, None)
-    }
-
-    pub fn validate_signing_hmac(
-        session_id: &str,
-        user_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
-        message_hash: &[u8],
-    ) -> Result<(), KeyMeldError> {
-        Self::validate_consolidated_hmac(
-            session_id,
-            user_id,
-            provided_hmac,
-            session_secret,
-            Some(message_hash),
-        )
-    }
-
-    pub fn validate_consolidated_hmac(
-        session_id: &str,
-        user_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
-        message_data: Option<&[u8]>,
-    ) -> Result<(), KeyMeldError> {
-        trace!("Validating consolidated HMAC");
-
-        let (message_to_validate, hmac_value) = if let Some(msg_data) = message_data {
-            (msg_data.to_vec(), provided_hmac)
-        } else {
-            let (nonce, hmac_val) = provided_hmac.split_once(':').ok_or_else(|| {
-                KeyMeldError::ValidationError(
-                    "Invalid HMAC format, expected 'nonce:hmac'".to_string(),
-                )
-            })?;
-
-            let message_data = format!("{}:{}:{}", session_id, user_id, nonce);
-            (message_data.as_bytes().to_vec(), hmac_val)
-        };
-
-        let expected_hmac = Self::generate_hmac_for_data(&message_to_validate, session_secret)?;
-
-        if hmac_value.as_bytes().ct_eq(expected_hmac.as_bytes()).into() {
-            Ok(())
-        } else {
-            warn!("Consolidated HMAC validation failed");
-            Err(KeyMeldError::ValidationError(
-                "Invalid session HMAC".to_string(),
-            ))
-        }
-    }
-
-    fn generate_hmac_for_data(data: &[u8], session_secret: &str) -> Result<String, KeyMeldError> {
-        type HmacSha256 = Hmac<Sha256>;
-
-        let secret_bytes = hex::decode(session_secret).map_err(KeyMeldError::HexDecodeError)?;
-
-        let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&secret_bytes)
-            .map_err(|e| KeyMeldError::HmacError(e.to_string()))?;
-
-        mac.update(data);
-        let result = mac.finalize();
-
-        Ok(hex::encode(result.into_bytes()))
-    }
-
-    pub fn generate_registration_hmac(
-        data: &str,
-        session_secret: &str,
-    ) -> Result<String, KeyMeldError> {
-        Self::generate_hmac_for_data(data.as_bytes(), session_secret)
-    }
-
     pub fn validate_user_hmac(
         expected_user_id: &str,
         user_hmac: &str,
         user_public_key: &[u8],
     ) -> Result<(), KeyMeldError> {
-        trace!("Validating user HMAC for user: {}", expected_user_id);
         let parts: Vec<&str> = user_hmac.split(':').collect();
         if parts.len() != 3 {
             return Err(KeyMeldError::ValidationError(
@@ -643,25 +542,355 @@ impl SecureCrypto {
             ));
         }
         let signature_bytes = hex::decode(signature_hex)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {}", e)))?;
-        let message_to_verify = format!("{}:{}", hmac_user_id, nonce);
-        let message_hash = sha2::Sha256::digest(message_to_verify.as_bytes());
-        let public_key = secp256k1::PublicKey::from_slice(user_public_key)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {}", e)))?;
-        let signature =
-            secp256k1::ecdsa::Signature::from_compact(&signature_bytes).map_err(|e| {
-                KeyMeldError::ValidationError(format!("Invalid signature format: {}", e))
-            })?;
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {e}")))?;
+        let message_to_verify = format!("{hmac_user_id}:{nonce}");
+        let message_hash = Sha256::digest(message_to_verify.as_bytes());
+        let public_key = PublicKey::from_slice(user_public_key)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {e}")))?;
+        let signature = Signature::from_compact(&signature_bytes)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature format: {e}")))?;
         let message_hash_array: [u8; 32] = message_hash.into();
-        let message = secp256k1::Message::from_digest(message_hash_array);
+        let message = Message::from_digest(message_hash_array);
         signature.verify(message, &public_key).map_err(|e| {
-            KeyMeldError::ValidationError(format!("Signature verification failed: {}", e))
+            KeyMeldError::ValidationError(format!("Signature verification failed: {e}"))
         })?;
 
-        trace!(
-            "User HMAC signature verified for user: {}",
-            expected_user_id
-        );
+        Ok(())
+    }
+
+    pub fn encrypt_adaptor_configs(
+        data: &[u8],
+        session_secret: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        Self::encrypt_with_context(data, session_secret, "adaptor_configs")
+    }
+
+    pub fn decrypt_adaptor_configs(
+        encrypted_data_json: &JsonValue,
+        session_secret: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_configs")
+    }
+
+    pub fn encrypt_adaptor_signatures(
+        data: &[u8],
+        session_secret: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        Self::encrypt_with_context(data, session_secret, "adaptor_signatures")
+    }
+
+    pub fn decrypt_adaptor_signatures(
+        encrypted_data_json: &JsonValue,
+        session_secret: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_signatures")
+    }
+
+    fn encrypt_with_context(
+        data: &[u8],
+        session_secret: &str,
+        context: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        let secret_bytes = hex::decode(session_secret).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
+        })?;
+
+        if secret_bytes.len() != 32 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid session secret length".to_string(),
+            ));
+        }
+
+        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
+        let mut derived_key = [0u8; 32];
+        hk.expand(context.as_bytes(), &mut derived_key)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, data)
+            .map_err(|e| KeyMeldError::EncryptionError(e.to_string()))?;
+
+        Ok(EncryptedData {
+            ciphertext,
+            nonce: nonce.to_vec(),
+            context: context.to_string(),
+        })
+    }
+
+    pub fn encrypt_session_data(
+        data: &str,
+        session_secret: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        Self::encrypt_with_context(data.as_bytes(), session_secret, "session_data")
+    }
+
+    pub fn decrypt_session_data(
+        encrypted_data_json: &JsonValue,
+        session_secret: &str,
+    ) -> Result<String, KeyMeldError> {
+        let decrypted_bytes =
+            Self::decrypt_with_context(encrypted_data_json, session_secret, "session_data")?;
+        String::from_utf8(decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!(
+                "Failed to convert decrypted session data to string: {e}"
+            ))
+        })
+    }
+
+    pub fn encrypt_structured_data_with_session_key<T: serde::Serialize>(
+        data: &T,
+        session_secret: &str,
+        context: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        let json = serde_json::to_string(data)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to serialize data: {e}")))?;
+        Self::encrypt_with_context(json.as_bytes(), session_secret, context)
+    }
+
+    pub fn decrypt_structured_data_with_session_key<T: serde::de::DeserializeOwned>(
+        encrypted_data_json: &JsonValue,
+        session_secret: &str,
+        context: &str,
+    ) -> Result<T, KeyMeldError> {
+        let decrypted_bytes =
+            Self::decrypt_with_context(encrypted_data_json, session_secret, context)?;
+        let json_str = String::from_utf8(decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to convert decrypted bytes to string: {e}"))
+        })?;
+        serde_json::from_str(&json_str)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to deserialize data: {e}")))
+    }
+
+    pub fn encrypt_structured_data_with_enclave_key<T: serde::Serialize>(
+        data: &T,
+        enclave_public_key_hex: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        let json = serde_json::to_string(data)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to serialize data: {e}")))?;
+        Self::ecies_encrypt_from_hex(enclave_public_key_hex, json.as_bytes())
+    }
+
+    pub fn decrypt_structured_data_with_enclave_key<T: serde::de::DeserializeOwned>(
+        encrypted_data: &[u8],
+        enclave_private_key: &secp256k1::SecretKey,
+    ) -> Result<T, KeyMeldError> {
+        let decrypted_bytes = Self::ecies_decrypt(enclave_private_key, encrypted_data)?;
+        let json_str = String::from_utf8(decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to convert decrypted bytes to string: {e}"))
+        })?;
+        serde_json::from_str(&json_str)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to deserialize data: {e}")))
+    }
+
+    fn decrypt_with_context(
+        encrypted_data_json: &JsonValue,
+        session_secret: &str,
+        expected_context: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        let ciphertext = encrypted_data_json
+            .get("ciphertext")
+            .and_then(|v| v.as_array())
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing or invalid ciphertext".to_string(),
+            ))?;
+
+        let nonce = encrypted_data_json
+            .get("nonce")
+            .and_then(|v| v.as_array())
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing or invalid nonce".to_string(),
+            ))?;
+
+        let actual_context = encrypted_data_json
+            .get("context")
+            .and_then(|v| v.as_str())
+            .ok_or(KeyMeldError::CryptoError(
+                "Missing or invalid context".to_string(),
+            ))?;
+
+        if actual_context != expected_context {
+            return Err(KeyMeldError::CryptoError(format!(
+                "Invalid context for decryption: expected {expected_context}, got {actual_context}"
+            )));
+        }
+
+        let ciphertext_bytes: Vec<u8> = ciphertext
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as u8)
+            .collect();
+
+        let nonce_bytes: Vec<u8> = nonce
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as u8)
+            .collect();
+
+        if nonce_bytes.len() != 12 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid nonce length".to_string(),
+            ));
+        }
+
+        let secret_bytes = hex::decode(session_secret).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
+        })?;
+
+        if secret_bytes.len() != 32 {
+            return Err(KeyMeldError::CryptoError(
+                "Invalid session secret length".to_string(),
+            ));
+        }
+
+        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
+        let mut derived_key = [0u8; 32];
+        hk.expand(expected_context.as_bytes(), &mut derived_key)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
+        let cipher = Aes256Gcm::new(key);
+        let nonce_ref = Nonce::from_slice(&nonce_bytes);
+
+        let decrypted = cipher
+            .decrypt(nonce_ref, ciphertext_bytes.as_ref())
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
+
+        Ok(decrypted)
+    }
+
+    pub fn generate_session_seed() -> Result<Vec<u8>, KeyMeldError> {
+        let seed = Self::generate_secure_seed()?;
+        Ok(seed.to_vec())
+    }
+
+    pub fn derive_private_key_from_seed(seed: &[u8]) -> Result<SecretKey, KeyMeldError> {
+        if seed.len() < 32 {
+            return Err(KeyMeldError::ValidationError(
+                "Seed must be at least 32 bytes".to_string(),
+            ));
+        }
+
+        let salt = b"keymeld-session-auth-v1";
+        let hk = Hkdf::<Sha256>::new(Some(salt), seed);
+
+        let mut key_material = [0u8; 32];
+        hk.expand(b"session-auth-key", &mut key_material)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        SecretKey::from_byte_array(key_material)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid private key: {e}")))
+    }
+
+    pub fn derive_public_key_from_seed(seed: &[u8]) -> Result<PublicKey, KeyMeldError> {
+        let private_key = Self::derive_private_key_from_seed(seed)?;
+        Ok(PublicKey::from_secret_key(SECP256K1, &private_key))
+    }
+
+    pub fn derive_session_auth_keypair(
+        signing_privkey: &[u8; 32],
+        keygen_session_id: &str,
+    ) -> Result<(SecretKey, PublicKey), KeyMeldError> {
+        let hk = Hkdf::<Sha256>::new(None, signing_privkey);
+        let mut auth_privkey_bytes = [0u8; 32];
+
+        let info = format!("keymeld-session-auth-v1:{keygen_session_id}");
+        hk.expand(info.as_bytes(), &mut auth_privkey_bytes)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+
+        let auth_privkey = SecretKey::from_byte_array(auth_privkey_bytes)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid private key: {e}")))?;
+        let auth_pubkey = PublicKey::from_secret_key(SECP256K1, &auth_privkey);
+
+        Ok((auth_privkey, auth_pubkey))
+    }
+
+    pub fn sign_auth_message_with_session_key(
+        signing_privkey: &[u8; 32],
+        keygen_session_id: &str,
+        signing_session_id: &str,
+        user_id: &str,
+        nonce: &[u8],
+    ) -> Result<Vec<u8>, KeyMeldError> {
+        let (auth_privkey, _) =
+            Self::derive_session_auth_keypair(signing_privkey, keygen_session_id)?;
+
+        let mut message = Vec::new();
+        message.extend_from_slice(signing_session_id.as_bytes());
+        message.extend_from_slice(user_id.as_bytes());
+        message.extend_from_slice(nonce);
+
+        let message_hash = Sha256::digest(&message);
+        let msg = Message::from_digest(message_hash.into());
+
+        let signature = SECP256K1.sign_ecdsa(msg, &auth_privkey);
+        Ok(signature.serialize_compact().to_vec())
+    }
+
+    pub fn verify_auth_signature_with_session_key(
+        auth_pubkey: &PublicKey,
+        signing_session_id: &str,
+        user_id: &str,
+        nonce: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<bool, KeyMeldError> {
+        let mut message = Vec::new();
+        message.extend_from_slice(signing_session_id.as_bytes());
+        message.extend_from_slice(user_id.as_bytes());
+        message.extend_from_slice(nonce);
+
+        let message_hash = Sha256::digest(&message);
+        let msg = Message::from_digest(message_hash.into());
+
+        let signature = Signature::from_compact(signature_bytes)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature: {e}")))?;
+
+        match SECP256K1.verify_ecdsa(msg, &signature, auth_pubkey) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    pub fn sign_session_message(
+        session_id: &str,
+        nonce: &str,
+        seed: &[u8],
+    ) -> Result<String, KeyMeldError> {
+        let private_key = Self::derive_private_key_from_seed(seed)?;
+
+        let message_str = format!("{session_id}:{nonce}");
+        let message_hash = Sha256::digest(message_str.as_bytes());
+
+        let message = Message::from_digest(message_hash.into());
+
+        let signature = SECP256K1.sign_ecdsa(message, &private_key);
+        Ok(hex::encode(signature.serialize_compact()))
+    }
+
+    pub fn validate_session_signature(
+        session_id: &str,
+        nonce: &str,
+        signature_hex: &str,
+        public_key: &[u8],
+    ) -> Result<(), KeyMeldError> {
+        let message_str = format!("{session_id}:{nonce}");
+        let message_hash = Sha256::digest(message_str.as_bytes());
+
+        let message = Message::from_digest(message_hash.into());
+
+        let signature_bytes = hex::decode(signature_hex)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {e}")))?;
+        let signature = Signature::from_compact(&signature_bytes)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature format: {e}")))?;
+
+        let public_key = PublicKey::from_slice(public_key)
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {e}")))?;
+
+        SECP256K1
+            .verify_ecdsa(message, &signature, &public_key)
+            .map_err(|_| KeyMeldError::ValidationError("Invalid session signature".to_string()))?;
+
         Ok(())
     }
 }
@@ -726,101 +955,54 @@ mod tests {
     }
 
     #[test]
-    fn test_message_hmac_generation_and_validation() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let message_hash = vec![1, 2, 3, 4, 5];
+    fn test_seed_based_authentication() {
+        let seed = SecureCrypto::generate_session_seed().unwrap();
+        assert_eq!(seed.len(), 32);
 
-        let hmac = SecureCrypto::generate_message_hmac(&message_hash, &session_secret).unwrap();
+        let private_key = SecureCrypto::derive_private_key_from_seed(&seed).unwrap();
+        let public_key = SecureCrypto::derive_public_key_from_seed(&seed).unwrap();
 
-        hex::decode(&hmac).expect("HMAC should be valid hex");
+        let private_key2 = SecureCrypto::derive_private_key_from_seed(&seed).unwrap();
+        let public_key2 = SecureCrypto::derive_public_key_from_seed(&seed).unwrap();
 
-        assert!(SecureCrypto::validate_message_hmac(&message_hash, &hmac, &session_secret).is_ok());
+        assert_eq!(private_key.secret_bytes(), private_key2.secret_bytes());
+        assert_eq!(public_key.serialize(), public_key2.serialize());
 
-        let wrong_hmac = "deadbeef";
-        assert!(
-            SecureCrypto::validate_message_hmac(&message_hash, wrong_hmac, &session_secret)
-                .is_err()
-        );
-
-        let wrong_message = vec![6, 7, 8, 9, 10];
-        assert!(
-            SecureCrypto::validate_message_hmac(&wrong_message, &hmac, &session_secret).is_err()
-        );
-    }
-
-    #[test]
-    fn test_session_hmac_validation() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
         let session_id = "test-session-123";
-        let user_id = "test-user-456";
         let nonce = "1234567890abcdef";
 
-        let data = format!("{}:{}:{}", session_id, user_id, nonce);
-        let expected_hmac =
-            SecureCrypto::generate_registration_hmac(&data, &session_secret).unwrap();
-        let nonce_hmac_format = format!("{}:{}", nonce, expected_hmac);
-        assert!(SecureCrypto::validate_session_hmac(
+        let signature = SecureCrypto::sign_session_message(session_id, nonce, &seed).unwrap();
+        assert!(SecureCrypto::validate_session_signature(
             session_id,
-            user_id,
-            &nonce_hmac_format,
-            &session_secret
+            nonce,
+            &signature,
+            &public_key.serialize()
         )
         .is_ok());
 
-        let wrong_hmac = format!("{}:deadbeef", nonce);
-        assert!(SecureCrypto::validate_session_hmac(
+        assert!(SecureCrypto::validate_session_signature(
             session_id,
-            user_id,
-            &wrong_hmac,
-            &session_secret
+            nonce,
+            "invalid_signature",
+            &public_key.serialize()
         )
         .is_err());
 
-        let wrong_session_id = "wrong-session-789";
-        assert!(SecureCrypto::validate_session_hmac(
-            wrong_session_id,
-            user_id,
-            &nonce_hmac_format,
-            &session_secret
+        assert!(SecureCrypto::validate_session_signature(
+            "wrong-session",
+            nonce,
+            &signature,
+            &public_key.serialize()
         )
         .is_err());
 
-        let wrong_user_id = "wrong-user-789";
-        assert!(SecureCrypto::validate_session_hmac(
+        assert!(SecureCrypto::validate_session_signature(
             session_id,
-            wrong_user_id,
-            &nonce_hmac_format,
-            &session_secret
+            "wrong-nonce",
+            &signature,
+            &public_key.serialize()
         )
         .is_err());
-
-        assert!(SecureCrypto::validate_session_hmac(
-            session_id,
-            user_id,
-            "invalidformat",
-            &session_secret
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn test_registration_hmac_generation() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let data1 = "session1:user1";
-        let data2 = "session2:user2";
-
-        let hmac1 = SecureCrypto::generate_registration_hmac(data1, &session_secret).unwrap();
-        let hmac2 = SecureCrypto::generate_registration_hmac(data2, &session_secret).unwrap();
-
-        assert_ne!(hmac1, hmac2);
-        let hmac1_again = SecureCrypto::generate_registration_hmac(data1, &session_secret).unwrap();
-        assert_eq!(hmac1, hmac1_again);
-
-        // HMAC should be different for different secrets
-        let different_secret = SecureCrypto::generate_session_secret().unwrap();
-        let hmac_different_secret =
-            SecureCrypto::generate_registration_hmac(data1, &different_secret).unwrap();
-        assert_ne!(hmac1, hmac_different_secret);
     }
 
     #[test]
@@ -831,15 +1013,12 @@ mod tests {
         let key1 = SecureCrypto::derive_session_encryption_key(session_id, user_id).unwrap();
         let key2 = SecureCrypto::derive_session_encryption_key(session_id, user_id).unwrap();
 
-        // Same inputs should produce same key
         assert_eq!(key1, key2);
 
-        // Different session_id should produce different key
         let key3 =
             SecureCrypto::derive_session_encryption_key("different-session", user_id).unwrap();
         assert_ne!(key1, key3);
 
-        // Different user_id should produce different key
         let key4 =
             SecureCrypto::derive_session_encryption_key(session_id, "different-user").unwrap();
         assert_ne!(key1, key4);
@@ -933,72 +1112,6 @@ mod tests {
 
         assert!(SecureCrypto::validate_encrypted_session_secret(None, None).is_err());
     }
-
-    #[test]
-    fn test_generate_message_hmac() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let message_hash = b"test message hash for hmac validation";
-
-        let hmac1 = SecureCrypto::generate_message_hmac(message_hash, &session_secret).unwrap();
-        let hmac2 = SecureCrypto::generate_message_hmac(message_hash, &session_secret).unwrap();
-
-        assert_eq!(hmac1, hmac2);
-        assert_eq!(hmac1.len(), 64);
-
-        let different_message = b"different message hash";
-        let hmac3 =
-            SecureCrypto::generate_message_hmac(different_message, &session_secret).unwrap();
-        assert_ne!(hmac1, hmac3);
-    }
-
-    #[test]
-    fn test_validate_message_hmac() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let message_hash = b"test message for validation";
-
-        let valid_hmac =
-            SecureCrypto::generate_message_hmac(message_hash, &session_secret).unwrap();
-
-        assert!(
-            SecureCrypto::validate_message_hmac(message_hash, &valid_hmac, &session_secret).is_ok()
-        );
-
-        let invalid_hmac = "invalid_hmac_value";
-        assert!(
-            SecureCrypto::validate_message_hmac(message_hash, invalid_hmac, &session_secret)
-                .is_err()
-        );
-
-        let different_secret = SecureCrypto::generate_session_secret().unwrap();
-        assert!(
-            SecureCrypto::validate_message_hmac(message_hash, &valid_hmac, &different_secret)
-                .is_err()
-        );
-
-        let different_message = b"different message";
-        assert!(SecureCrypto::validate_message_hmac(
-            different_message,
-            &valid_hmac,
-            &session_secret
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn test_hmac_workflow_integration() {
-        let session_secret = SecureCrypto::generate_session_secret().unwrap();
-        let message_hash = sha2::Sha256::digest(b"Bitcoin transaction to sign").to_vec();
-
-        let participant_hmac =
-            SecureCrypto::generate_message_hmac(&message_hash, &session_secret).unwrap();
-
-        let validation_result =
-            SecureCrypto::validate_message_hmac(&message_hash, &participant_hmac, &session_secret);
-        assert!(validation_result.is_ok());
-
-        let hmac2 = SecureCrypto::generate_message_hmac(&message_hash, &session_secret).unwrap();
-        assert_eq!(participant_hmac, hmac2);
-    }
 }
 
 #[derive(Clone, ZeroizeOnDrop)]
@@ -1017,6 +1130,18 @@ impl SessionSecret {
         Self { key: bytes }
     }
 
+    pub fn from_hex(hex_string: &str) -> Result<Self, KeyMeldError> {
+        let bytes = hex::decode(hex_string).map_err(KeyMeldError::HexDecodeError)?;
+        if bytes.len() != 32 {
+            return Err(KeyMeldError::ValidationError(
+                "Session secret must be 32 bytes".to_string(),
+            ));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Ok(Self { key })
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.key
     }
@@ -1033,14 +1158,14 @@ impl SessionSecret {
         *Key::<Aes256Gcm>::from_slice(&derived_key)
     }
 
-    pub fn encrypt(&self, data: &[u8], context: &str) -> Result<EncryptedData> {
+    pub fn encrypt(&self, data: &[u8], context: &str) -> Result<EncryptedData, KeyMeldError> {
         let key = self.derive_key(context);
         let cipher = Aes256Gcm::new(&key);
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
         let ciphertext = cipher
             .encrypt(&nonce, data)
-            .map_err(|e| anyhow!("Encryption failed: {}", e))?;
+            .map_err(|e| KeyMeldError::EncryptionError(e.to_string()))?;
 
         Ok(EncryptedData {
             ciphertext,
@@ -1049,47 +1174,51 @@ impl SessionSecret {
         })
     }
 
-    pub fn decrypt(&self, encrypted: &EncryptedData, expected_context: &str) -> Result<Vec<u8>> {
+    pub fn decrypt(
+        &self,
+        encrypted: &EncryptedData,
+        expected_context: &str,
+    ) -> Result<Vec<u8>, KeyMeldError> {
         if encrypted.context != expected_context {
-            return Err(anyhow!(
+            return Err(KeyMeldError::ValidationError(format!(
                 "Context mismatch: expected '{}', got '{}'",
-                expected_context,
-                encrypted.context
-            ));
+                expected_context, encrypted.context
+            )));
         }
 
         let key = self.derive_key(&encrypted.context);
         let cipher = Aes256Gcm::new(&key);
 
         if encrypted.nonce.len() != 12 {
-            return Err(anyhow!(
+            return Err(KeyMeldError::ValidationError(format!(
                 "Invalid nonce length: expected 12 bytes, got {}",
                 encrypted.nonce.len()
-            ));
+            )));
         }
 
         let nonce = Nonce::from_slice(&encrypted.nonce);
 
         cipher
             .decrypt(nonce, encrypted.ciphertext.as_ref())
-            .map_err(|e| anyhow!("Decryption failed: {}", e))
+            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))
     }
 
-    pub fn encrypt_message(&self, message: &str) -> Result<EncryptedData> {
+    pub fn encrypt_message(&self, message: &str) -> Result<EncryptedData, KeyMeldError> {
         self.encrypt(message.as_bytes(), "message")
     }
 
-    pub fn decrypt_message(&self, encrypted: &EncryptedData) -> Result<String> {
+    pub fn decrypt_message(&self, encrypted: &EncryptedData) -> Result<String, KeyMeldError> {
         let decrypted = self.decrypt(encrypted, "message")?;
-        String::from_utf8(decrypted)
-            .map_err(|e| anyhow!("Failed to decode message as UTF-8: {}", e))
+        String::from_utf8(decrypted).map_err(|e| {
+            KeyMeldError::ValidationError(format!("Failed to decode message as UTF-8: {e}"))
+        })
     }
 
-    pub fn encrypt_signature(&self, signature: &[u8]) -> Result<EncryptedData> {
+    pub fn encrypt_signature(&self, signature: &[u8]) -> Result<EncryptedData, KeyMeldError> {
         self.encrypt(signature, "signature")
     }
 
-    pub fn decrypt_signature(&self, encrypted: &EncryptedData) -> Result<Vec<u8>> {
+    pub fn decrypt_signature(&self, encrypted: &EncryptedData) -> Result<Vec<u8>, KeyMeldError> {
         self.decrypt(encrypted, "signature")
     }
 
@@ -1105,8 +1234,8 @@ impl SessionSecret {
     }
 }
 
-impl std::fmt::Debug for SessionSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for SessionSecret {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("SessionSecret")
             .field("key", &"[REDACTED]")
             .finish()
@@ -1127,29 +1256,35 @@ pub struct EncryptedData {
 }
 
 impl EncryptedData {
-    pub fn to_hex_json(&self) -> Result<String> {
-        let json_str = serde_json::to_string(self)
-            .map_err(|e| anyhow!("Failed to serialize encrypted data: {}", e))?;
+    pub fn to_hex_json(&self) -> Result<String, KeyMeldError> {
+        let json_str = serde_json::to_string(self).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to serialize encrypted data: {e}"))
+        })?;
         Ok(hex::encode(json_str.as_bytes()))
     }
 
-    pub fn from_hex_json(encoded: &str) -> Result<Self> {
-        let json_bytes =
-            hex::decode(encoded).map_err(|e| anyhow!("Failed to decode hex: {}", e))?;
+    pub fn from_hex_json(encoded: &str) -> Result<Self, KeyMeldError> {
+        let json_bytes = hex::decode(encoded).map_err(KeyMeldError::HexDecodeError)?;
 
-        let json_str = String::from_utf8(json_bytes)
-            .map_err(|e| anyhow!("Failed to decode JSON string: {}", e))?;
+        let json_str = String::from_utf8(json_bytes).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to decode JSON string: {e}"))
+        })?;
 
-        serde_json::from_str(&json_str)
-            .map_err(|e| anyhow!("Failed to deserialize encrypted data: {}", e))
+        serde_json::from_str(&json_str).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to deserialize encrypted data: {e}"))
+        })
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|e| anyhow!("Failed to serialize to bytes: {}", e))
+    pub fn to_bytes(&self) -> Result<Vec<u8>, KeyMeldError> {
+        serde_json::to_vec(self).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to serialize to bytes: {e}"))
+        })
     }
 
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        serde_json::from_slice(data).map_err(|e| anyhow!("Failed to deserialize from bytes: {}", e))
+    pub fn from_bytes(data: &[u8]) -> Result<Self, KeyMeldError> {
+        serde_json::from_slice(data).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to deserialize from bytes: {e}"))
+        })
     }
 }
 
@@ -1197,7 +1332,6 @@ mod session_secret_tests {
 
         assert_eq!(signature, decrypted);
 
-        // Test with different signature
         let signature2 = vec![10, 20, 30, 40, 50];
         let encrypted2 = secret.encrypt_signature(&signature2).unwrap();
         let decrypted2 = secret.decrypt_signature(&encrypted2).unwrap();

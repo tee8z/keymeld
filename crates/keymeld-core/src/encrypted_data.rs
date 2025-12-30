@@ -1,8 +1,18 @@
-use anyhow;
+use crate::{musig::AdaptorConfig, EncryptedData, KeyMeldError};
 use serde::{Deserialize, Serialize};
 use serde_json;
 
-use crate::EncryptedData;
+#[derive(Clone, Debug)]
+pub enum SessionData {
+    Keygen(KeygenSessionData),
+    Signing(SigningSessionData),
+}
+
+#[derive(Clone, Debug)]
+pub enum EnclaveData {
+    Keygen(KeygenEnclaveData),
+    Signing(SigningEnclaveData),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeygenSessionData {
@@ -41,46 +51,53 @@ impl KeygenEnclaveData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeygenParticipantSessionData {
-    pub public_key: Vec<u8>,
+    pub participant_public_keys: std::collections::BTreeMap<crate::identifiers::UserId, Vec<u8>>,
 }
 
-impl KeygenParticipantSessionData {
-    pub fn new(public_key: Vec<u8>) -> Self {
-        Self { public_key }
+impl Default for KeygenParticipantSessionData {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeygenParticipantEnclaveData {
-    pub private_key: String,
-}
+impl KeygenParticipantSessionData {
+    pub fn new() -> Self {
+        Self {
+            participant_public_keys: std::collections::BTreeMap::new(),
+        }
+    }
 
-impl KeygenParticipantEnclaveData {
-    pub fn new(private_key: String) -> Self {
-        Self { private_key }
+    pub fn new_with_public_key(
+        user_id: crate::identifiers::UserId,
+        participant_public_key: Vec<u8>,
+    ) -> Self {
+        let mut participant_public_keys = std::collections::BTreeMap::new();
+        participant_public_keys.insert(user_id, participant_public_key);
+        Self {
+            participant_public_keys,
+        }
+    }
+
+    pub fn add_participant(&mut self, user_id: crate::identifiers::UserId, public_key: Vec<u8>) {
+        self.participant_public_keys.insert(user_id, public_key);
+    }
+
+    pub fn get_all_public_keys(&self) -> Vec<Vec<u8>> {
+        self.participant_public_keys.values().cloned().collect()
+    }
+
+    pub fn participant_count(&self) -> usize {
+        self.participant_public_keys.len()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SigningSessionData {
-    pub message: Option<String>,
+    pub message: Vec<u8>,
+    pub message_hash: Vec<u8>,
     pub signed_message: Option<Vec<u8>>,
-}
-
-impl SigningSessionData {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_message(mut self, message: String) -> Self {
-        self.message = Some(message);
-        self
-    }
-
-    pub fn with_signed_message(mut self, signed_message: Vec<u8>) -> Self {
-        self.signed_message = Some(signed_message);
-        self
-    }
+    pub adaptor_configs: Vec<AdaptorConfig>,
+    pub adaptor_signatures: Option<Vec<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,12 +117,42 @@ impl SigningEnclaveData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningParticipantSessionData {
-    pub public_key: Vec<u8>,
+    #[serde(
+        serialize_with = "serialize_option_pubnonce",
+        deserialize_with = "deserialize_option_pubnonce",
+        default
+    )]
+    pub public_nonces: Option<crate::PubNonce>,
+    #[serde(
+        serialize_with = "serialize_option_partial_signature",
+        deserialize_with = "deserialize_option_partial_signature",
+        default
+    )]
+    pub partial_signature: Option<crate::PartialSignature>,
+}
+
+impl Default for SigningParticipantSessionData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SigningParticipantSessionData {
-    pub fn new(public_key: Vec<u8>) -> Self {
-        Self { public_key }
+    pub fn new() -> Self {
+        Self {
+            public_nonces: None,
+            partial_signature: None,
+        }
+    }
+
+    pub fn with_nonces(mut self, nonces: crate::PubNonce) -> Self {
+        self.public_nonces = Some(nonces);
+        self
+    }
+
+    pub fn with_partial_signature(mut self, signature: crate::PartialSignature) -> Self {
+        self.partial_signature = Some(signature);
+        self
     }
 }
 
@@ -124,16 +171,86 @@ impl SigningParticipantEnclaveData {
     }
 }
 
+fn serialize_option_pubnonce<S>(
+    nonces: &Option<crate::PubNonce>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match nonces {
+        Some(nonces) => {
+            let bytes = nonces.serialize();
+            serializer.serialize_some(&bytes.to_vec())
+        }
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_option_pubnonce<'de, D>(deserializer: D) -> Result<Option<crate::PubNonce>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let bytes: Option<Vec<u8>> = Option::deserialize(deserializer)?;
+    match bytes {
+        Some(bytes) => crate::PubNonce::from_bytes(&bytes)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+fn serialize_option_partial_signature<S>(
+    signature: &Option<crate::PartialSignature>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match signature {
+        Some(signature) => {
+            let bytes = signature.serialize();
+            serializer.serialize_some(&bytes.to_vec())
+        }
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_option_partial_signature<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::PartialSignature>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let bytes: Option<Vec<u8>> = Option::deserialize(deserializer)?;
+    match bytes {
+        Some(bytes) => {
+            if bytes.len() != 32 {
+                return Err(serde::de::Error::custom("Invalid partial signature length"));
+            }
+            let array: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("Failed to convert bytes to array"))?;
+            Ok(Some(
+                crate::PartialSignature::try_from(array.as_slice())
+                    .map_err(serde::de::Error::custom)?,
+            ))
+        }
+        None => Ok(None),
+    }
+}
+
 pub trait EncryptedDataOps {
     fn encrypt_with_session_secret(
         &self,
         session_secret: &crate::crypto::SessionSecret,
         context: &str,
-    ) -> Result<String, anyhow::Error>
+    ) -> Result<String, KeyMeldError>
     where
         Self: Serialize,
     {
-        let json_bytes = serde_json::to_vec(self)?;
+        let json_bytes = serde_json::to_vec(self)
+            .map_err(|e| KeyMeldError::SerializationError(e.to_string()))?;
         let encrypted = session_secret.encrypt(&json_bytes, context)?;
         encrypted.to_hex_json()
     }
@@ -142,13 +259,14 @@ pub trait EncryptedDataOps {
         encrypted_hex: &str,
         session_secret: &crate::crypto::SessionSecret,
         context: &str,
-    ) -> Result<T, anyhow::Error>
+    ) -> Result<T, KeyMeldError>
     where
         T: for<'de> Deserialize<'de>,
     {
         let encrypted = EncryptedData::from_hex_json(encrypted_hex)?;
         let decrypted_bytes = session_secret.decrypt(&encrypted, context)?;
-        let data: T = serde_json::from_slice(&decrypted_bytes)?;
+        let data: T = serde_json::from_slice(&decrypted_bytes)
+            .map_err(|e| KeyMeldError::SerializationError(e.to_string()))?;
         Ok(data)
     }
 }
@@ -156,7 +274,6 @@ pub trait EncryptedDataOps {
 impl EncryptedDataOps for KeygenSessionData {}
 impl EncryptedDataOps for KeygenEnclaveData {}
 impl EncryptedDataOps for KeygenParticipantSessionData {}
-impl EncryptedDataOps for KeygenParticipantEnclaveData {}
 impl EncryptedDataOps for SigningSessionData {}
 impl EncryptedDataOps for SigningEnclaveData {}
 impl EncryptedDataOps for SigningParticipantSessionData {}
@@ -193,16 +310,6 @@ mod tests {
             deserialized.coordinator_private_key
         );
         assert_eq!(data.session_secret, deserialized.session_secret);
-    }
-
-    #[test]
-    fn test_signing_session_data_builder() {
-        let data = SigningSessionData::new()
-            .with_message("test message".to_string())
-            .with_signed_message(vec![9, 10, 11, 12]);
-
-        assert_eq!(data.message, Some("test message".to_string()));
-        assert_eq!(data.signed_message, Some(vec![9, 10, 11, 12]));
     }
 
     #[test]

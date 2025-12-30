@@ -1,13 +1,15 @@
 # KeyMeld Examples
 
-This directory contains example implementations demonstrating how to use KeyMeld for distributed MuSig2 Bitcoin signing.
+This directory contains example implementations demonstrating how to use KeyMeld for distributed MuSig2 Bitcoin signing, including both regular MuSig2 and adaptor signatures workflows.
 
 ## Quick Start
 
 ### Prerequisites
-- **Docker & Docker Compose**: For running enclave simulation
-- **Rust 1.70+**: For building the project
-- **Just**: Command runner (`cargo install just`)
+- **Nix**: Package manager with reproducible builds
+  ```bash
+  curl -L https://nixos.org/nix/install | sh
+  ```
+- All other dependencies (Rust, Bitcoin Core, etc.) handled automatically by Nix
 
 ### Setup & Run
 ```bash
@@ -23,10 +25,52 @@ just demo 50000 bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
 ```
 
 The `just quickstart` command will:
-1. Start Bitcoin Core in regtest mode
-2. Launch KeyMeld gateway and 3 Nitro enclaves
-3. Run the complete 2-phase MuSig2 workflow
-4. Create and broadcast a real Bitcoin transaction
+1. Build KeyMeld with Nix (fast incremental compilation)
+2. Start Bitcoin Core in regtest mode
+3. Launch KeyMeld gateway and 3 simulated enclaves
+4. Run the complete 2-phase MuSig2 workflow
+5. Create and broadcast a real Bitcoin transaction
+
+## Examples Overview
+
+This directory contains two main examples:
+
+### 1. Regular MuSig2 Example (`keymeld_example`)
+Basic distributed MuSig2 signing with taproot integration.
+
+```bash
+# Run regular MuSig2 example (in Nix shell)
+nix develop -c cargo run --bin keymeld_example -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+
+# Or use the justfile command
+just demo 50000 bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+```
+
+### 2. Adaptor Signatures Example (`keymeld_adaptor_test`)
+Comprehensive adaptor signatures testing with multiple signature types.
+
+```bash
+# Test all adaptor signature types (in Nix shell)
+nix develop -c cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+
+# Or use the justfile command
+just demo-adaptors 50000 bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+
+# Test specific adaptor types (in Nix shell)
+nix develop -c cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --single-only
+nix develop -c cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --and-only
+nix develop -c cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --or-only
+nix develop -c cargo run --bin keymeld_adaptor_test -- -a 50000 -d bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh --skip-regular-signing
+```
+
+## Shared Library Structure
+
+The examples share common functionality through a modular structure:
+
+- **`lib.rs`**: Core utilities, configuration loading, and `KeyMeldE2ETest` implementation
+- **`adaptor_utils.rs`**: Adaptor-specific utilities for creating, validating, and displaying adaptor signatures
+- **`keymeld_example.rs`**: Clean regular MuSig2 example
+- **`keymeld_adaptor_test.rs`**: Comprehensive adaptor signatures testing
 
 ## Architecture Overview
 
@@ -177,18 +221,18 @@ The example supports multiple Bitcoin networks:
 just quickstart  # Uses regtest with local Bitcoin Core
 ```
 
-### Mutinynet Signet (Testing)
-```bash
-just quickstart-prod  # Uses Mutinynet signet
-```
+### Alternative Networks
+
+To use other Bitcoin networks (testnet, signet, mainnet), modify the `network` field in `config/development.yaml` and update the Bitcoin RPC connection details accordingly.
 
 Configuration files:
-- `config.yaml` - Regtest configuration
-- `docker/config/example-signet.yaml` - Mutinynet configuration
+- `config/development.yaml` - Development configuration for regtest
+- `config/production.yaml` - Production configuration template
 
 ## Successful Run Output
 
-See the complete successful run logs in [success.txt](success.txt).
+See the complete successful regular run logs in [regular_success.txt](regular_success.txt).
+See the complete successful adaptor run logs in [adapter_success.txt](adapter_success.txt).
 
 ### Key Success Indicators
 ```text

@@ -33,4 +33,22 @@ config.yaml
 .env
 .env.local
 
+# Key storage
 keys/*
+
+# Nix related files
+result*
+.direnv/
+
+# Development data directories
+data/
+/tmp/keymeld-keys
+
+bitcoin-data/
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+logs/*

@@ -66,7 +66,6 @@ pub struct EnclaveConfig {
     pub max_users_per_enclave: Option<u32>,
     pub max_connections_per_enclave: Option<u32>,
     pub enclave_timeout_secs: Option<u64>,
-    // Timeout configurations
     pub vsock_timeout_secs: Option<u64>,
     pub nonce_generation_timeout_secs: Option<u64>,
     pub session_init_timeout_secs: Option<u64>,
@@ -74,7 +73,6 @@ pub struct EnclaveConfig {
     pub network_write_timeout_secs: Option<u64>,
     pub network_read_timeout_secs: Option<u64>,
     pub max_message_size_bytes: Option<usize>,
-    // Retry configurations
     pub max_retry_attempts: Option<u32>,
     pub initial_retry_delay_ms: Option<u64>,
     pub max_retry_delay_ms: Option<u64>,
@@ -255,14 +253,11 @@ impl Config {
             if tokio::fs::metadata(&path).await.is_ok() {
                 return Self::load(&path)
                     .await
-                    .with_context(|| format!("Found config file {} but failed to load it", path));
+                    .with_context(|| format!("Found config file {path} but failed to load it"));
             }
         }
 
-        anyhow::bail!(
-            "No environment-specific config file found for environment: {:?}",
-            environment
-        )
+        anyhow::bail!("No environment-specific config file found for environment: {environment:?}")
     }
 
     pub fn default_for_environment(env: Environment) -> Self {
@@ -328,6 +323,27 @@ impl Config {
         if let Ok(log_level) = std::env::var("RUST_LOG") {
             self.logging.level = log_level;
         }
+
+        // Dynamic enclave CID discovery for production deployment
+        // In AWS Nitro Enclaves, CIDs are assigned dynamically by AWS
+        // Use environment variables to override static configuration:
+        // KEYMELD_ENCLAVE_0_CID, KEYMELD_ENCLAVE_1_CID, etc.
+        for enclave in &mut self.enclaves.enclaves {
+            let env_var_name = format!("KEYMELD_ENCLAVE_{}_CID", enclave.id);
+            if let Ok(cid_str) = std::env::var(&env_var_name) {
+                if let Ok(cid) = cid_str.parse::<u32>() {
+                    enclave.cid = cid;
+                }
+            }
+
+            // Also support port override if needed
+            let port_env_var_name = format!("KEYMELD_ENCLAVE_{}_PORT", enclave.id);
+            if let Ok(port_str) = std::env::var(&port_env_var_name) {
+                if let Ok(port) = port_str.parse::<u32>() {
+                    enclave.port = port;
+                }
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -366,12 +382,23 @@ impl Config {
             }
         }
 
-        let mut cids: Vec<u32> = self.enclaves.enclaves.iter().map(|e| e.cid).collect();
-        cids.sort();
-        let original_len = cids.len();
-        cids.dedup();
-        if cids.len() != original_len {
-            anyhow::bail!("Duplicate enclave CIDs detected");
+        // Validate enclave CIDs - allow duplicates in development mode for local VSock simulation
+        match self.environment {
+            Environment::Production => {
+                let mut cids: Vec<u32> = self.enclaves.enclaves.iter().map(|e| e.cid).collect();
+                cids.sort();
+                let original_len = cids.len();
+                cids.dedup();
+                if cids.len() != original_len {
+                    anyhow::bail!("Duplicate enclave CIDs detected in production environment");
+                }
+            }
+            Environment::Development => {
+                // In development mode, allow duplicate CIDs for local VSock simulation
+                // where all enclaves run on the same host and share the host CID (2)
+                // This is necessary because in local simulation, we can't assign arbitrary
+                // guest VM CIDs like in real AWS Nitro Enclave environments
+            }
         }
 
         self.validate_security_configuration()?;
@@ -426,8 +453,6 @@ impl Config {
         if !self.is_safe_for_environment() {
             anyhow::bail!("Configuration does not meet production security requirements");
         }
-
-        // KMS validation removed - using direct ECIES encryption
 
         if self.database.path.starts_with("./") || self.database.path.starts_with("../") {
             anyhow::bail!("Production database path should be absolute, not relative");
@@ -591,6 +616,17 @@ id = 2
 cid = 12
 port = 5002
 
+[coordinator]
+processing_interval_ms = 1000
+cleanup_interval_secs = 3600
+batch_size = 10
+
+[logging]
+level = "info"
+format = "compact"
+enable_json = false
+component = "keymeld_gateway"
+
 [security]
 enable_attestation = false
 strict_validation = false
@@ -653,5 +689,42 @@ require_tls = false
         std::env::remove_var("KEYMELD_HOST");
         std::env::remove_var("KEYMELD_PORT");
         std::env::remove_var("KEYMELD_DATABASE_PATH");
+    }
+
+    #[test]
+    fn test_dynamic_enclave_cid_override() {
+        // Set environment variables for dynamic CID assignment
+        std::env::set_var("KEYMELD_ENCLAVE_0_CID", "16");
+        std::env::set_var("KEYMELD_ENCLAVE_1_CID", "17");
+        std::env::set_var("KEYMELD_ENCLAVE_2_CID", "18");
+        std::env::set_var("KEYMELD_ENCLAVE_1_PORT", "9000");
+
+        let mut config = Config::default();
+        // Verify default values first
+        assert_eq!(config.enclaves.enclaves[0].cid, 3);
+        assert_eq!(config.enclaves.enclaves[1].cid, 4);
+        assert_eq!(config.enclaves.enclaves[2].cid, 5);
+        assert_eq!(config.enclaves.enclaves[1].port, 8000);
+
+        // Apply environment overrides
+        config.override_from_env();
+
+        // Verify CIDs were overridden
+        assert_eq!(config.enclaves.enclaves[0].cid, 16);
+        assert_eq!(config.enclaves.enclaves[1].cid, 17);
+        assert_eq!(config.enclaves.enclaves[2].cid, 18);
+
+        // Verify port was overridden for enclave 1
+        assert_eq!(config.enclaves.enclaves[1].port, 9000);
+
+        // Verify other ports unchanged
+        assert_eq!(config.enclaves.enclaves[0].port, 8000);
+        assert_eq!(config.enclaves.enclaves[2].port, 8000);
+
+        // Cleanup
+        std::env::remove_var("KEYMELD_ENCLAVE_0_CID");
+        std::env::remove_var("KEYMELD_ENCLAVE_1_CID");
+        std::env::remove_var("KEYMELD_ENCLAVE_2_CID");
+        std::env::remove_var("KEYMELD_ENCLAVE_1_PORT");
     }
 }

@@ -1,3 +1,7 @@
+# KeyMeld Production Configuration
+# ===============================
+# This configuration requires dynamic CID assignment for AWS Nitro Enclaves
+
 environment: production
 server:
   host: "0.0.0.0"
@@ -16,19 +20,40 @@ enclaves:
   # REQUIRED: Set via KEYMELD_KMS_KEY_ARN environment variable
   # Example: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
   kms_key_arn: ""
+
+  # AWS Nitro Enclave Configuration
+  # ===============================
+  # IMPORTANT: The CID values below are TEMPLATE values only.
+  # In production, AWS assigns CIDs dynamically when enclaves start.
+  #
+  # REQUIRED: Override with actual AWS-assigned CIDs using environment variables:
+  #   KEYMELD_ENCLAVE_0_CID=<actual_cid_assigned_by_aws>
+  #   KEYMELD_ENCLAVE_1_CID=<actual_cid_assigned_by_aws>
+  #   KEYMELD_ENCLAVE_2_CID=<actual_cid_assigned_by_aws>
+  #
+  # Deployment workflow:
+  # 1. Start AWS Nitro Enclaves using `nitro-cli run-enclave`
+  # 2. Capture assigned CIDs from enclave startup output
+  # 3. Set environment variables with actual CIDs
+  # 4. Start gateway with environment overrides
+  #
+  # Example deployment script:
+  #   CID_0=$(nitro-cli run-enclave --eif-path enclave.eif | grep 'CID:' | cut -d: -f2)
+  #   export KEYMELD_ENCLAVE_0_CID=$CID_0
+  #   ./keymeld-gateway
   enclaves:
     - id: 0
-      cid: 3
-      port: 5000
+      cid: 3 # TEMPLATE - Override with KEYMELD_ENCLAVE_0_CID
+      port: 8000
     - id: 1
-      cid: 4
-      port: 5001
+      cid: 4 # TEMPLATE - Override with KEYMELD_ENCLAVE_1_CID
+      port: 8000
     - id: 2
-      cid: 5
-      port: 5002
+      cid: 5 # TEMPLATE - Override with KEYMELD_ENCLAVE_2_CID
+      port: 8000
   max_users_per_enclave: 500
+  max_connections_per_enclave: 50 # Pool size: number of pooled VSock connections per enclave
   enclave_timeout_secs: 60
-  aws_region: ""
 coordinator:
   processing_interval_ms: 100
   batch_size: 100

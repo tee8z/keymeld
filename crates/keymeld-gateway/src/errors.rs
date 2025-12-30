@@ -29,10 +29,7 @@ pub enum ApiError {
 }
 
 pub fn is_retryable_error(error: &KeyMeldError) -> bool {
-    matches!(
-        error,
-        KeyMeldError::EnclaveError(_) | KeyMeldError::DistributionError(_)
-    )
+    matches!(error, KeyMeldError::EnclaveError(_))
 }
 
 impl ApiError {
@@ -58,9 +55,6 @@ impl ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::KeyMeld(e) => match e {
                 KeyMeldError::InvalidConfiguration(_) => StatusCode::BAD_REQUEST,
-                KeyMeldError::DistributionError(_) => StatusCode::BAD_REQUEST,
-                KeyMeldError::KeyNotFound(_) => StatusCode::NOT_FOUND,
-                KeyMeldError::SessionTooLarge(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -108,9 +102,6 @@ impl ApiError {
                 KeyMeldError::InvalidConfiguration(_) => {
                     "Invalid request configuration".to_string()
                 }
-                KeyMeldError::DistributionError(msg) => msg.clone(),
-                KeyMeldError::KeyNotFound(msg) => msg.clone(),
-                KeyMeldError::SessionTooLarge(msg) => msg.clone(),
                 _ => "KeyMeld operation failed".to_string(),
             },
         }
@@ -157,8 +148,7 @@ impl IntoResponse for ApiError {
 impl From<hex::FromHexError> for ApiError {
     fn from(e: hex::FromHexError) -> Self {
         ApiError::KeyMeld(KeyMeldError::SerializationError(format!(
-            "Invalid hex encoding: {}",
-            e
+            "Invalid hex encoding: {e}"
         )))
     }
 }
@@ -166,8 +156,7 @@ impl From<hex::FromHexError> for ApiError {
 impl From<serde_json::Error> for ApiError {
     fn from(e: serde_json::Error) -> Self {
         ApiError::KeyMeld(KeyMeldError::SerializationError(format!(
-            "JSON serialization error: {}",
-            e
+            "JSON serialization error: {e}"
         )))
     }
 }
@@ -175,8 +164,7 @@ impl From<serde_json::Error> for ApiError {
 impl From<uuid::Error> for ApiError {
     fn from(e: uuid::Error) -> Self {
         ApiError::KeyMeld(KeyMeldError::InvalidConfiguration(format!(
-            "Invalid UUID: {}",
-            e
+            "Invalid UUID: {e}"
         )))
     }
 }

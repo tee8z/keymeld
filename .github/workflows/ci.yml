@@ -1,0 +1,105 @@
+name: CI - Pull Request Validation
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Code quality checks
+  check:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Check formatting
+        run: |
+          nix develop -c just fmt
+          # Ensure no files were changed by formatting
+          if ! git diff --exit-code; then
+            echo "Code is not properly formatted. Please run 'just fmt'"
+            exit 1
+          fi
+
+      - name: Run Clippy
+        run: |
+          nix develop -c just lint
+
+      - name: Run tests
+        run: |
+          nix develop -c just test
+
+      - name: Build all components
+        run: |
+          nix develop -c just build
+
+  # End-to-end demo test (optional, can be skipped with label)
+  demo:
+    name: End-to-End Demo
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.pull_request.labels.*.name, 'skip-demo')"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Run complete demo
+        run: |
+          # Clean start
+          nix develop -c just clean
+
+          # Start services and run demo
+          nix develop -c just quickstart
+
+          # Verify demo completed successfully
+          echo "✅ KeyMeld demo completed successfully"
+
+      - name: Upload demo logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-logs-${{ github.run_id }}
+          path: |
+            logs/
+            data/
+          retention-days: 7
+
+  # Summary job for branch protection
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [check, demo]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          # Check if any required job failed
+          if [[ "${{ needs.check.result }}" == "failure" ]]; then
+            echo "❌ Code quality checks failed"
+            exit 1
+          fi
+
+          # Demo can be skipped but if it runs, it must pass
+          if [[ "${{ needs.demo.result }}" == "failure" ]]; then
+            echo "❌ Demo test failed"
+            exit 1
+          fi
+
+          echo "✅ All CI checks passed!"

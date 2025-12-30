@@ -1,11 +1,11 @@
 use crate::{
     api::TaprootTweak,
     identifiers::{EnclaveId, SessionId, UserId},
-    KeyMeldError,
+    AttestationDocument, KeyMeldError,
 };
 use musig2::{PartialSignature, PubNonce};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::fmt;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,57 +13,55 @@ use thiserror::Error;
 pub enum EnclaveCommand {
     Ping,
     Configure(ConfigureCommand),
+    GetPublicInfo,
     InitKeygenSession(InitKeygenSessionCommand),
-    InitSigningSession(InitSigningSessionCommand),
+    DistributeSessionSecret(DistributeSessionSecretCommand),
     AddParticipant(AddParticipantCommand),
+    DistributeParticipantPublicKey(DistributeParticipantPublicKeyCommand),
+    GetAggregatePublicKey(GetAggregatePublicKeyCommand),
+    InitSigningSession(InitSigningSessionCommand),
     GenerateNonce(GenerateNonceCommand),
     AddNonce(AddNonceCommand),
-    GetAggregateNonce(GetAggregateNonceCommand),
-    GetAggregatePublicKey(GetAggregatePublicKeyCommand),
-    ValidateSessionHmac(ValidateSessionHmacCommand),
-    ValidateKeygenParticipantHmac(ValidateKeygenParticipantHmacCommand),
     SignPartialSignature(ParitialSignatureCommand),
     AddPartialSignature(AddPartialSignatureCommand),
     Finalize(FinalizeCommand),
     ClearSession(ClearSessionCommand),
-    DistributeSessionSecret(DistributeSessionSecretCommand),
-    BatchDistributeSessionSecrets(BatchDistributeSessionSecretsCommand),
-    GetPublicInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum EnclaveResponse {
-    Success(SuccessResponse),
+    Success,
+    ParticipantAdded(ParticipantAddedResponse),
     Pong,
     Nonce(NonceResponse),
     Signature(SignatureResponse),
     FinalSignature(FinalSignatureResponse),
     AggregatePublicKey(AggregatePublicKeyResponse),
-    AggregateNonce(AggregateNonceResponse),
     PublicInfo(PublicInfoResponse),
-    Attestation(AttestationResponse),
-    BatchSessionSecrets(BatchSessionSecretsResponse),
-    EnclavePublicKeys(EnclavePublicKeysResponse),
+    Attestation(AttestationDocument),
     KeygenInitialized(KeygenInitializedResponse),
-    SessionSecret(SessionSecretResponse),
+    AdaptorPartialSignature(AdaptorPartialSignatureResponse),
+    AdaptorSignatures(AdaptorSignaturesResponse),
     Error(ErrorResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigureCommand {
-    pub region: String,
     pub enclave_id: EnclaveId,
+    pub key_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitKeygenSessionCommand {
     pub keygen_session_id: SessionId,
     pub coordinator_encrypted_private_key: Option<String>,
+    pub coordinator_user_id: Option<UserId>,
     pub encrypted_session_secret: Option<String>,
     pub timeout_secs: u64,
     pub taproot_tweak: TaprootTweak,
     pub expected_participant_count: usize,
+    pub expected_participants: Vec<UserId>,
     pub enclave_public_keys: Vec<EnclavePublicKeyInfo>,
 }
 
@@ -72,11 +70,10 @@ pub struct InitSigningSessionCommand {
     pub keygen_session_id: SessionId,
     pub signing_session_id: SessionId,
     pub encrypted_message: String,
-    pub coordinator_encrypted_private_key: Option<String>,
-    pub encrypted_session_secret: Option<String>,
     pub timeout_secs: u64,
     pub taproot_tweak: TaprootTweak,
     pub expected_participant_count: usize,
+    pub encrypted_adaptor_configs: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +81,14 @@ pub struct AddParticipantCommand {
     pub keygen_session_id: Option<SessionId>,
     pub signing_session_id: Option<SessionId>,
     pub user_id: UserId,
-    pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributeParticipantPublicKeyCommand {
+    pub keygen_session_id: SessionId,
+    pub user_id: UserId,
+    pub encrypted_participant_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +105,7 @@ pub struct AddNonceCommand {
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
     pub signer_index: usize,
-    pub nonce: PubNonce,
+    pub nonce_data: NonceData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +113,6 @@ pub struct ParitialSignatureCommand {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
-    pub aggregate_nonce: PubNonce,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +121,7 @@ pub struct AddPartialSignatureCommand {
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
     pub signer_index: usize,
-    pub signature: PartialSignature,
+    pub signature_data: SignatureData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,39 +131,8 @@ pub struct FinalizeCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShareAggregateNonceCommand {
-    pub signing_session_id: SessionId,
-    pub keygen_session_id: SessionId,
-    pub aggregate_nonce: PubNonce,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetAggregateNonceCommand {
-    pub signing_session_id: SessionId,
-    pub keygen_session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetAggregatePublicKeyCommand {
     pub keygen_session_id: SessionId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidateSessionHmacCommand {
-    pub signing_session_id: Option<SessionId>,
-    pub keygen_session_id: Option<SessionId>,
-    pub user_id: UserId,
-    pub message_hash: Vec<u8>,
-    pub session_hmac: String,
-    pub encrypted_session_secret: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidateKeygenParticipantHmacCommand {
-    pub keygen_session_id: SessionId,
-    pub user_id: UserId,
-    pub session_hmac: String,
-    pub encrypted_session_secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,18 +148,20 @@ pub struct DistributeSessionSecretCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchDistributeSessionSecretsCommand {
-    pub keygen_session_id: SessionId,
-    pub target_enclaves: Vec<EnclaveId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetEnclavePublicKeysCommand {
     pub enclave_ids: Vec<EnclaveId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuccessResponse {
+pub struct EncryptedParticipantPublicKey {
+    pub target_enclave_id: EnclaveId,
+    pub encrypted_public_key: String, // Encrypted with target enclave's public key
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantAddedResponse {
+    pub user_id: UserId,
+    pub encrypted_public_keys: Vec<EncryptedParticipantPublicKey>,
     pub message: String,
 }
 
@@ -203,7 +176,19 @@ pub struct NonceResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
-    pub public_nonce: PubNonce,
+    pub nonce_data: NonceData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SignatureData {
+    Regular(PartialSignature),
+    Adaptor(Vec<(uuid::Uuid, PartialSignature)>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NonceData {
+    Regular(PubNonce),
+    Adaptor(Vec<(uuid::Uuid, PubNonce)>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,16 +196,16 @@ pub struct SignatureResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
-    pub partial_signature: PartialSignature,
-    pub public_nonce: PubNonce,
+    pub signature_data: SignatureData,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FinalSignatureResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub final_signature: Vec<u8>,
     pub participant_count: usize,
+    pub encrypted_adaptor_signatures: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,30 +232,11 @@ pub struct AggregateNonceResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicInfoResponse {
     pub public_key: String,
-    pub attestation_document: Option<AttestationResponse>,
+    pub attestation_document: Option<AttestationDocument>,
     pub active_sessions: u32,
     pub uptime_seconds: u64,
     pub key_epoch: u64,
     pub key_generation_time: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttestationResponse {
-    pub pcrs: BTreeMap<String, Vec<u8>>,
-    pub timestamp: u64,
-    pub certificate: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub user_data: Option<Vec<u8>>,
-    pub public_key: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionHmacValidationResponse {
-    pub signing_session_id: SessionId,
-    pub keygen_session_id: SessionId,
-    pub user_id: UserId,
-    pub is_valid: bool,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,15 +251,23 @@ pub struct EncryptedSessionSecret {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchSessionSecretsResponse {
-    pub keygen_session_id: SessionId,
-    pub encrypted_secrets: Vec<EncryptedSessionSecret>,
+pub struct SessionSecretResponse {
+    pub session_secret: String,
+    pub enclave_id: EnclaveId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSecretResponse {
-    pub keygen_session_id: SessionId,
-    pub session_secret: String,
+pub struct AdaptorPartialSignatureResponse {
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    pub adaptor_id: uuid::Uuid,
+    pub partial_signature: String, // Hex-encoded partial signature
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptorSignaturesResponse {
+    pub signing_session_id: SessionId,
+    pub adaptor_signatures: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,89 +286,251 @@ pub struct ErrorResponse {
     pub error: EnclaveError,
 }
 
-impl std::fmt::Display for ErrorResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ErrorResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.error)
     }
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EnclaveError {
-    #[error("Enclave not configured")]
-    NotConfigured,
-    #[error("Enclave already configured")]
-    AlreadyConfigured,
-    #[error("Invalid private key: {0}")]
-    InvalidPrivateKey(String),
-    #[error("Session not found: {0}")]
-    SessionNotFound(String),
-    #[error("Wrong phase: {0}")]
-    WrongPhase(String),
-    #[error("MuSig error: {0}")]
-    MuSigError(String),
-    #[error("HMAC invalid: {0}")]
-    HmacInvalid(String),
-    #[error("Memory exhausted")]
-    MemoryExhausted,
-    #[error("Session limit exceeded")]
-    SessionLimitExceeded,
-    #[error("Timeout")]
-    Timeout,
-    #[error("Internal error: {0}")]
-    Internal(String),
-    #[error("Cryptographic error: {0}")]
-    CryptographicError(String),
-    #[error("Data decoding error: {0}")]
-    DataDecodingError(String),
-    #[error("Decryption failed: {0}")]
-    DecryptionFailed(String),
-    #[error("Session initialization failed: {0}")]
-    SessionInitializationFailed(String),
-    #[error("Participant error: {0}")]
-    ParticipantError(String),
-    #[error("Invalid session ID: {0}")]
-    InvalidSessionId(String),
-    #[error("Invalid session secret: {0}")]
-    InvalidSessionSecret(String),
-    #[error("Invalid public key: {0}")]
-    InvalidPublicKey(String),
-    #[error("Signature error: {0}")]
-    SignatureError(String),
-    #[error("Nonce error: {0}")]
-    NonceError(String),
-    #[error("Nonce generation failed: {0}")]
-    NonceGenerationFailed(String),
-    #[error("Aggregate key error: {0}")]
-    AggregateKeyError(String),
-    #[error("Signing failed: {0}")]
-    SigningFailed(String),
-    #[error("Finalization failed: {0}")]
-    FinalizationFailed(String),
-    #[error("Validation failed: {0}")]
-    ValidationFailed(String),
-    #[error("Operation failed: {0}")]
-    OperationFailed(String),
-    #[error("KeyMeld error: {0}")]
-    KeyMeldError(String),
-    #[error("Invalid attestation: {0}")]
-    InvalidAttestation(String),
+// Sub-error types for clean error handling
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum ValidationError {
+    #[error("Encrypted message cannot be empty")]
+    EmptyEncryptedMessage,
+    #[error("Decrypted message is empty")]
+    EmptyDecryptedMessage,
+    #[error("User {user_id} not found in expected participants")]
+    UserNotFound { user_id: UserId },
+    #[error("Signer index {index} exceeds expected participant count {expected}")]
+    IndexOutOfBounds { index: usize, expected: usize },
+    #[error("Invalid private key length: expected 32 bytes, got {actual}")]
+    InvalidPrivateKeyLength { actual: usize },
+    #[error("Message too large: {size} bytes (max 4MB)")]
+    MessageTooLarge { size: usize },
+    #[error("Cannot process commands in {state} state")]
+    InvalidStateForCommand { state: String },
+    #[error("Expected participant count must be greater than 0")]
+    ZeroParticipantCount,
+    #[error("Timeout must be greater than 0")]
+    ZeroTimeout,
+    #[error("Invalid nonce length: expected 66 bytes, got {actual}")]
+    InvalidNonceLength { actual: usize },
+    #[error("{0}")]
+    Other(String),
 }
 
-// Implement From conversions to preserve error details
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum CryptoError {
+    #[error("Failed to generate keypair: {0}")]
+    KeypairGeneration(String),
+    #[error("Failed to encrypt {context}: {error}")]
+    EncryptionFailed { context: String, error: String },
+    #[error("Failed to decrypt {context}: {error}")]
+    DecryptionFailed { context: String, error: String },
+    #[error("Invalid public key: {0}")]
+    InvalidPublicKey(String),
+    #[error("Invalid secret key: {0}")]
+    InvalidSecretKey(String),
+    #[error("Private key too short: expected 32 bytes, got {actual}")]
+    PrivateKeyTooShort { actual: usize },
+    #[error("Failed to finalize signature: {0}")]
+    SignatureFinalization(String),
+    #[error("Failed to aggregate signatures: {0}")]
+    SignatureAggregation(String),
+    #[error("Failed to add participant to musig processor: {0}")]
+    ParticipantAddition(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum NonceError {
+    #[error("Failed to generate nonce for user {user_id}: {error}")]
+    GenerationFailed { user_id: UserId, error: String },
+    #[error("Failed to add nonce for user {user_id}: {error}")]
+    AddFailed { user_id: UserId, error: String },
+    #[error("Invalid nonce length: expected 66 bytes, got {actual}")]
+    InvalidLength { actual: usize },
+    #[error("Aggregate nonce not available in state {state}")]
+    NotAvailable { state: String },
+    #[error("Cannot get aggregate nonce from non-signing session")]
+    WrongSessionType,
+    #[error("Failed to convert AggNonce to PubNonce: {0}")]
+    ConversionFailed(String),
+    #[error("Failed to get aggregate nonce: {0}")]
+    AggregateNonceFailed(String),
+    #[error("No nonce found for user {user_id}")]
+    NonceNotFound { user_id: UserId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum SigningError {
+    #[error("Failed to generate partial signature for user {user_id}: {error}")]
+    PartialSignatureGeneration { user_id: UserId, error: String },
+    #[error("Adaptor partial signature generation failed: {0}")]
+    AdaptorPartialSignatureGeneration(String),
+    #[error("Failed to deserialize partial signature: {0}")]
+    PartialSignatureDeserialization(String),
+    #[error("Failed to deserialize adaptor partial signature: {0}")]
+    AdaptorPartialSignatureDeserialization(String),
+    #[error("Failed to aggregate signatures: {0}")]
+    SignatureAggregation(String),
+    #[error("Adaptor signature aggregation failed: {0}")]
+    AdaptorSignatureAggregation(String),
+    #[error("Failed to get adaptor signature results: {0}")]
+    AdaptorResultsRetrieval(String),
+    #[error("No partial signature found for user {user_id}")]
+    PartialSignatureNotFound { user_id: UserId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum SessionError {
+    #[error("Session not found: {0}")]
+    NotFound(SessionId),
+    #[error("Invalid session ID: {0}")]
+    InvalidId(String),
+    #[error("Session secret not initialized")]
+    SecretNotInitialized,
+    #[error("Invalid session secret length: expected 32 bytes, got {actual}")]
+    InvalidSecretLength { actual: usize },
+    #[error("Failed to initialize MuSig2 for keygen: {0}")]
+    MusigInitialization(String),
+    #[error("Failed to copy metadata from keygen {keygen_id} to signing {signing_id}: {error}")]
+    MetadataCopy {
+        keygen_id: SessionId,
+        signing_id: SessionId,
+        error: String,
+    },
+    #[error("Failed to update session message: {0}")]
+    MessageUpdate(String),
+    #[error("Failed to get aggregate public key: {0}")]
+    AggregateKeyRetrieval(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum PhaseError {
+    #[error("Keygen session not completed")]
+    KeygenNotCompleted,
+    #[error("Keygen session required to be in completed state: {state}")]
+    KeygenInWrongState { state: String },
+    #[error("Wrong phase: {0}")]
+    WrongPhase(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum AttestationError {
+    #[error("Failed to generate attestation: {0}")]
+    GenerationFailed(String),
+    #[error("Debug mode attestations not allowed")]
+    DebugModeNotAllowed,
+    #[error("Failed to parse measurements JSON: {0}")]
+    MeasurementParsing(String),
+    #[error("PCR {pcr_name} has invalid length: expected 48 bytes, got {actual}")]
+    InvalidPcrLength { pcr_name: String, actual: usize },
+    #[error("{0}")]
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum InternalError {
+    #[error("System time error")]
+    SystemTime,
+    #[error("NSM client not initialized")]
+    NsmNotInitialized,
+    #[error("MuSig processor not found for session")]
+    MissingMusigProcessor,
+    #[error("State inconsistency: {0}")]
+    StateInconsistency(String),
+    #[error("Serialization failed: {0}")]
+    Serialization(String),
+    #[error("Command processing failed: {0}")]
+    CommandProcessing(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum PrivateKeyError {
+    #[error("Missing private key for user {user_id}")]
+    Missing { user_id: UserId },
+    #[error("Invalid private key length: expected 32 bytes, got {actual}")]
+    InvalidLength { actual: usize },
+    #[error("Invalid private key: {0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum DataDecodingError {
+    #[error("Hex decode failed: {0}")]
+    HexDecode(String),
+    #[error("Failed to decode {data_type}: {error}")]
+    DecodeFailed { data_type: String, error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum ParticipantError {
+    #[error("Participant error: {0}")]
+    Other(String),
+}
+
+// Main EnclaveError enum with hierarchical structure
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum EnclaveError {
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+
+    #[error(transparent)]
+    Nonce(#[from] NonceError),
+
+    #[error(transparent)]
+    Signing(#[from] SigningError),
+
+    #[error(transparent)]
+    Session(#[from] SessionError),
+
+    #[error(transparent)]
+    Phase(#[from] PhaseError),
+
+    #[error(transparent)]
+    Attestation(#[from] AttestationError),
+
+    #[error(transparent)]
+    Internal(#[from] InternalError),
+
+    #[error(transparent)]
+    PrivateKey(#[from] PrivateKeyError),
+
+    #[error(transparent)]
+    DataDecoding(#[from] DataDecodingError),
+
+    #[error(transparent)]
+    Participant(#[from] ParticipantError),
+
+    #[error(transparent)]
+    Musig(#[from] crate::musig::MusigError),
+
+    #[error("KeyMeld error: {0}")]
+    KeyMeld(String),
+}
+
 impl From<hex::FromHexError> for EnclaveError {
     fn from(err: hex::FromHexError) -> Self {
-        EnclaveError::DataDecodingError(err.to_string())
+        EnclaveError::DataDecoding(DataDecodingError::HexDecode(err.to_string()))
     }
 }
 
 impl From<musig2::secp256k1::Error> for EnclaveError {
     fn from(err: musig2::secp256k1::Error) -> Self {
-        EnclaveError::InvalidPublicKey(err.to_string())
+        EnclaveError::Crypto(CryptoError::InvalidPublicKey(err.to_string()))
     }
 }
 
 impl From<KeyMeldError> for EnclaveError {
     fn from(err: KeyMeldError) -> Self {
-        EnclaveError::KeyMeldError(err.to_string())
+        EnclaveError::KeyMeld(err.to_string())
     }
 }

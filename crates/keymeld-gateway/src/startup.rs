@@ -3,7 +3,7 @@ use crate::{
     coordinator::Coordinator,
     database::Database,
     errors::ApiError,
-    handlers::{self, AppState},
+    handlers::{self, AppState, NonceCache},
     metrics::Metrics,
     middleware::metrics_middleware,
 };
@@ -20,7 +20,13 @@ use keymeld_core::{
     resilience::{GatewayLimits, RetryConfig, TimeoutConfig},
 };
 
-use std::{io::Error as IoError, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    io::Error as IoError,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
@@ -75,6 +81,9 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             CreateSigningSessionRequest,
             CreateSigningSessionResponse,
             SigningSessionStatusResponse,
+            keymeld_core::musig::AdaptorConfig,
+            keymeld_core::musig::AdaptorType,
+            keymeld_core::musig::AdaptorSignatureResult,
             EnclaveAssignmentResponse,
             EnclaveHealthResponse,
             EnclavePublicKeyResponse,
@@ -112,8 +121,8 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
         (url = "/api/v1", description = "KeyMeld Gateway API v1")
     ),
     security(
-        ("SessionHmac" = []),
-        ("SigningHmac" = [])
+        ("SessionSignature" = []),
+        ("UserSignature" = [])
     ),
     modifiers(&SecurityAddon)
 )]
@@ -127,13 +136,13 @@ impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
-                "SessionHmac",
-                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-HMAC"))),
+                "SessionSignature",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Session-Signature"))),
             );
 
             components.add_security_scheme(
-                "SigningHmac",
-                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Signing-HMAC"))),
+                "UserSignature",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-User-Signature"))),
             );
         }
     }
@@ -159,22 +168,22 @@ impl Application {
             enclave_manager: enclave_manager.clone(),
             metrics: metrics.clone(),
             gateway_limits: GatewayLimits::default(),
+            nonce_cache: Arc::new(Mutex::new(NonceCache::new())),
         };
 
         let app = Self::build_router(app_state, &config);
 
         let address = format!("{}:{}", config.server.host, config.server.port);
         let addr = SocketAddr::from_str(&address)
-            .with_context(|| format!("Failed to parse address: {}", address))?;
+            .with_context(|| format!("Failed to parse address: {address}"))?;
 
         let listener = match TcpListener::bind(addr).await {
             Ok(listener) => listener,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 suggest_port_conflict_resolution(addr);
                 return Err(anyhow::anyhow!(
-                    "Cannot start server - address {} is already in use. \
-                    Another instance may be running or the port is occupied by a different service.",
-                    addr
+                    "Cannot start server - address {addr} is already in use. \
+                    Another instance may be running or the port is occupied by a different service."
                 ));
             }
             Err(e) => {
@@ -203,7 +212,7 @@ impl Application {
         let socket_addr = self
             .listener
             .local_addr()
-            .map_err(|e| IoError::other(format!("Failed to get local address: {}", e)))?;
+            .map_err(|e| IoError::other(format!("Failed to get local address: {e}")))?;
 
         let server = serve(
             self.listener,
@@ -225,7 +234,7 @@ impl Application {
 
         match server.with_graceful_shutdown(shutdown_signal()).await {
             Ok(_) => {
-                info!("✅ Server on {} shut down gracefully", socket_addr);
+                info!("Server on {} shut down gracefully", socket_addr);
 
                 let _ = self.coordinator_shutdown.send(());
                 match timeout(Duration::from_secs(10), self.coordinator_handle).await {
@@ -264,21 +273,47 @@ impl Application {
             })
             .collect();
 
-        // Create timeout and retry configs using From implementations
         let timeout_config = TimeoutConfig::from(&config.enclaves);
         let retry_config = RetryConfig::from(&config.enclaves);
 
-        let enclave_manager = Arc::new(EnclaveManager::new_with_config(
+        let mut enclave_manager = EnclaveManager::new_with_config(
             enclave_configs,
             timeout_config,
             retry_config,
             config.enclaves.max_connections_per_enclave.unwrap_or(50) as usize,
-        )?);
+        )?;
 
         info!(
             "Configured enclave manager with {} total enclaves",
             config.enclaves.enclaves.len()
         );
+
+        info!("Configuring all enclaves...");
+        match enclave_manager.configure_all().await {
+            Ok(()) => {
+                info!("Successfully configured all enclaves");
+            }
+            Err(e) => {
+                warn!("Failed to configure some enclaves: {}", e);
+                info!("Gateway will continue startup but some enclaves may not function correctly");
+            }
+        }
+
+        info!("Initializing enclave public keys...");
+        let enclave_manager = Arc::new(enclave_manager);
+
+        match enclave_manager.initialize_enclave_public_keys().await {
+            Ok(initialized_count) => {
+                info!(
+                    "Successfully initialized {} enclave public keys",
+                    initialized_count
+                );
+            }
+            Err(e) => {
+                warn!("Failed to initialize some enclave public keys: {}", e);
+                info!("Gateway will attempt to fetch missing keys on-demand");
+            }
+        }
 
         Ok(enclave_manager)
     }
@@ -300,11 +335,11 @@ impl Application {
             )
             .route("/signing", post(handlers::create_signing_session))
             .route(
-                "/signing/{signing_session_id}",
+                "/signing/{signing_session_id}/approve/{user_id}",
                 post(handlers::approve_signing_session),
             )
             .route(
-                "/signing/{signing_session_id}/status",
+                "/signing/{signing_session_id}/status/{user_id}",
                 get(handlers::get_signing_status),
             )
             .route("/enclaves", get(handlers::list_enclaves))
@@ -314,6 +349,7 @@ impl Application {
             )
             .route("/version", get(handlers::api_version))
             .route("/health", get(handlers::health_check))
+            .route("/health/detail", get(handlers::health_check_detail))
             .route("/metrics", get(handlers::metrics))
             .route(
                 "/openapi.json",
@@ -407,7 +443,7 @@ mod tests {
             environment: Environment::Development,
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 0, // Let OS assign port for testing
+                port: 0,
                 enable_cors: true,
                 enable_compression: true,
                 request_timeout_secs: Some(10),
@@ -475,7 +511,7 @@ mod tests {
             .expect("Failed to setup enclave manager");
 
         let health_result = enclave_manager.health_check().await;
-        // health_check now returns BTreeMap directly, so just verify it's not empty
+
         assert!(!health_result.is_empty() || health_result.is_empty());
     }
 

@@ -1,34 +1,79 @@
+# KeyMeld Development Configuration
+# ================================
+# This configuration is optimized for local development with VSock simulation.
+#
+# IMPORTANT: VSock CID Addressing in Development
+# ==============================================
+# In local development, we simulate AWS Nitro Enclave VSock communication, but there are
+# important limitations regarding Context IDs (CIDs) that differ from production:
+#
+# VSock CID Meanings:
+#   - CID 0: Reserved (cannot be used)
+#   - CID 1: Well-known address for local communication
+#   - CID 2: Well-known address for host (what we use in development)
+#   - CID 3+: Guest VM/Enclave CIDs (only available in real virtualization)
+#
+# Development Limitation:
+# In local simulation, we cannot assign arbitrary guest CIDs (3, 4, 5, etc.) because
+# there are no actual separate virtualized contexts. All processes run on the same host.
+# Therefore, all enclaves must use the host CID (2) with different ports to differentiate.
+#
+# This differs from production AWS Nitro Enclaves where:
+# - Each enclave gets its own unique CID automatically assigned by AWS
+# - The host communicates to enclaves using their individual CIDs
+# - No port differentiation is needed since CIDs provide isolation
+#
+# Development Setup:
+# - All enclaves use CID 2 (host CID)
+# - Enclaves differentiate using ports 5000, 5001, 5002
+# - Gateway validation allows duplicate CIDs in development mode
+# - VSock proxies bridge these to TCP for easier debugging
+#
+# If you encounter "No such device" errors when connecting to VSock CIDs 3+,
+# this is the cause - change all CIDs to 2 for local development.
+
 environment: development
 server:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8080
   enable_cors: true
   enable_compression: true
   request_timeout_secs: 30
-  max_request_size_bytes: 20971520
+  max_request_size_bytes: 10485760
 database:
-  path: "./data/keymeld-dev.db"
-  max_connections: 10
-  connection_timeout_secs: 10
+  path: "./data/keymeld.db"
+  max_connections: 20
+  connection_timeout_secs: 30
   idle_timeout_secs: 60
-  enable_wal_mode: false
+  enable_wal_mode: true
 enclaves:
   kms_key_arn: "arn:aws:kms:us-west-2:123456789012:key/dev-mock-key"
+  # VSock Enclave Configuration for Development
+  # ===========================================
+  # Note: All enclaves use CID 2 (host CID) in development simulation.
+  # This is required because local processes cannot use guest CIDs (3+)
+  # without actual virtualization. Enclaves are differentiated by port numbers.
+  #
+  # Production AWS Nitro Enclaves would each have unique CIDs like:
+  #   - id: 0, cid: 16, port: 8000  (example)
+  #   - id: 1, cid: 17, port: 8000  (example)
+  #   - id: 2, cid: 18, port: 8000  (example)
   enclaves:
     - id: 0
-      cid: 3
+      cid: 2 # Host CID - required for local development
       port: 5000
     - id: 1
-      cid: 4
+      cid: 2 # Host CID - required for local development
       port: 5001
     - id: 2
-      cid: 5
+      cid: 2 # Host CID - required for local development
       port: 5002
-  max_users_per_enclave: 10
-  enclave_timeout_secs: 30
-  aws_region: "us-west-2"
+  max_users_per_enclave: 50
+  max_connections_per_enclave: 20 # Pool size: number of pooled VSock connections per enclave
+  enclave_timeout_secs: 600
+  vsock_timeout_secs: 600
 coordinator:
-  processing_interval_ms: 1000
+  processing_interval_ms: 500
   batch_size: 100
   max_retries: 5
   processing_timeout_mins: 1

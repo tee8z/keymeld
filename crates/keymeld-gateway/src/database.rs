@@ -4,12 +4,12 @@ use keymeld_core::{
     api::{
         CreateKeygenSessionRequest, CreateSigningSessionRequest, RegisterKeygenParticipantRequest,
     },
+    encrypted_data::{SigningEnclaveData, SigningSessionData},
     identifiers::{EnclaveId, UserId},
     session::{KeygenStatusKind, SigningStatusKind},
     KeygenCollectingParticipants, KeygenSessionStatus, ParticipantData, SessionId,
     SigningCollectingParticipants, SigningSessionStatus,
 };
-use keymeld_core::{BinaryEncoding, PartialSignature, PubNonce};
 use secp256k1::PublicKey;
 use sqlx::{
     query_scalar,
@@ -51,10 +51,10 @@ impl Database {
         }
 
         options = options
-            .pragma("synchronous", "NORMAL") // Balance safety and performance
-            .pragma("cache_size", "-64000") // 64MB cache
-            .pragma("foreign_keys", "ON") // Enable foreign key constraints
-            .pragma("temp_store", "MEMORY"); // Use memory for temp tables
+            .pragma("synchronous", "NORMAL")
+            .pragma("cache_size", "-64000")
+            .pragma("foreign_keys", "ON")
+            .pragma("temp_store", "MEMORY");
 
         let pool = SqlitePoolOptions::new()
             .max_connections(config.max_connections)
@@ -269,8 +269,7 @@ impl Database {
             Ok(pubkey) => pubkey,
             Err(e) => {
                 return Err(ApiError::bad_request(format!(
-                    "Invalid coordinator public key: {}",
-                    e
+                    "Invalid coordinator public key: {e}"
                 )))
             }
         };
@@ -279,6 +278,7 @@ impl Database {
             keygen_session_id: request.keygen_session_id.clone(),
             coordinator_pubkey,
             coordinator_encrypted_private_key: request.coordinator_encrypted_private_key.clone(),
+            session_public_key: request.session_public_key.clone(),
             coordinator_enclave_id: request.coordinator_enclave_id,
             expected_participants: request.expected_participants.clone(),
             encrypted_session_secret: request.encrypted_session_secret.clone(),
@@ -290,27 +290,21 @@ impl Database {
         });
 
         let status_json = serde_json::to_string(&status).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize keygen status: {}", e))
+            ApiError::Serialization(format!("Failed to serialize keygen status: {e}"))
         })?;
 
         let status_name = status.kind();
 
-        // Create structured encrypted data for keygen session
-        let session_data = keymeld_core::encrypted_data::KeygenSessionData::new(
-            request.coordinator_pubkey.clone(),
-        );
-        let session_encrypted = serde_json::to_string(&session_data).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize session data: {}", e))
-        })?;
-
-        let enclave_encrypted = request.encrypted_session_secret.clone();
+        let session_encrypted = request.encrypted_session_data.clone();
+        let enclave_encrypted = request.encrypted_enclave_data.clone();
 
         sqlx::query(
             "INSERT INTO keygen_sessions (
                 keygen_session_id, status_name, coordinator_enclave_id, created_at,
                 expires_at, updated_at, retry_count, max_signing_sessions,
-                expected_participants, status, session_encrypted_data, enclave_encrypted_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                expected_participants, status, session_encrypted_data, enclave_encrypted_data,
+                session_public_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request.keygen_session_id.as_string())
         .bind(status_name.to_string())
@@ -318,12 +312,13 @@ impl Database {
         .bind(current_time)
         .bind(expires_at)
         .bind(current_time)
-        .bind(0) // retry_count
+        .bind(0)
         .bind(request.max_signing_sessions.map(|max| max as i64))
         .bind(serde_json::to_string(&request.expected_participants)?)
         .bind(status_json)
         .bind(session_encrypted)
         .bind(enclave_encrypted)
+        .bind(request.session_public_key.as_slice())
         .execute(&self.pool)
         .await?;
 
@@ -344,10 +339,7 @@ impl Database {
                 let status_json: String = row.get("status");
                 let mut status: KeygenSessionStatus =
                     serde_json::from_str(&status_json).map_err(|e| {
-                        ApiError::Serialization(format!(
-                            "Failed to deserialize keygen status: {}",
-                            e
-                        ))
+                        ApiError::Serialization(format!("Failed to deserialize keygen status: {e}"))
                     })?;
 
                 // Load and merge participants from the keygen_participants table
@@ -367,6 +359,26 @@ impl Database {
         }
     }
 
+    pub async fn get_session_public_key(
+        &self,
+        keygen_session_id: &SessionId,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let row = sqlx::query(
+            "SELECT session_public_key FROM keygen_sessions WHERE keygen_session_id = ?",
+        )
+        .bind(keygen_session_id.as_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => {
+                let public_key: Option<Vec<u8>> = row.get("session_public_key");
+                Ok(public_key)
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn register_keygen_participant_with_encrypted_data(
         &self,
         keygen_session_id: &SessionId,
@@ -381,8 +393,8 @@ impl Database {
         sqlx::query(
             "INSERT INTO keygen_participants (
                 keygen_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
-                registered_at, require_signing_approval, session_encrypted_data, enclave_encrypted_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                registered_at, require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(keygen_session_id.as_string())
         .bind(request.user_id.as_str())
@@ -390,6 +402,7 @@ impl Database {
         .bind(enclave_key_epoch as i64)
         .bind(current_time)
         .bind(request.require_signing_approval)
+        .bind(&request.auth_pubkey)
         .bind(session_encrypted_data)
         .bind(enclave_encrypted_data)
         .execute(&self.pool)
@@ -404,7 +417,7 @@ impl Database {
     ) -> Result<Vec<ParticipantData>, ApiError> {
         let rows = sqlx::query_as::<_, KeygenParticipantRow>(
             "SELECT user_id, assigned_enclave_id, enclave_key_epoch, registered_at,
-                    require_signing_approval, session_encrypted_data, enclave_encrypted_data
+                    require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
              FROM keygen_participants
              WHERE keygen_session_id = ?
              ORDER BY registered_at ASC",
@@ -433,25 +446,22 @@ impl Database {
         Ok(count as usize)
     }
 
-    pub async fn get_keygen_encrypted_session_secret(
+    /// Get participant's session-specific auth pubkey for authorization
+    pub async fn get_participant_auth_pubkey(
         &self,
+        user_id: &UserId,
         keygen_session_id: &SessionId,
-    ) -> Result<Option<String>, ApiError> {
-        let row = sqlx::query(
-            "SELECT enclave_encrypted_data FROM keygen_sessions WHERE keygen_session_id = ?",
+    ) -> Result<Vec<u8>, ApiError> {
+        let auth_pubkey: Vec<u8> = sqlx::query_scalar(
+            "SELECT auth_pubkey FROM keygen_participants
+             WHERE user_id = ? AND keygen_session_id = ?",
         )
+        .bind(user_id.as_str())
         .bind(keygen_session_id.as_string())
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
 
-        if let Some(row) = row {
-            let enclave_encrypted: String = row.get("enclave_encrypted_data");
-            // For now, return the encrypted session secret as-is
-            // The enclave will decrypt this when it receives it
-            Ok(Some(enclave_encrypted))
-        } else {
-            Ok(None)
-        }
+        Ok(auth_pubkey)
     }
 
     pub async fn update_keygen_session_status(
@@ -460,7 +470,7 @@ impl Database {
         status: &KeygenSessionStatus,
     ) -> Result<(), ApiError> {
         let status_json = serde_json::to_string(status).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize keygen status: {}", e))
+            ApiError::Serialization(format!("Failed to serialize keygen status: {e}"))
         })?;
 
         let status_name = status.kind().to_string();
@@ -494,9 +504,8 @@ impl Database {
         let keygen_status = self
             .get_keygen_session_by_id(&request.keygen_session_id)
             .await?
-            .ok_or_else(|| ApiError::not_found("Keygen session not found"))?;
+            .ok_or(ApiError::not_found("Keygen session not found"))?;
 
-        // Extract encrypted session secret and coordinator private key from keygen session
         let (encrypted_session_secret, coordinator_encrypted_private_key, taproot_tweak) =
             match &keygen_status {
                 KeygenSessionStatus::Completed(completed) => (
@@ -532,51 +541,58 @@ impl Database {
         .into_iter()
         .map(|user_id_str: String| UserId::parse(&user_id_str))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::database(format!("Invalid user ID in database: {}", e)))?;
+        .map_err(|e| ApiError::database(format!("Invalid user ID in database: {e}")))?;
 
+        // Convert keygen participants to registered participants map
+        let registered_participants: BTreeMap<UserId, ParticipantData> = keygen_participants
+            .into_iter()
+            .map(|p| (p.user_id.clone(), p))
+            .collect();
+
+        // Create initial signing session status - CollectingParticipants
         let status = SigningSessionStatus::CollectingParticipants(SigningCollectingParticipants {
             signing_session_id: request.signing_session_id.clone(),
             keygen_session_id: request.keygen_session_id.clone(),
             message_hash: request.message_hash.clone(),
-            taproot_tweak: Some(taproot_tweak.clone()),
             encrypted_message: request.encrypted_message.clone().unwrap_or_default(),
             expected_participants: expected_participants.clone(),
-            registered_participants: BTreeMap::new(),
-            encrypted_session_secret: Some(encrypted_session_secret.clone()),
+            registered_participants,
             coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key.clone()),
+            encrypted_session_secret: Some(encrypted_session_secret.clone()),
             created_at: current_time as u64,
             expires_at: expires_at as u64,
             required_enclave_epochs: BTreeMap::new(),
+            taproot_tweak: taproot_tweak.clone(),
+            encrypted_adaptor_configs: request.encrypted_adaptor_configs.clone(),
             participants_requiring_approval,
             approved_participants: Vec::new(),
         });
 
         let status_json = serde_json::to_string(&status).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize signing status: {}", e))
+            ApiError::Serialization(format!("Failed to serialize signing status: {e}"))
         })?;
         let status_name = status.kind().to_string();
-        let correlation_id_bytes: Option<Vec<u8>> = None; // TODO: Implement correlation ID if needed
-        let participants_user_ids = expected_participants.clone();
+        let correlation_id_bytes: Option<Vec<u8>> = None;
 
-        // Create structured encrypted data for signing session
-        let session_data = keymeld_core::encrypted_data::SigningSessionData::new().with_message(
-            request
-                .encrypted_message
-                .as_ref()
-                .unwrap_or(&"".to_string())
-                .clone(),
-        );
+        // Create initial empty signing session data (will be populated after enclave initialization)
+        let session_data = SigningSessionData {
+            message: Vec::new(), // Will be populated after decryption in enclave
+            message_hash: request.message_hash.clone(),
+            signed_message: None,
+            adaptor_configs: Vec::new(), // Will be populated after decryption in enclave
+            adaptor_signatures: None,
+        };
         let session_encrypted = serde_json::to_string(&session_data).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize session data: {}", e))
+            ApiError::Serialization(format!("Failed to serialize session data: {e}"))
         })?;
 
-        // Store coordinator encrypted data similar to keygen sessions
-        let enclave_data = keymeld_core::encrypted_data::SigningEnclaveData::new(
-            coordinator_encrypted_private_key.clone(),
-            encrypted_session_secret.clone(),
-        );
+        // Create enclave data with coordinator private key and session secret
+        let enclave_data = SigningEnclaveData {
+            coordinator_private_key: coordinator_encrypted_private_key.clone(),
+            session_secret: encrypted_session_secret.clone(),
+        };
         let enclave_encrypted = serde_json::to_string(&enclave_data).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize enclave data: {}", e))
+            ApiError::Serialization(format!("Failed to serialize enclave data: {e}"))
         })?;
 
         sqlx::query(
@@ -592,22 +608,21 @@ impl Database {
         .bind(current_time)
         .bind(expires_at)
         .bind(current_time)
-        .bind(0) // retry_count
+        .bind(0)
         .bind(correlation_id_bytes)
         .bind(request.message_hash.as_slice())
-        .bind(serde_json::to_string(&participants_user_ids)?)
+        .bind(serde_json::to_string(&expected_participants)?)
         .bind(status_json)
         .bind(session_encrypted)
         .bind(enclave_encrypted)
         .execute(&self.pool)
         .await?;
 
-        // Copy participants from keygen to signing session
-        let keygen_participants = self
+        // Get fresh keygen participants for database insertion
+        let keygen_participants_for_db = self
             .get_keygen_participants(&request.keygen_session_id)
             .await?;
-        for participant in &keygen_participants {
-            // Use existing structured data from keygen participant
+        for participant in &keygen_participants_for_db {
             let session_encrypted = &participant.session_encrypted_data;
             let enclave_encrypted = &participant.enclave_encrypted_data;
 
@@ -646,36 +661,47 @@ impl Database {
                 let mut status: SigningSessionStatus =
                     serde_json::from_str(&status_json).map_err(|e| {
                         ApiError::Serialization(format!(
-                            "Failed to deserialize signing status: {}",
-                            e
+                            "Failed to deserialize signing status: {e}"
                         ))
                     })?;
 
-                // Load keygen participants and merge them for signing sessions
-                if let keymeld_core::session::SigningSessionStatus::CollectingParticipants(
-                    ref collecting,
-                ) = status
-                {
-                    if let Ok(keygen_participants) = self
-                        .get_keygen_participants(&collecting.keygen_session_id)
-                        .await
-                    {
-                        let keygen_map: BTreeMap<UserId, ParticipantData> = keygen_participants
-                            .into_iter()
-                            .map(|p| (p.user_id.clone(), p))
-                            .collect();
-                        let _ = status.merge_participants_from_keygen(&keygen_map);
+                // Status loaded successfully
+
+                // Only merge keygen participants if registered_participants is empty (fallback for old sessions)
+                if let SigningSessionStatus::CollectingParticipants(ref collecting) = status {
+                    if collecting.registered_participants.is_empty() {
+                        debug!(
+                            "Signing session {} has empty registered_participants, merging from keygen",
+                            collecting.signing_session_id
+                        );
+                        if let Ok(keygen_participants) = self
+                            .get_keygen_participants(&collecting.keygen_session_id)
+                            .await
+                        {
+                            let keygen_map: BTreeMap<UserId, ParticipantData> = keygen_participants
+                                .into_iter()
+                                .map(|p| (p.user_id.clone(), p))
+                                .collect();
+                            debug!(
+                                "Merging {} keygen participants into signing session",
+                                keygen_map.len()
+                            );
+                            let _ = status.merge_participants_from_keygen(&keygen_map);
+                        }
+                    } else {
+                        debug!(
+                            "Signing session {} already has {} registered_participants, no merge needed",
+                            collecting.signing_session_id,
+                            collecting.registered_participants.len()
+                        );
                     }
                 }
 
-                // Update approval fields if this is a CollectingParticipants status
                 if let SigningSessionStatus::CollectingParticipants(ref mut collecting) = status {
-                    // Get participants requiring approval from keygen session
                     let participants_requiring_approval = self
                         .get_participants_requiring_approval(&collecting.keygen_session_id)
                         .await?;
 
-                    // Get current approvals for this signing session
                     let approved_participants = self
                         .get_signing_session_approvals(signing_session_id)
                         .await?;
@@ -710,7 +736,7 @@ impl Database {
         status: &keymeld_core::session::SigningSessionStatus,
     ) -> Result<(), ApiError> {
         let status_json = serde_json::to_string(status).map_err(|e| {
-            ApiError::Serialization(format!("Failed to serialize signing status: {}", e))
+            ApiError::Serialization(format!("Failed to serialize signing status: {e}"))
         })?;
 
         let status_name = status.kind().to_string();
@@ -737,31 +763,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_signing_participant(
-        &self,
-        signing_session_id: &SessionId,
-        user_id: &UserId,
-        public_nonces: Option<&PubNonce>,
-        partial_signature: Option<&PartialSignature>,
-    ) -> Result<(), ApiError> {
-        let public_nonces_bytes = public_nonces.map(|nonce| nonce.to_bytes().to_vec());
-        let partial_signature_bytes = partial_signature.map(|sig| sig.serialize().to_vec());
-
-        sqlx::query(
-            "UPDATE signing_participants
-             SET public_nonces = ?, partial_signature = ?
-             WHERE signing_session_id = ? AND user_id = ?",
-        )
-        .bind(public_nonces_bytes)
-        .bind(partial_signature_bytes)
-        .bind(signing_session_id.as_string())
-        .bind(user_id.as_str())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
     pub async fn get_keygen_session_id_from_signing_session(
         &self,
         signing_session_id: &SessionId,
@@ -776,7 +777,7 @@ impl Database {
         match row {
             Some(keygen_session_id_str) => {
                 let keygen_session_id = keygen_session_id_str.try_into().map_err(|e| {
-                    ApiError::Serialization(format!("Invalid keygen session ID: {:?}", e))
+                    ApiError::Serialization(format!("Invalid keygen session ID: {e:?}"))
                 })?;
                 Ok(Some(keygen_session_id))
             }
@@ -797,11 +798,10 @@ impl Database {
         debug!("Querying processable keygen sessions - states: {:?}, current_time: {}, max_retries: {}, batch_size: {}, offset: {}",
                active_states.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), current_time, max_retries, batch_size, offset);
 
-        // First, let's see what sessions exist in the database
         let all_sessions = sqlx::query("SELECT keygen_session_id, status_name, expires_at, retry_count FROM keygen_sessions ORDER BY updated_at ASC")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ApiError::database(format!("Failed to fetch all keygen sessions for debugging: {}", e)))?;
+            .map_err(|e| ApiError::database(format!("Failed to fetch all keygen sessions for debugging: {e}")))?;
 
         debug!("Total keygen sessions in database: {}", all_sessions.len());
         for row in all_sessions {
@@ -825,13 +825,12 @@ impl Database {
             r#"
             SELECT keygen_session_id as session_id
             FROM keygen_sessions
-            WHERE status_name IN ({})
+            WHERE status_name IN ({placeholders})
               AND expires_at > ?
               AND retry_count < ?
             ORDER BY updated_at ASC
             LIMIT ? OFFSET ?
-            "#,
-            placeholders
+            "#
         );
 
         debug!("Executing query: {}", query);
@@ -850,8 +849,7 @@ impl Database {
 
         let records = query_builder.fetch_all(&self.pool).await.map_err(|e| {
             ApiError::database(format!(
-                "Failed to fetch processable keygen sessions batch: {}",
-                e
+                "Failed to fetch processable keygen sessions batch: {e}"
             ))
         })?;
 
@@ -884,7 +882,7 @@ impl Database {
             r#"
             SELECT signing_session_id as session_id
             FROM signing_sessions
-            WHERE status_name IN ({})
+            WHERE status_name IN ({placeholders})
               AND expires_at > ?
               AND (processing_started_at IS NULL
                    OR processing_started_at < ? - ?)
@@ -893,8 +891,7 @@ impl Database {
               AND retry_count < ?
             ORDER BY updated_at ASC
             LIMIT ? OFFSET ?
-            "#,
-            placeholders
+            "#
         );
 
         let mut query_builder = sqlx::query_as::<_, ProcessableSessionRecord>(&query);
@@ -914,15 +911,13 @@ impl Database {
 
         let records = query_builder.fetch_all(&self.pool).await.map_err(|e| {
             ApiError::database(format!(
-                "Failed to fetch processable signing sessions batch: {}",
-                e
+                "Failed to fetch processable signing sessions batch: {e}"
             ))
         })?;
 
         Ok(records)
     }
 
-    //TODO(@tee8z): clean up function params
     #[allow(clippy::too_many_arguments)]
     pub async fn update_enclave_health(
         &self,
@@ -1009,6 +1004,23 @@ impl Database {
         Ok(rows)
     }
 
+    pub async fn invalidate_enclave_cache(&self, enclave_id: u32) -> Result<(), ApiError> {
+        // Force cache expiration by setting expires_at to current time
+        let current_time = DbUtils::current_timestamp();
+
+        sqlx::query(
+            "UPDATE enclave_public_keys
+             SET expires_at = ?
+             WHERE enclave_id = ?",
+        )
+        .bind(current_time)
+        .bind(enclave_id as i32)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn approve_signing_session(
         &self,
         signing_session_id: &SessionId,
@@ -1018,7 +1030,7 @@ impl Database {
 
         sqlx::query(
             "INSERT OR REPLACE INTO signing_approvals (
-                signing_session_id, user_id, approved_at, user_hmac_validated, session_hmac_validated
+                signing_session_id, user_id, approved_at, user_signature_validated, session_signature_validated
             ) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(signing_session_id.as_string())
@@ -1032,7 +1044,7 @@ impl Database {
         let mut session_status = self
             .get_signing_session_by_id(signing_session_id)
             .await?
-            .ok_or_else(|| ApiError::not_found("Signing session not found"))?;
+            .ok_or(ApiError::not_found("Signing session not found"))?;
 
         if let SigningSessionStatus::CollectingParticipants(ref mut collecting) = session_status {
             if !collecting.approved_participants.contains(user_id) {
@@ -1061,11 +1073,10 @@ impl Database {
         let mut user_ids = Vec::new();
         for row in rows {
             let user_id_str: String = row.try_get("user_id")?;
-            user_ids.push(
-                UserId::parse(&user_id_str).map_err(|e| {
-                    ApiError::database(format!("Invalid user ID in database: {}", e))
-                })?,
-            );
+            user_ids
+                .push(UserId::parse(&user_id_str).map_err(|e| {
+                    ApiError::database(format!("Invalid user ID in database: {e}"))
+                })?);
         }
 
         Ok(user_ids)
@@ -1086,58 +1097,24 @@ impl Database {
         let mut user_ids = Vec::new();
         for row in rows {
             let user_id_str: String = row.try_get("user_id")?;
-            user_ids.push(
-                UserId::parse(&user_id_str).map_err(|e| {
-                    ApiError::database(format!("Invalid user ID in database: {}", e))
-                })?,
-            );
+            user_ids
+                .push(UserId::parse(&user_id_str).map_err(|e| {
+                    ApiError::database(format!("Invalid user ID in database: {e}"))
+                })?);
         }
 
         Ok(user_ids)
     }
-
-    pub async fn get_user_public_key_from_keygen(
-        &self,
-        keygen_session_id: &SessionId,
-        user_id: &UserId,
-    ) -> Result<Option<Vec<u8>>, ApiError> {
-        let row = sqlx::query(
-            "SELECT session_encrypted_data FROM keygen_participants
-             WHERE keygen_session_id = ? AND user_id = ?",
-        )
-        .bind(keygen_session_id.as_string())
-        .bind(user_id.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(row) = row {
-            let session_encrypted: String = row.get("session_encrypted_data");
-
-            // Deserialize structured data
-            let session_data = serde_json::from_str::<
-                keymeld_core::encrypted_data::KeygenParticipantSessionData,
-            >(&session_encrypted)
-            .map_err(|e| {
-                ApiError::Serialization(format!(
-                    "Failed to deserialize keygen participant session data: {}",
-                    e
-                ))
-            })?;
-
-            Ok(Some(session_data.public_key))
-        } else {
-            Ok(None)
-        }
-    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KeygenParticipantRow {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
     pub enclave_key_epoch: u64,
     pub registered_at: i64,
     pub require_signing_approval: bool,
+    pub auth_pubkey: Vec<u8>,
     pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
 }
@@ -1156,6 +1133,7 @@ impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
         let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
         let registered_at: i64 = row.try_get("registered_at")?;
         let require_signing_approval: bool = row.try_get("require_signing_approval")?;
+        let auth_pubkey: Vec<u8> = row.try_get("auth_pubkey")?;
         let session_encrypted_data: String = row.try_get("session_encrypted_data")?;
         let enclave_encrypted_data: String = row.try_get("enclave_encrypted_data")?;
 
@@ -1165,6 +1143,7 @@ impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
             enclave_key_epoch: enclave_key_epoch_i64 as u64,
             registered_at,
             require_signing_approval,
+            auth_pubkey,
             session_encrypted_data,
             enclave_encrypted_data,
         })
@@ -1177,8 +1156,6 @@ impl From<KeygenParticipantRow> for Option<ParticipantData> {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
             enclave_key_epoch: row.enclave_key_epoch,
-            public_nonces: None,
-            partial_signature: None,
             session_encrypted_data: row.session_encrypted_data,
             enclave_encrypted_data: row.enclave_encrypted_data,
         })
@@ -1191,8 +1168,6 @@ pub struct SigningParticipantRow {
     pub enclave_id: EnclaveId,
     pub enclave_key_epoch: u64,
     pub registered_at: i64,
-    pub public_nonces: Option<Vec<u8>>,
-    pub partial_signature: Option<Vec<u8>>,
     pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
 }
@@ -1210,8 +1185,6 @@ impl FromRow<'_, SqliteRow> for SigningParticipantRow {
 
         let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
         let registered_at: i64 = row.try_get("registered_at")?;
-        let public_nonces_bytes: Option<Vec<u8>> = row.try_get("public_nonces")?;
-        let partial_signature_bytes: Option<Vec<u8>> = row.try_get("partial_signature")?;
         let session_encrypted_data: String = row.try_get("session_encrypted_data")?;
         let enclave_encrypted_data: String = row.try_get("enclave_encrypted_data")?;
 
@@ -1220,8 +1193,6 @@ impl FromRow<'_, SqliteRow> for SigningParticipantRow {
             enclave_id,
             enclave_key_epoch: enclave_key_epoch_i64 as u64,
             registered_at,
-            public_nonces: public_nonces_bytes,
-            partial_signature: partial_signature_bytes,
             session_encrypted_data,
             enclave_encrypted_data,
         })
@@ -1230,42 +1201,10 @@ impl FromRow<'_, SqliteRow> for SigningParticipantRow {
 
 impl From<SigningParticipantRow> for ParticipantData {
     fn from(row: SigningParticipantRow) -> Self {
-        // Deserialize nonces and signatures with proper error handling
-        let public_nonces = row.public_nonces.and_then(|bytes| {
-            match keymeld_core::PubNonce::from_bytes(bytes.as_slice()) {
-                Ok(nonce) => Some(nonce),
-                Err(e) => {
-                    warn!(
-                        "Failed to deserialize public nonce for user {}: {}",
-                        row.user_id, e
-                    );
-                    None
-                }
-            }
-        });
-
-        let partial_signature =
-            row.partial_signature
-                .and_then(|bytes| {
-                    match keymeld_core::PartialSignature::try_from(bytes.as_slice()) {
-                        Ok(signature) => Some(signature),
-                        Err(e) => {
-                            warn!(
-                                "Failed to deserialize partial signature for user {}: {}",
-                                row.user_id, e
-                            );
-                            None
-                        }
-                    }
-                });
-
-        // Use structured encrypted data directly
         ParticipantData {
             user_id: row.user_id,
             enclave_id: row.enclave_id,
             enclave_key_epoch: row.enclave_key_epoch,
-            public_nonces,
-            partial_signature,
             session_encrypted_data: row.session_encrypted_data,
             enclave_encrypted_data: row.enclave_encrypted_data,
         }
@@ -1326,11 +1265,6 @@ pub struct DatabaseStats {
 mod tests {
     use super::*;
     use crate::config::DatabaseConfig;
-    use keymeld_core::{
-        api::{CreateKeygenSessionRequest, RegisterKeygenParticipantRequest},
-        encrypted_data::{KeygenParticipantEnclaveData, KeygenParticipantSessionData},
-        identifiers::{EnclaveId, SessionId, UserId},
-    };
     use tempfile::TempDir;
 
     async fn create_test_db() -> (Database, TempDir) {
@@ -1371,100 +1305,5 @@ mod tests {
         assert_eq!(stats.total_sessions, 0);
         assert_eq!(stats.active_sessions, 0);
         assert_eq!(stats.total_participants, 0);
-    }
-
-    #[tokio::test]
-    async fn test_structured_data_flow() {
-        let (db, _temp_dir) = create_test_db().await;
-
-        // Create a test keygen session
-        let keygen_session_id = SessionId::new_v7();
-        let coordinator_enclave_id = EnclaveId::new(1);
-        let user_id = UserId::new_v7();
-
-        let request = CreateKeygenSessionRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            coordinator_pubkey: vec![
-                2, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2,
-                155, 252, 219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152,
-            ],
-            coordinator_encrypted_private_key: "encrypted_coordinator_key".to_string(),
-            coordinator_enclave_id,
-            expected_participants: vec![user_id.clone()],
-            timeout_secs: 3600,
-            encrypted_session_secret: "encrypted_session_secret".to_string(),
-            max_signing_sessions: Some(10),
-            taproot_tweak_config: keymeld_core::api::TaprootTweak::None,
-        };
-
-        // Create keygen session
-        let session_secret = db.create_keygen_session(&request).await.unwrap();
-        assert_eq!(session_secret, "encrypted_session_secret");
-
-        // Register a participant with structured data
-        let participant_request = RegisterKeygenParticipantRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            user_id: user_id.clone(),
-            encrypted_private_key: "encrypted_private_key".to_string(),
-            public_key: vec![
-                2, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2,
-                155, 252, 219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152,
-            ],
-            require_signing_approval: false,
-        };
-
-        // Create mock encrypted data for testing
-        let session_data =
-            KeygenParticipantSessionData::new(participant_request.public_key.clone());
-        let session_encrypted_json = serde_json::to_string(&session_data).unwrap();
-
-        let enclave_data =
-            KeygenParticipantEnclaveData::new(participant_request.encrypted_private_key.clone());
-        let enclave_json = serde_json::to_string(&enclave_data).unwrap();
-        let enclave_encrypted_hex = hex::encode(enclave_json.as_bytes()); // Mock encryption
-
-        db.register_keygen_participant_with_encrypted_data(
-            &keygen_session_id,
-            &participant_request,
-            coordinator_enclave_id,
-            1,
-            session_encrypted_json,
-            enclave_encrypted_hex,
-        )
-        .await
-        .unwrap();
-
-        // Retrieve participants and verify structured data format
-        let participants = db
-            .get_keygen_participants(&keygen_session_id)
-            .await
-            .unwrap();
-        assert_eq!(participants.len(), 1);
-
-        let participant = &participants[0];
-        assert_eq!(participant.user_id, user_id);
-
-        // Verify structured data is stored and parsed correctly
-        assert!(!participant.session_encrypted_data.is_empty());
-        assert!(!participant.enclave_encrypted_data.is_empty());
-
-        // Verify we can deserialize the session data (stored as JSON)
-        let session_data: KeygenParticipantSessionData =
-            serde_json::from_str(&participant.session_encrypted_data).unwrap();
-        assert_eq!(session_data.public_key, participant_request.public_key);
-
-        // Verify enclave data is hex-encoded (simulating encrypted data)
-        let enclave_hex = &participant.enclave_encrypted_data;
-        assert!(hex::decode(enclave_hex).is_ok());
-
-        // For test purposes, decode the mock "encrypted" data to verify content
-        let decoded_bytes = hex::decode(enclave_hex).unwrap();
-        let decoded_json = String::from_utf8(decoded_bytes).unwrap();
-        let enclave_data: KeygenParticipantEnclaveData =
-            serde_json::from_str(&decoded_json).unwrap();
-        assert_eq!(
-            enclave_data.private_key,
-            participant_request.encrypted_private_key
-        );
     }
 }

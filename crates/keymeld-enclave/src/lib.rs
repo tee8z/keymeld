@@ -6,13 +6,12 @@ use keymeld_core::{
 use tracing::info;
 
 pub mod attestation;
+pub mod operations;
 pub mod operator;
 pub mod server;
-pub mod state;
 
 pub use operator::EnclaveOperator;
-pub use server::run_vsock_server;
-pub use state::OperationState;
+pub use server::run_until_stopped;
 
 pub fn init_enclave_logging() {
     let config = LoggingConfig::enclave_default();
@@ -22,7 +21,7 @@ pub fn init_enclave_logging() {
 pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator> {
     info!("Creating enclave operator for enclave {}", enclave_id);
     EnclaveOperator::new(enclave_id)
-        .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {}", e))
+        .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {e}"))
 }
 
 #[cfg(test)]
@@ -41,12 +40,10 @@ mod tests {
     async fn test_enclave_status() {
         let enclave_id = EnclaveId::new(1);
         let state = create_enclave_operator(enclave_id).unwrap();
-        let (id, ready, pubkey, sessions) = state.get_status().await;
 
-        assert_eq!(id, enclave_id);
-        assert!(ready); // Always ready in dev mode
-        assert!(!pubkey.is_empty());
-        assert_eq!(sessions, 0);
+        assert_eq!(state.enclave_id, enclave_id);
+        assert!(!state.get_public_key().is_empty());
+        assert_eq!(state.sessions.len(), 0);
     }
 
     #[test]

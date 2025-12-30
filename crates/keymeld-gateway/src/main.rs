@@ -3,7 +3,7 @@ use config::Config;
 use keymeld_core::logging::{init_logging, LoggingConfig};
 use startup::Application;
 use std::env;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 mod config;
 mod coordinator;
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         config
             .validate_production_readiness()
             .context("Configuration failed production readiness validation")?;
-        tracing::debug!("Production readiness validation passed");
+        debug!("Production readiness validation passed");
     } else if !config.is_safe_for_environment() {
         warn!(
             "Configuration may not be safe for current environment: {:?}",

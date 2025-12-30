@@ -9,8 +9,8 @@ license = "MIT"
 [dependencies]
 keymeld-core = { path = "../keymeld-core", features = ["enclave"] }
 musig2 = { version = "0.3.1", features = ["secp256k1", "rand", "serde"] }
+bitcoin = { version = "0.32", features = ["serde", "rand", "std"] }
 sha2 = { version = "0.10", default-features = false }
-hmac = "0.12.1"
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5.2" }
 hyper = "1.7.0"
@@ -41,7 +41,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 log = "0.4.22"
 time = { version = "0.3", features = ["serde", "macros", "formatting"] }
 reqwest = { version = "0.12.9", features = ["json", "rustls-tls"] }
-uuid = { version = "1.11", features = ["v7"] }
+uuid = { version = "1.11", features = ["v7", "serde"] }
 dashmap = "5.5.3"
 lazy_static = "1.4"
 

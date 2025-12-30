@@ -20,6 +20,7 @@ pub struct KeygenCollectingParticipants {
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
     pub coordinator_encrypted_private_key: String,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
@@ -37,6 +38,7 @@ pub struct KeygenCompleted {
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
     pub coordinator_encrypted_private_key: String,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
@@ -62,6 +64,7 @@ impl KeygenCompleted {
             keygen_session_id: collecting.keygen_session_id,
             coordinator_pubkey: collecting.coordinator_pubkey,
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
+            session_public_key: collecting.session_public_key,
             encrypted_session_secret: collecting.encrypted_session_secret,
             coordinator_enclave_id: collecting.coordinator_enclave_id,
             expected_participants: collecting.expected_participants,
@@ -82,6 +85,7 @@ pub struct KeygenFailed {
     #[schema(value_type = String)]
     pub coordinator_pubkey: Option<PublicKey>,
     pub coordinator_encrypted_private_key: Option<String>,
+    pub session_public_key: Option<Vec<u8>>,
     pub coordinator_enclave_id: Option<EnclaveId>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
@@ -100,6 +104,10 @@ pub enum KeygenSessionStatus {
 }
 
 impl KeygenSessionStatus {
+    pub fn active_states() -> Vec<KeygenStatusKind> {
+        vec![KeygenStatusKind::CollectingParticipants]
+    }
+
     pub fn extract_status_info(
         &self,
     ) -> (KeygenStatusKind, usize, Option<AggregatePublicKey>, u64) {
@@ -176,7 +184,7 @@ impl KeygenSessionStatus {
             KeygenSessionStatus::Completed(ref mut completed) => {
                 &mut completed.registered_participants
             }
-            _ => return, // No participant data to merge for Failed state
+            _ => return,
         };
 
         for (user_id, fresh_participant) in fresh_participants {
@@ -210,7 +218,7 @@ impl KeygenSessionStatus {
             KeygenSessionStatus::Completed(ref mut completed) => {
                 &mut completed.registered_participants
             }
-            _ => return Ok(()), // No participant data to merge for Failed state
+            _ => return Ok(()),
         };
 
         validation::merge_participants(participants, fresh_participants)
@@ -219,8 +227,8 @@ impl KeygenSessionStatus {
     pub fn is_expired(&self) -> bool {
         let expires_at = match self {
             KeygenSessionStatus::CollectingParticipants(collecting) => collecting.expires_at,
-            KeygenSessionStatus::Completed(_) => return false, // Completed sessions don't expire
-            KeygenSessionStatus::Failed(_) => return false,    // Failed sessions don't expire
+            KeygenSessionStatus::Completed(_) => return false,
+            KeygenSessionStatus::Failed(_) => return false,
         };
 
         validation::is_expired(expires_at)

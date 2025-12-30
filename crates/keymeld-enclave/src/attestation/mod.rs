@@ -1,11 +1,14 @@
 pub mod nsm;
 
-use anyhow::Result;
+use keymeld_core::enclave::{AttestationError, DataDecodingError, EnclaveError, InternalError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tracing::{debug, warn};
+use tracing::warn;
 
-pub use nsm::{AttestationDocument, KeyMeldAttestation, NsmClient};
+pub use keymeld_core::AttestationDocument;
+pub use nsm::{KeyMeldAttestation, NsmClient};
+
+type Result<T> = std::result::Result<T, EnclaveError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationConfig {
@@ -20,7 +23,7 @@ impl Default for AttestationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_age_seconds: 300, // 5 minutes
+            max_age_seconds: 300,
             required_pcrs: BTreeMap::new(),
             allow_debug_mode: false,
             generate_attestations: true,
@@ -54,20 +57,16 @@ impl AttestationManager {
     pub fn new(config: AttestationConfig) -> Result<Self> {
         let nsm_client = if config.enabled {
             match NsmClient::new() {
-                Ok(client) => {
-                    debug!("NSM client initialized successfully");
-                    Some(client)
-                }
+                Ok(client) => Some(client),
                 Err(e) => {
                     warn!("Failed to initialize NSM client: {}", e);
                     if config.generate_attestations {
-                        return Err(e);
+                        return Err(e.into());
                     }
                     None
                 }
             }
         } else {
-            debug!("Attestation disabled by configuration");
             None
         };
 
@@ -78,8 +77,8 @@ impl AttestationManager {
         };
 
         if is_debug_mode && !config.allow_debug_mode {
-            return Err(anyhow::anyhow!(
-                "Running in debug mode but debug attestations are not allowed"
+            return Err(EnclaveError::Attestation(
+                AttestationError::DebugModeNotAllowed,
             ));
         }
 
@@ -96,14 +95,13 @@ impl AttestationManager {
         enclave_public_key: Option<&[u8]>,
     ) -> Result<Option<KeyMeldAttestation>> {
         if !self.config.enabled || !self.config.generate_attestations {
-            debug!("Attestation generation disabled");
             return Ok(None);
         }
 
         let nsm_client = self
             .nsm_client
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("NSM client not initialized"))?;
+            .ok_or(EnclaveError::Internal(InternalError::NsmNotInitialized))?;
 
         if self.is_debug_mode {
             warn!(
@@ -114,18 +112,11 @@ impl AttestationManager {
 
         let attestation = KeyMeldAttestation::generate(nsm_client, session_id, enclave_public_key)?;
 
-        debug!(
-            "Generated attestation for session {} with {} PCRs",
-            session_id,
-            attestation.parsed.pcrs.len()
-        );
-
         Ok(Some(attestation))
     }
 
     pub fn verify_attestation(&self, attestation: &KeyMeldAttestation) -> Result<bool> {
         if !self.config.enabled {
-            debug!("Attestation verification disabled");
             return Ok(true);
         }
 
@@ -142,9 +133,7 @@ impl AttestationManager {
 
             for (pcr_name, expected_hex) in &self.config.required_pcrs {
                 match pcr_hex_values.get(pcr_name) {
-                    Some(actual_hex) if actual_hex == expected_hex => {
-                        debug!("PCR {} verification passed", pcr_name);
-                    }
+                    Some(actual_hex) if actual_hex == expected_hex => {}
                     Some(actual_hex) => {
                         warn!(
                             "PCR {} verification failed. Expected: {}, Actual: {}",
@@ -165,10 +154,7 @@ impl AttestationManager {
             return Ok(false);
         }
 
-        debug!(
-            "Attestation verification passed for session {}",
-            attestation.session_id()
-        );
+        // Attestation verification passed
         Ok(true)
     }
 
@@ -176,9 +162,9 @@ impl AttestationManager {
         let nsm_client = self
             .nsm_client
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("NSM client not initialized"))?;
+            .ok_or(EnclaveError::Internal(InternalError::NsmNotInitialized))?;
 
-        nsm_client.get_random(num_bytes)
+        nsm_client.get_random(num_bytes).map_err(Into::into)
     }
 
     pub fn is_debug_mode(&self) -> bool {
@@ -204,7 +190,7 @@ impl AttestationManager {
         let nsm_client = self
             .nsm_client
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("NSM client not initialized"))?;
+            .ok_or(EnclaveError::Internal(InternalError::NsmNotInitialized))?;
 
         let user_data_buf = user_data.map(|data| data.to_vec());
 
@@ -235,8 +221,11 @@ pub mod utils {
         let mut byte_values = BTreeMap::new();
 
         for (pcr_name, hex_value) in hex_values {
-            let bytes = hex::decode(hex_value)
-                .map_err(|e| anyhow::anyhow!("Invalid hex for {pcr_name}: {e}"))?;
+            let bytes = hex::decode(hex_value).map_err(|e| {
+                EnclaveError::DataDecoding(DataDecodingError::HexDecode(format!(
+                    "Invalid hex for {pcr_name}: {e}"
+                )))
+            })?;
             byte_values.insert(pcr_name.clone(), bytes);
         }
 
@@ -244,8 +233,10 @@ pub mod utils {
     }
 
     pub fn parse_build_measurements(measurements_json: &str) -> Result<BTreeMap<String, String>> {
-        let measurements: serde_json::Value = serde_json::from_str(measurements_json)
-            .map_err(|e| anyhow::anyhow!("Failed to parse measurements JSON: {e}"))?;
+        let measurements: serde_json::Value =
+            serde_json::from_str(measurements_json).map_err(|e| {
+                EnclaveError::Attestation(AttestationError::MeasurementParsing(format!("{e}")))
+            })?;
 
         let mut pcr_values = BTreeMap::new();
 
@@ -266,10 +257,11 @@ pub mod utils {
     pub fn validate_pcr_format(pcrs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
         for (pcr_name, pcr_value) in pcrs {
             if pcr_value.len() != 48 {
-                return Err(anyhow::anyhow!(
-                    "{} has invalid length: expected 48 bytes, got {}",
-                    pcr_name,
-                    pcr_value.len()
+                return Err(EnclaveError::Attestation(
+                    AttestationError::InvalidPcrLength {
+                        pcr_name: pcr_name.clone(),
+                        actual: pcr_value.len(),
+                    },
                 ));
             }
         }
@@ -331,8 +323,8 @@ mod tests {
     #[test]
     fn test_validate_pcr_format() {
         let mut pcrs = BTreeMap::new();
-        pcrs.insert("PCR0".to_string(), vec![0u8; 48]); // Valid
-        pcrs.insert("PCR1".to_string(), vec![0u8; 32]); // Invalid length
+        pcrs.insert("PCR0".to_string(), vec![0u8; 48]);
+        pcrs.insert("PCR1".to_string(), vec![0u8; 32]);
 
         let result = utils::validate_pcr_format(&pcrs);
         assert!(result.is_err());

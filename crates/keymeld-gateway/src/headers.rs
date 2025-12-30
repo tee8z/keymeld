@@ -1,22 +1,22 @@
 use axum_extra::headers::{Header, HeaderName, HeaderValue};
 use std::fmt;
 
-/// For session-based authentication using session secrets
-/// Custom header for session HMAC authentication
-/// Format: "nonce:hmac"
-/// Where HMAC is computed using the session secret
+/// For session-based authentication using seed-derived key pairs
+/// Custom header for session signature authentication
+/// Format: "nonce:signature"
+/// Where signature is ECDSA signature of "session_id:nonce" using seed-derived private key
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionHmac(pub String);
+pub struct SessionSignature(pub String);
 
-impl SessionHmac {
+impl SessionSignature {
     pub fn value(&self) -> &str {
         &self.0
     }
 }
 
-impl Header for SessionHmac {
+impl Header for SessionSignature {
     fn name() -> &'static HeaderName {
-        &SESSION_HMAC_HEADER
+        &SESSION_SIGNATURE_HEADER
     }
 
     fn decode<'i, I>(values: &mut I) -> Result<Self, axum_extra::headers::Error>
@@ -27,10 +27,11 @@ impl Header for SessionHmac {
         let value = values
             .next()
             .ok_or_else(axum_extra::headers::Error::invalid)?;
-        let s = value
+        let signature_str = value
             .to_str()
             .map_err(|_| axum_extra::headers::Error::invalid())?;
-        Ok(SessionHmac(s.to_string()))
+
+        Ok(SessionSignature(signature_str.to_string()))
     }
 
     fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
@@ -40,28 +41,28 @@ impl Header for SessionHmac {
     }
 }
 
-impl fmt::Display for SessionHmac {
+impl fmt::Display for SessionSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 /// For user-based authentication using user private keys (signing operations)
-/// Custom header for user HMAC authentication (signing operations)
-/// Format: "user_id:nonce:signature"
-/// Where signature is created with the user's private key
+/// Custom header for user signature authentication (signing operations)
+/// Format: "nonce:signature"
+/// Where signature is ECDSA signature over SHA256("signing_session_id:user_id:nonce") created with the user's private key
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SigningHmac(pub String);
+pub struct UserSignature(pub String);
 
-impl SigningHmac {
+impl UserSignature {
     pub fn value(&self) -> &str {
         &self.0
     }
 }
 
-impl Header for SigningHmac {
+impl Header for UserSignature {
     fn name() -> &'static HeaderName {
-        &SIGNING_HMAC_HEADER
+        &USER_SIGNATURE_HEADER
     }
 
     fn decode<'i, I>(values: &mut I) -> Result<Self, axum_extra::headers::Error>
@@ -75,7 +76,7 @@ impl Header for SigningHmac {
         let s = value
             .to_str()
             .map_err(|_| axum_extra::headers::Error::invalid())?;
-        Ok(SigningHmac(s.to_string()))
+        Ok(UserSignature(s.to_string()))
     }
 
     fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
@@ -85,11 +86,11 @@ impl Header for SigningHmac {
     }
 }
 
-impl fmt::Display for SigningHmac {
+impl fmt::Display for UserSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-static SESSION_HMAC_HEADER: HeaderName = HeaderName::from_static("x-session-hmac");
-static SIGNING_HMAC_HEADER: HeaderName = HeaderName::from_static("x-signing-hmac");
+static SESSION_SIGNATURE_HEADER: HeaderName = HeaderName::from_static("x-session-signature");
+static USER_SIGNATURE_HEADER: HeaderName = HeaderName::from_static("x-user-signature");

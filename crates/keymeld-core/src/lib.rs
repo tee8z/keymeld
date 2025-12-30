@@ -1,14 +1,22 @@
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
-use thiserror::Error;
-pub use tracing::{debug, error, info, warn};
-
+use crate::enclave::EnclaveManager;
+pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
+pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
+use musig::MusigError;
 pub use musig2::{
     secp256k1::PublicKey, AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext,
     PartialSignature, PubNonce, SecNonce, SecondRound,
 };
+use serde::{Deserialize, Serialize};
+pub use session::{
+    KeygenCollectingParticipants, KeygenCompleted, KeygenFailed, KeygenSessionStatus,
+    KeygenStatusKind, ParticipantData, SigningCollectingParticipants, SigningSessionFull,
+    SigningSessionStatus, SigningStatusKind,
+};
+use std::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
+use thiserror::Error;
+pub use tracing::{debug, error, info, warn};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// Type alias for cleaner API - aggregate public key as raw bytes for serialization
 pub type AggregatePublicKey = Vec<u8>;
 
 pub mod api;
@@ -18,37 +26,20 @@ pub mod encrypted_data;
 pub mod identifiers;
 pub mod logging;
 pub mod musig;
+
 pub mod resilience;
 pub mod session;
-
-use musig::MusigError;
-
-pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
-pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
-pub use session::{
-    KeygenCollectingParticipants, KeygenCompleted, KeygenFailed, KeygenSessionStatus,
-    KeygenStatusKind, ParticipantData, SigningCollectingParticipants, SigningSessionFull,
-    SigningSessionStatus, SigningStatusKind,
-};
 
 #[derive(Error, Debug)]
 pub enum KeyMeldError {
     #[error("Invalid enclave configuration: {0}")]
     InvalidConfiguration(String),
-    #[error("Key distribution error: {0}")]
-    DistributionError(String),
     #[error("MuSig2 protocol error: {0}")]
     MuSigError(String),
     #[error("Enclave communication error: {0}")]
     EnclaveError(String),
-    #[error("Key not found for user: {0}")]
-    KeyNotFound(String),
-    #[error("Session {0} would exceed enclave capacity")]
-    SessionTooLarge(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
-
-    // Specific crypto errors
     #[error("Random number generation failed")]
     RandomGenerationError(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("Time operation failed")]
@@ -63,12 +54,6 @@ pub enum KeyMeldError {
     HexDecodeError(#[source] hex::FromHexError),
     #[error("Invalid cryptographic key")]
     InvalidKey(#[source] secp256k1::Error),
-    #[error("HMAC operation failed: {0}")]
-    HmacError(String),
-    #[error("Attestation verification failed: {0}")]
-    AttestationError(String),
-
-    // Generic fallback for other crypto errors
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
     #[error("Invalid state: {0}")]
@@ -89,13 +74,37 @@ pub trait Advanceable<T>: Send {
         Self: 'async_trait;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationDocument {
     pub pcrs: BTreeMap<String, Vec<u8>>,
     pub timestamp: u64,
     pub certificate: Vec<u8>,
     pub signature: Vec<u8>,
+    pub user_data: Option<Vec<u8>>,
+    pub public_key: Option<Vec<u8>>,
 }
+
+impl Zeroize for AttestationDocument {
+    fn zeroize(&mut self) {
+        for (_, pcr_value) in self.pcrs.iter_mut() {
+            pcr_value.zeroize();
+        }
+        self.pcrs.clear();
+
+        self.timestamp = 0;
+        self.certificate.zeroize();
+        self.signature.zeroize();
+
+        if let Some(ref mut user_data) = self.user_data {
+            user_data.zeroize();
+        }
+        if let Some(ref mut public_key) = self.public_key {
+            public_key.zeroize();
+        }
+    }
+}
+
+impl ZeroizeOnDrop for AttestationDocument {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -104,5 +113,3 @@ pub struct HealthStatus {
     pub active_enclaves: Vec<EnclaveId>,
     pub version: String,
 }
-
-use crate::enclave::EnclaveManager;
