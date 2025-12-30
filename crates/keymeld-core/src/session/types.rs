@@ -2,7 +2,7 @@ use crate::{
     identifiers::{EnclaveId, UserId},
     KeyMeldError,
 };
-use musig2::{PartialSignature, PubNonce};
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use utoipa::ToSchema;
@@ -13,10 +13,6 @@ pub struct ParticipantData {
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
     pub enclave_key_epoch: u64,
-    #[schema(value_type = String)]
-    pub public_nonces: Option<PubNonce>,
-    #[schema(value_type = String)]
-    pub partial_signature: Option<PartialSignature>,
     pub session_encrypted_data: String,
     pub enclave_encrypted_data: String,
 }
@@ -27,8 +23,6 @@ impl fmt::Debug for ParticipantData {
             .field("user_id", &self.user_id)
             .field("enclave_id", &self.enclave_id)
             .field("enclave_key_epoch", &self.enclave_key_epoch)
-            .field("public_nonces", &self.public_nonces)
-            .field("partial_signature", &self.partial_signature)
             .field("session_encrypted_data", &"[REDACTED]")
             .field("enclave_encrypted_data", &"[REDACTED]")
             .finish()
@@ -47,8 +41,7 @@ impl ParticipantData {
             user_id,
             enclave_id,
             enclave_key_epoch,
-            public_nonces: None,
-            partial_signature: None,
+
             session_encrypted_data,
             enclave_encrypted_data,
         }

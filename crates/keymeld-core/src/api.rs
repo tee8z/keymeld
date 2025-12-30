@@ -8,16 +8,22 @@ use serde_json;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+use crate::musig::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateKeygenSessionRequest {
     pub keygen_session_id: SessionId,
+    pub coordinator_user_id: UserId,
     pub coordinator_pubkey: Vec<u8>,
     pub coordinator_encrypted_private_key: String,
     pub coordinator_enclave_id: EnclaveId,
     pub expected_participants: Vec<UserId>,
     pub timeout_secs: u64,
+    pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
+    pub encrypted_session_data: String,
+    pub encrypted_enclave_data: String,
     pub max_signing_sessions: Option<u32>,
     #[serde(default)]
     pub taproot_tweak_config: TaprootTweak,
@@ -49,17 +55,20 @@ pub struct CreateKeygenSessionResponse {
     pub expires_at: u64,
     pub enclave_epochs: HashMap<EnclaveId, u64>,
     pub session_secret: String,
+    pub session_public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub struct RegisterKeygenParticipantRequest {
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
     pub encrypted_private_key: String,
     pub public_key: Vec<u8>,
+    pub encrypted_session_data: String,
+    pub enclave_public_key: String,
     #[serde(default)]
     pub require_signing_approval: bool,
+    pub auth_pubkey: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -95,6 +104,8 @@ pub struct CreateSigningSessionRequest {
     pub message_hash: Vec<u8>,
     pub encrypted_message: Option<String>,
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub encrypted_adaptor_configs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -123,6 +134,8 @@ pub struct SigningSessionStatusResponse {
     /// Participants who have already provided their approval
     #[serde(default)]
     pub approved_participants: Vec<UserId>,
+    #[serde(default)]
+    pub adaptor_signatures: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -304,11 +317,11 @@ pub mod validation {
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
         let encrypted_data = EncryptedData::from_hex_json(encrypted_signature_hex)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {}", e)))?;
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
 
         SecureCrypto::decrypt_signature_data(
             &serde_json::to_value(&encrypted_data).map_err(|e| {
-                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {}", e))
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
             })?,
             session_secret,
         )
@@ -319,11 +332,11 @@ pub mod validation {
         session_secret: &str,
     ) -> Result<String, KeyMeldError> {
         let encrypted_data = EncryptedData::from_hex_json(encrypted_message_hex)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {}", e)))?;
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
 
         let decrypted_bytes = SecureCrypto::decrypt_message_data(
             &serde_json::to_value(&encrypted_data).map_err(|e| {
-                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {}", e))
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
             })?,
             session_secret,
         )?;
@@ -332,28 +345,24 @@ pub mod validation {
             .map_err(|e| KeyMeldError::CryptoError(format!("Invalid UTF-8: {e}")))
     }
 
-    pub fn validate_session_hmac(
+    pub fn validate_session_signature(
         session_id: &str,
-        user_id: &str,
-        provided_hmac: &str,
-        session_secret: &str,
+        signature_header: &str,
+        session_public_key: &[u8],
     ) -> Result<(), KeyMeldError> {
-        SecureCrypto::validate_session_hmac(session_id, user_id, provided_hmac, session_secret)
-    }
+        let (nonce, signature_hex) =
+            signature_header
+                .split_once(':')
+                .ok_or(KeyMeldError::ValidationError(
+                    "Invalid signature format, expected 'nonce:signature'".to_string(),
+                ))?;
 
-    pub fn generate_registration_hmac(
-        data: &str,
-        session_secret: &str,
-    ) -> Result<String, KeyMeldError> {
-        SecureCrypto::generate_registration_hmac(data, session_secret)
-    }
-
-    pub fn validate_user_hmac(
-        user_id: &str,
-        user_hmac: &str,
-        user_public_key: &[u8],
-    ) -> Result<(), KeyMeldError> {
-        SecureCrypto::validate_user_hmac(user_id, user_hmac, user_public_key)
+        SecureCrypto::validate_session_signature(
+            session_id,
+            nonce,
+            signature_hex,
+            session_public_key,
+        )
     }
 
     pub fn validate_create_keygen_session_request(
@@ -378,6 +387,12 @@ pub mod validation {
             "Expected participants",
         )?;
         Validator::validate_timeout_range(Some(request.timeout_secs))?;
+        Validator::validate_vec_length(
+            &request.session_public_key,
+            Some(33),
+            Some(65),
+            "Session public key",
+        )?;
         Validator::validate_non_empty_string(
             &request.encrypted_session_secret,
             "Encrypted session secret",
@@ -387,14 +402,17 @@ pub mod validation {
 
     pub fn validate_register_keygen_participant_request(
         request: &RegisterKeygenParticipantRequest,
-        session_hmac: &str,
+        session_signature: &str,
     ) -> Result<(), KeyMeldError> {
         Validator::validate_non_empty_string(
             &request.encrypted_private_key,
             "Encrypted private key",
         )?;
-        Validator::validate_vec_length(&request.public_key, Some(33), Some(65), "Public key")?;
-        Validator::validate_non_empty_string(session_hmac, "Session HMAC")?;
+        Validator::validate_non_empty_string(
+            &request.encrypted_session_data,
+            "Encrypted session data",
+        )?;
+        Validator::validate_non_empty_string(session_signature, "Session signature")?;
         Ok(())
     }
 
@@ -406,6 +424,261 @@ pub mod validation {
             Validator::validate_non_empty_string(encrypted_message, "Encrypted message")?;
         }
         Validator::validate_timeout_range(Some(request.timeout_secs))?;
+
+        if !request.encrypted_adaptor_configs.is_empty() {
+            Validator::validate_non_empty_string(
+                &request.encrypted_adaptor_configs,
+                "Encrypted adaptor configs",
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn decrypt_adaptor_configs(
+        encrypted_configs_hex: &str,
+        session_secret: &str,
+    ) -> Result<Vec<AdaptorConfig>, KeyMeldError> {
+        if encrypted_configs_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_configs_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
+
+        let decrypted_bytes = SecureCrypto::decrypt_adaptor_configs(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
+            })?,
+            session_secret,
+        )?;
+
+        serde_json::from_slice(&decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to deserialize adaptor configs: {e}"))
+        })
+    }
+
+    pub fn encrypt_adaptor_configs_for_client(
+        configs: &[AdaptorConfig],
+        session_secret: &str,
+    ) -> Result<String, KeyMeldError> {
+        if configs.is_empty() {
+            return Ok(String::new());
+        }
+
+        let serialized = serde_json::to_vec(configs).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to serialize adaptor configs: {e}"))
+        })?;
+
+        let encrypted_data = SecureCrypto::encrypt_adaptor_configs(&serialized, session_secret)?;
+
+        encrypted_data
+            .to_hex_json()
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to encode to hex JSON: {e}")))
+    }
+
+    pub fn validate_decrypted_adaptor_configs(
+        configs: &[AdaptorConfig],
+    ) -> Result<(), KeyMeldError> {
+        for config in configs {
+            match config.adaptor_type {
+                AdaptorType::Single => {
+                    if config.adaptor_points.len() != 1 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Single adaptor requires exactly 1 point".to_string(),
+                        ));
+                    }
+                }
+                AdaptorType::And => {
+                    if config.adaptor_points.len() < 2 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "And adaptor requires at least 2 points".to_string(),
+                        ));
+                    }
+                }
+                AdaptorType::Or => {
+                    if config.adaptor_points.len() < 2 {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Or adaptor requires at least 2 points".to_string(),
+                        ));
+                    }
+                    if config.hints.is_none() {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Or adaptor requires hints".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            for point_hex in &config.adaptor_points {
+                if point_hex.len() != 66 {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Adaptor point must be 66 hex characters (33 bytes compressed secp256k1)"
+                            .to_string(),
+                    ));
+                }
+
+                let point_bytes = match hex::decode(point_hex) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Err(KeyMeldError::InvalidConfiguration(
+                            "Adaptor point must be valid hex".to_string(),
+                        ))
+                    }
+                };
+
+                if point_bytes[0] != 0x02 && point_bytes[0] != 0x03 {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Adaptor point must be a valid compressed secp256k1 point".to_string(),
+                    ));
+                }
+            }
+
+            if let Some(hints) = &config.hints {
+                for hint in hints {
+                    match hint {
+                        AdaptorHint::Scalar(bytes) => {
+                            if bytes.len() != 32 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Scalar hint must be 32 bytes".to_string(),
+                                ));
+                            }
+                        }
+                        AdaptorHint::Point(bytes) => {
+                            if bytes.len() != 33 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Point hint must be 33 bytes".to_string(),
+                                ));
+                            }
+                            if bytes[0] != 0x02 && bytes[0] != 0x03 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Point hint must be a valid compressed secp256k1 point"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        AdaptorHint::Hash(bytes) => {
+                            if bytes.len() != 32 {
+                                return Err(KeyMeldError::InvalidConfiguration(
+                                    "Hash hint must be 32 bytes".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn decrypt_adaptor_signatures_with_secret(
+        encrypted_signatures_hex: &str,
+        session_secret: &str,
+    ) -> Result<Vec<AdaptorSignatureResult>, KeyMeldError> {
+        if encrypted_signatures_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_signatures_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
+
+        let decrypted_bytes = SecureCrypto::decrypt_adaptor_signatures(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
+            })?,
+            session_secret,
+        )?;
+
+        serde_json::from_slice(&decrypted_bytes).map_err(|e| {
+            KeyMeldError::CryptoError(format!("Failed to deserialize adaptor signatures: {e}"))
+        })
+    }
+
+    pub fn encrypt_session_data(data: &str, session_secret: &str) -> Result<String, KeyMeldError> {
+        let encrypted_data = SecureCrypto::encrypt_session_data(data, session_secret)?;
+        encrypted_data
+            .to_hex_json()
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to encode hex JSON: {e}")))
+    }
+
+    pub fn decrypt_session_data(
+        encrypted_data_hex: &str,
+        session_secret: &str,
+    ) -> Result<String, KeyMeldError> {
+        if encrypted_data_hex.is_empty() {
+            return Ok(String::new());
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_data_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
+
+        SecureCrypto::decrypt_session_data(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
+            })?,
+            session_secret,
+        )
+    }
+
+    pub fn encrypt_structured_data_with_session_key<T: serde::Serialize>(
+        data: &T,
+        session_secret: &str,
+        context: &str,
+    ) -> Result<String, KeyMeldError> {
+        let encrypted_data =
+            SecureCrypto::encrypt_structured_data_with_session_key(data, session_secret, context)?;
+        encrypted_data
+            .to_hex_json()
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to encode hex JSON: {e}")))
+    }
+
+    pub fn decrypt_structured_data_with_session_key<T: serde::de::DeserializeOwned>(
+        encrypted_data_hex: &str,
+        session_secret: &str,
+        context: &str,
+    ) -> Result<T, KeyMeldError> {
+        if encrypted_data_hex.is_empty() {
+            return Err(KeyMeldError::CryptoError(
+                "Empty encrypted data".to_string(),
+            ));
+        }
+
+        let encrypted_data = EncryptedData::from_hex_json(encrypted_data_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex JSON: {e}")))?;
+
+        SecureCrypto::decrypt_structured_data_with_session_key(
+            &serde_json::to_value(&encrypted_data).map_err(|e| {
+                KeyMeldError::CryptoError(format!("Failed to serialize encrypted data: {e}"))
+            })?,
+            session_secret,
+            context,
+        )
+    }
+
+    pub fn encrypt_structured_data_with_enclave_key<T: serde::Serialize>(
+        data: &T,
+        enclave_public_key_hex: &str,
+    ) -> Result<String, KeyMeldError> {
+        let encrypted_bytes =
+            SecureCrypto::encrypt_structured_data_with_enclave_key(data, enclave_public_key_hex)?;
+        Ok(hex::encode(encrypted_bytes))
+    }
+
+    pub fn decrypt_structured_data_with_enclave_key<T: serde::de::DeserializeOwned>(
+        encrypted_data_hex: &str,
+        enclave_private_key: &secp256k1::SecretKey,
+    ) -> Result<T, KeyMeldError> {
+        if encrypted_data_hex.is_empty() {
+            return Err(KeyMeldError::CryptoError(
+                "Empty encrypted data".to_string(),
+            ));
+        }
+
+        let encrypted_bytes = hex::decode(encrypted_data_hex)
+            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to decode hex: {e}")))?;
+
+        SecureCrypto::decrypt_structured_data_with_enclave_key(
+            &encrypted_bytes,
+            enclave_private_key,
+        )
     }
 }

@@ -48,7 +48,15 @@ KeyMeld's approach involves several security trade-offs compared to purely local
 - **Insurance payouts**: Multi-party approval for claim settlements
 - **Escrow services**: Trustless multi-party transaction coordination
 
-## Quick Start
+### Prerequisites
+
+- **Nix**: Package manager with reproducible builds
+  ```bash
+  curl -L https://nixos.org/nix/install | sh
+  ```
+- All other dependencies handled automatically by Nix
+
+### Setup
 
 ```bash
 git clone https://github.com/tee8z/keymeld.git
@@ -56,19 +64,42 @@ cd keymeld
 just quickstart
 ```
 
-### Prerequisites
+> 💡 **Why Nix?** Fast incremental builds (10-30s), reproducible environments, and deterministic AWS Enclave deployments. See [docs/SETUP.md](docs/SETUP.md) for detailed development guide and [docs/VSOCK.md](docs/VSOCK.md) for VSock architecture.
 
-- **Docker & Docker Compose**: For running AWS Nitro Enclave simulation
-- **Just**: Command runner (`cargo install just`)
+## Quick Start
 
-### Setup
+**Regular MuSig2:**
+```bash
+git clone https://github.com/tee8z/keymeld.git
+cd keymeld
+just quickstart     # Complete setup + demo
+```
 
-1. **Clone and run**:
-   ```bash
-   git clone https://github.com/tee8z/keymeld.git
-   cd keymeld
-   just quickstart  # Complete end-to-end demo with Bitcoin regtest
-   ```
+**Adaptor Signatures:**
+```bash
+git clone https://github.com/tee8z/keymeld.git
+cd keymeld
+just quickstart     # Setup services first
+just demo-adaptors  # Run adaptor signatures demo
+```
+
+**Development Workflow:**
+```bash
+just help           # Show all commands
+just start          # Start services  
+just demo           # Run MuSig2 demo
+just demo-adaptors  # Run adaptor signatures demo
+just stop           # Stop services
+just status         # Check service health
+just dev            # Enter Nix development shell
+```
+
+**AWS Deployment:**
+```bash
+just build-eif      # [CI/CD] Build Nitro Enclave image
+just deploy-aws     # [Production] Deploy to AWS with auto CID discovery
+just gateway-aws    # [Production] Start gateway
+```
 
 ## Architecture
 
@@ -76,6 +107,7 @@ just quickstart
 - **Enclaves**: Isolated key operations using ECIES encryption
 - **Session Coordinator**: Automatic advancement through MuSig2 states
 - **Database**: SQLite storage for encrypted session data
+- **Session-Specific Auth**: HKDF-derived authentication keys for scalable, privacy-preserving authorization
 
 ## 2-Phase MuSig2 Workflow
 
@@ -93,6 +125,133 @@ AggregatingNonces → GeneratingPartialSignatures → CollectingPartialSignature
 FinalizingSignature → Completed (signed transaction ready)
 ```
 
+## Adaptor Signatures 🔐
+
+KeyMeld supports **adaptor signatures** alongside regular MuSig2 signing, enabling advanced smart contract patterns, atomic swaps, and conditional payments. Adaptor signatures encrypt MuSig2 signatures with adaptor points, allowing secret recovery when signatures are revealed.
+
+### Core Concept
+
+Adaptor signatures bind MuSig2 signatures to cryptographic secrets:
+- **Adaptor Point (T)**: `T = t*G` where `t` is the secret and `G` is the generator
+- **Adapted Signature**: Regular signature encrypted with the adaptor point
+- **Secret Recovery**: When the signature is revealed, the secret `t` can be recovered
+
+### Supported Adaptor Types
+
+**Single Adaptor** (`AdaptorType::Single`)
+- Basic adaptor with one secret point
+- Use case: Simple conditional payments, basic smart contracts
+```json
+{
+  "adaptor_type": "Single",
+  "adaptor_points": ["02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"],
+  "hints": null
+}
+```
+
+**"And" Adaptor** (`AdaptorType::And`)
+- Multiple secrets required (all must be known)
+- Use case: Multi-condition contracts, complex escrow
+```json
+{
+  "adaptor_type": "And",
+  "adaptor_points": [
+    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+    "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34"
+  ],
+  "hints": null
+}
+```
+
+**"Or" Adaptor** (`AdaptorType::Or`)
+- Alternative secrets (any one works)
+- Use case: Payment channels, atomic swaps with alternatives
+```json
+{
+  "adaptor_type": "Or",
+  "adaptor_points": [
+    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+    "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34"
+  ],
+  "hints": ["hint1", "hint2"]
+}
+```
+
+### Zero-Knowledge Privacy
+
+KeyMeld maintains **zero-knowledge privacy** for adaptor signatures:
+- **Client-side encryption**: All adaptor configurations encrypted before sending to gateway
+- **Gateway blindness**: Gateway never sees adaptor IDs, business logic, or contract details
+- **Session secret isolation**: Each session uses unique encryption keys
+- **Automatic processing**: Adaptor signatures generated automatically after regular MuSig2 completion
+
+### Adaptor Signatures API Flow
+
+#### 1. Enhanced Signing Session Creation
+Regular MuSig2 signing with adaptor configurations:
+
+```json
+POST /api/v1/signing
+{
+  "signing_session_id": "uuid-v7",
+  "keygen_session_id": "uuid-v7",
+  "message_hash": [1,2,3,...],
+  "encrypted_message": "hex-encoded-message",
+  "timeout_secs": 1800,
+  "encrypted_adaptor_configs": "hex-encoded-encrypted-json"
+}
+```
+
+**Client Workflow**:
+1. Create adaptor configurations with business logic
+2. Encrypt configurations using session secret: `encrypt_adaptor_configs_for_client(configs, session_secret)`
+3. Include encrypted configurations in signing request
+
+#### 2. Enhanced Status Response
+Signing status includes adaptor signature results:
+
+```json
+GET /api/v1/signing/{id}/status
+{
+  "signing_session_id": "uuid-v7",
+  "keygen_session_id": "uuid-v7",
+  "status": "Completed",
+  "final_signature": "hex-encoded-encrypted-signature",
+  "adaptor_signatures": "hex-encoded-encrypted-adaptor-results"
+}
+```
+
+**Client Workflow**:
+1. Poll signing status as normal
+2. When completed, decrypt adaptor signatures: `decrypt_adaptor_signatures_with_secret(encrypted, session_secret)`
+3. Process adaptor signature results for contract logic
+
+#### 3. Adaptor Signature Results Structure
+```json
+{
+  "adaptor_id": "uuid-v7-matching-config",
+  "adaptor_type": "Single|And|Or",
+  "signature_scalar": "hex-encoded-adapted-signature-scalar",
+  "nonce_point": "hex-encoded-adapted-nonce-R",
+  "adaptor_points": ["original-adaptor-points"],
+  "hints": ["hints-for-or-type"],
+  "aggregate_adaptor_point": "hex-encoded-combined-adaptor-point"
+}
+```
+
+### Adaptor Signatures Demo
+
+```bash
+# Test all adaptor signature types
+just demo-adaptors
+
+# Test specific types
+just demo-adaptors-single     # Single adaptor only
+just demo-adaptors-and        # "And" logic adaptor only
+just demo-adaptors-or         # "Or" logic adaptor only
+just demo-adaptors-only       # Skip regular signing, adaptor only
+```
+
 ## API
 
 After starting the keymeld-gateway locally, API documentation is available at:
@@ -104,13 +263,15 @@ After starting the keymeld-gateway locally, API documentation is available at:
 **Phase 1: Keygen**
 - `POST /api/v1/keygen` - Create keygen session *(no auth required)*
 - `GET /api/v1/keygen/{id}/slots` - Get available registration slots *(no auth required)*
-- `POST /api/v1/keygen/{id}/participants` - Register participants *(requires X-Session-HMAC)*
-- `GET /api/v1/keygen/{id}/status` - Check keygen progress *(requires X-Session-HMAC)*
+- `POST /api/v1/keygen/{id}/participants` - Register participants *(requires x-session-signature)*
+- `GET /api/v1/keygen/{id}/status` - Check keygen progress *(requires x-session-signature)*
 
 **Phase 2: Signing**
-- `POST /api/v1/signing` - Create signing session *(requires X-Session-HMAC)*
-- `POST /api/v1/signing/{id}` - Approve signing session as participant *(requires X-Signing-HMAC)*
-- `GET /api/v1/signing/{id}/status` - Check signing progress *(requires X-Signing-HMAC)*
+- `POST /api/v1/signing` - Create signing session *(requires x-session-signature)*
+  - Supports `encrypted_adaptor_configs` field for adaptor signatures
+- `POST /api/v1/signing/{id}/approve/{user_id}` - Approve signing session as participant *(requires x-user-signature)*
+- `GET /api/v1/signing/{id}/status/{user_id}` - Check signing progress *(requires x-user-signature)*
+  - Returns `adaptor_signatures` field when adaptor configurations provided
 
 ### Taproot Configuration
 KeyMeld supports flexible taproot tweaking for Bitcoin compatibility:
@@ -134,7 +295,7 @@ All encrypted data values in the API use **hex encoding** for consistency:
 
 - **Encrypted signatures**: Hex-encoded JSON `EncryptedData{ciphertext: Vec<u8>, nonce: Vec<u8>, context: String}` containing encrypted signature data
 - **Encrypted private keys**: Hex-encoded ECIES-encrypted private keys
-- **Session secrets**: Used internally for HMAC validation and decryption
+- **Session secrets**: Used internally for signature validation and decryption
 - **Public keys**: Standard hex-encoded secp256k1 public keys
 
 **Example encrypted signature format:**
@@ -146,47 +307,115 @@ All encrypted data values in the API use **hex encoding** for consistency:
 
 The hex string decodes to JSON containing the `EncryptedData` structure with the encrypted signature that can be decrypted using the session secret via `decrypt_signature_with_secret()`.
 
+**Adaptor signatures encoding:**
+```json
+{
+  "adaptor_signatures": "7b2261646170746f725f7369676e617475726573223a5b7b2261646170746f725f6964223a22..."
+}
+```
+
+The hex-encoded `adaptor_signatures` field contains encrypted adaptor signature results that can be decrypted client-side using `decrypt_adaptor_signatures_with_secret()` for zero-knowledge privacy.
+
 ### Authentication & Approval Workflow
 
-**ECIES Encryption & Zero-Knowledge Security:**
-- ECIES encryption for private key security
-- Deterministic signer indexing for participant consistency
-- Zero-knowledge operation at gateway level
+**Session-Specific Auth Keys & Privacy:**
+- Session-specific authentication keys derived from master signing keys using HKDF-SHA256
+- Privacy-preserving design with complete transaction unlinkability across keygen sessions
+- Gateway stores only session-specific public keys, never master signing keys
 
-**HMAC Header Requirements:**
+**Signature Header Requirements:**
 
-**X-Session-HMAC** (for keygen operations):
-- Format: `nonce:hmac`
-- Uses session secret obtained from keygen creation response
+**X-Session-Signature** (for keygen operations):
+- Format: `nonce:signature`
+- `nonce` is a random 16-byte hex-encoded value
+- `signature` is hex-encoded secp256k1 ECDSA signature over SHA256(`session_id:nonce`)
+- Signed with session-derived private key (from session secret seed)
+- Uses compact signature format (64 bytes → 128 hex characters)
 - Required for participant registration, keygen status, and signing session creation
 
-**X-Signing-HMAC** (for signing operations):
-- Format: `user_id:nonce:signature`
-- `signature` is hex-encoded secp256k1 ECDSA signature over SHA256(`user_id:nonce`)
-- Signed with participant's private key from keygen session
+**X-User-Signature** (for signing operations):
+- Format: `nonce:signature`
+- `nonce` is a random 16-byte hex-encoded value
+- `signature` is hex-encoded secp256k1 ECDSA signature over message using **session-specific auth key**
+- Message format: `signing_session_id:user_id:nonce`
+- Auth key derived via HKDF-SHA256: `derive_key(main_private_key, keygen_session_id)`
 - Uses compact signature format (64 bytes → 128 hex characters)
 - Required for signing approval and signing status endpoints
+
+**Session-Specific Auth Key System:**
+KeyMeld uses a privacy-preserving authorization system where each keygen session generates unique authentication keys:
+
+1. **Key Derivation:** For each keygen session, participants derive a session-specific auth keypair:
+   ```
+   session_auth_key = HKDF-SHA256(master_private_key, "keymeld-session-auth-v1:keygen_session_id")
+   ```
+
+2. **Registration:** During keygen registration, the derived auth public key is stored by the gateway
+
+3. **Authorization:** For signing operations, participants sign authorization messages with their session auth key
+
+4. **Validation:** Gateway verifies signatures against stored session auth public keys using standard ECDSA
+
+**Privacy Properties:**
+- **Session Unlinkability**: Same user appears different across keygen sessions
+- **Master Key Protection**: Gateway never sees or stores master signing public keys
+- **Forward Security**: Session auth keys provide isolation (compromise isolated per session)
+- **Deterministic Recovery**: Auth keys can be regenerated from master key + session ID
 
 **Signing Approval Process:**
 Participants can optionally require explicit approval before their keys are used in signing sessions:
 
 1. **Keygen Registration:** Set `require_signing_approval: true` when registering as a participant
 2. **Signing Session Creation:** When a signing session is created, it will wait in `collecting_participants` status if any participants require approval
-3. **Signing Approval:** Each participant requiring approval must call `POST /api/v1/signing/{id}` with `X-Signing-HMAC` header
+3. **Signing Approval:** Each participant requiring approval must call `POST /api/v1/signing/{signing_session_id}/approve/{user_id}` with `X-User-Signature` header containing session-specific auth key signature
 4. **Automatic Progression:** Once all required approvals are received, signing proceeds automatically through the MuSig2 phases
 
 
 ## Commands
 
 ```bash
-just quickstart                           # Full demo (regtest)
-just demo [amount] [destination]          # Run demo with custom parameters
+# Quick Start
+just quickstart                          # Complete setup + demo (new users start here)
+
+# Service Management  
 just start                               # Start all services
 just stop                                # Stop all services
+just restart                             # Restart all services
 just status                              # Check service health
-just logs [service]                      # View service logs
-just clean                               # Stop and remove all data
+
+# Demo & Testing
+just demo [amount] [dest]                # Run MuSig2 demo with optional params
+just demo-adaptors                       # Run adaptor signatures demo
+just mine <blocks>                       # Mine Bitcoin regtest blocks
+just setup-regtest                       # Setup Bitcoin regtest environment
+
+# Development
+just build                               # Build all services
+just build-prod                          # Build production packages (pure Nix)
+just test                                # Run tests
+just fmt                                 # Format code
+just lint                                # Lint code
+just check                               # Run all checks (fmt + lint + test)
+just dev                                 # Enter development shell
+
+# AWS CI/CD Workflow
+just build-eif                           # [CI/CD] Build and upload AWS Nitro Enclave image
+just deploy-aws                          # [Production] Download EIF and deploy to AWS
+just gateway-aws                         # [Production] Start gateway for AWS deployment
+just stop-aws                            # [Production] Stop AWS enclaves and cleanup
+
+# Maintenance
+just clean                               # Clean all data and rebuild DB
+just reset-cache                         # Reset Nix build cache
+just vsock-proxy <cmd>                   # Manage VSock proxy services (start|stop|status)
+just logs <service>                      # Show logs for specific service
+just info                                # Show system information
 ```
+
+> 📚 **Documentation:**
+> - [docs/SETUP.md](docs/SETUP.md) - Comprehensive development setup guide
+> - [docs/VSOCK.md](docs/VSOCK.md) - VSock architecture and troubleshooting
+> - [docs/DEPLOY.md](docs/DEPLOY.md) - AWS Nitro Enclave deployment guide
 
 ## Structure
 
@@ -222,16 +451,20 @@ sequenceDiagram
     C->>G: GET ENCLAVE PUBLIC KEY (enclave_a)
     G-->>C: enclave_a_public_key
 
-    Note over C: Encrypt private key using ECIES
-    C->>G: CREATE KEYGEN SESSION<br/>encrypted_coordinator_key + coordinator_pubkey<br/>+ chosen_enclave_id + expected_participants
+    Note over C: Encrypt private key using ECIES + derive session auth key
+    C->>C: session_auth_key = HKDF(master_key, keygen_session_id)
+    C->>G: CREATE KEYGEN SESSION<br/>encrypted_coordinator_key + coordinator_pubkey + session_auth_pubkey<br/>+ chosen_enclave_id + expected_participants
+    G->>G: Store coordinator session_auth_pubkey for signing authorization
     G-->>C: keygen_session_id<br/>coordinator registered as index 0 on enclave_a
 
     par Participant Registration
         P->>G: GET KEYGEN SLOTS
         G-->>P: available slots: [slot1: enclave_b, slot2: enclave_c, ...]
 
-        Note over P: Choose preferred enclave/slot
-        P->>G: REGISTER KEYGEN (participant)<br/>selected slot_id + participant_key
+        Note over P: Choose preferred enclave/slot + derive session auth key
+        P->>P: session_auth_key = HKDF(master_key, keygen_session_id)
+        P->>G: REGISTER KEYGEN (participant)<br/>selected slot_id + participant_key + session_auth_pubkey
+        G->>G: Store session_auth_pubkey for signing authorization
         G-->>P: confirmed signer_index + enclave_assignment
     end
 
@@ -248,8 +481,11 @@ sequenceDiagram
 
     alt Participants Require Approval
         Note over P: Some participants set require_signing_approval=true
+        Note over P: Derive session auth key from master key + keygen_session_id
         loop For each participant requiring approval
-            P->>G: POST /signing/{id} (with X-Signing-HMAC)
+            P->>P: session_auth_key = HKDF(master_key, keygen_session_id)
+            P->>G: POST /signing/{id}/approve/{user_id}<br/>(X-User-Signature: signed with session_auth_key)
+            G->>G: Verify signature against stored session auth pubkey
             G-->>P: Approval recorded
         end
         Note over G: Wait until all required approvals received
@@ -391,7 +627,7 @@ graph TB
     end
 
     subgraph "Gateway Layer"
-        KG["🌐 KeyMeld Gateway<br/>(EC2 Instance)<br/><br/>• 2-phase session coordination<br/>• Keygen → Signing participant inheritance<br/>• Deterministic signer index assignment<br/>• ECIES encrypted private key storage<br/>• Transaction hash storage for signing<br/>• ❌ NEVER DECRYPTS: private keys or transaction data<br/>• SQLite database (encrypted data only)"]
+        KG["🌐 KeyMeld Gateway<br/>(EC2 Instance)<br/><br/>• 2-phase session coordination<br/>• Keygen → Signing participant inheritance<br/>• Deterministic signer index assignment<br/>• Session-specific auth key storage (pubkeys only)<br/>• ECIES encrypted private key storage<br/>• Transaction hash storage for signing<br/>• ❌ NEVER DECRYPTS: private keys or transaction data<br/>• ❌ NEVER STORES: master signing keys<br/>• SQLite database (encrypted data only)"]
     end
 
     subgraph "Enclave Layer"
@@ -461,6 +697,13 @@ graph TD
 - **Flexible Configuration**: Supports multiple taproot tweaking modes
 - **Proper Sighash**: Implements BIP 341 taproot sighash calculation
 - **Valid Signatures**: Creates signatures that validate on Bitcoin network
+
+### Adaptor Signatures Support
+- **Three Adaptor Types**: Single, "And" (all secrets), and "Or" (any secret) logic
+- **Zero-Knowledge Privacy**: Gateway remains blind to business logic and adaptor configurations
+- **Client-Side Encryption**: All adaptor data encrypted before transmission using session secrets
+- **Automatic Processing**: Adaptor signatures generated automatically after regular MuSig2 completion
+- **Smart Contract Ready**: Enables atomic swaps, conditional payments, and advanced contract patterns
 
 ### ECIES Encryption
 - All private keys encrypted to specific enclaves using ECIES

@@ -1,46 +1,62 @@
-use anyhow::{anyhow, Result};
 use aws_nitro_enclaves_cose::crypto::Openssl;
 use aws_nitro_enclaves_cose::CoseSign1;
-use aws_nitro_enclaves_nsm_api::api::{Request, Response};
+use aws_nitro_enclaves_nsm_api::api::{ErrorCode, Request, Response};
 use aws_nitro_enclaves_nsm_api::driver::{nsm_exit, nsm_init, nsm_process_request};
+use keymeld_core::enclave::{AttestationError, CryptoError};
+use keymeld_core::AttestationDocument;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 use std::mem::discriminant;
+use thiserror::Error;
 use tracing::{debug, error, info};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttestationDocument {
-    pub pcrs: BTreeMap<String, Vec<u8>>,
-    pub timestamp: u64,
-    pub certificate: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub user_data: Option<Vec<u8>>,
-    pub public_key: Option<Vec<u8>>,
+#[derive(Debug, Error)]
+pub enum NsmError {
+    #[error("Failed to initialize NSM with fd={0}")]
+    InitializationFailed(i32),
+    #[error("NSM attestation failed with error code: {0:?}")]
+    AttestationFailed(ErrorCode),
+    #[error("NSM GetRandom failed with error code: {0:?}")]
+    GetRandomFailed(ErrorCode),
+    #[error("Requested {requested} random bytes, but got {actual}")]
+    RandomBytesLengthMismatch { requested: usize, actual: usize },
+    #[error("Failed to parse COSE_Sign1 document: {0}")]
+    CoseParseError(String),
+    #[error("Failed to get COSE payload: {0}")]
+    CosePayloadError(String),
+    #[error("Failed to parse attestation payload as CBOR")]
+    CborParseError(#[source] serde_cbor::Error),
+    #[error("PCR {0} verification failed")]
+    PcrVerificationFailed(String),
+    #[error("PCR {0} not found in attestation")]
+    PcrNotFound(String),
+    #[error("Failed to serialize attestation document")]
+    SerializationFailed(#[source] serde_cbor::Error),
 }
 
-impl Zeroize for AttestationDocument {
-    fn zeroize(&mut self) {
-        for (_, pcr_value) in self.pcrs.iter_mut() {
-            pcr_value.zeroize();
-        }
-        self.pcrs.clear();
-
-        self.timestamp = 0;
-        self.certificate.zeroize();
-        self.signature.zeroize();
-
-        if let Some(ref mut user_data) = self.user_data {
-            user_data.zeroize();
-        }
-        if let Some(ref mut public_key) = self.public_key {
-            public_key.zeroize();
+impl From<NsmError> for keymeld_core::enclave::EnclaveError {
+    fn from(err: NsmError) -> Self {
+        match err {
+            NsmError::InitializationFailed(_)
+            | NsmError::AttestationFailed(_)
+            | NsmError::CoseParseError(_)
+            | NsmError::CosePayloadError(_)
+            | NsmError::CborParseError(_)
+            | NsmError::PcrVerificationFailed(_)
+            | NsmError::PcrNotFound(_)
+            | NsmError::SerializationFailed(_) => keymeld_core::enclave::EnclaveError::Attestation(
+                AttestationError::Other(err.to_string()),
+            ),
+            NsmError::GetRandomFailed(_) | NsmError::RandomBytesLengthMismatch { .. } => {
+                keymeld_core::enclave::EnclaveError::Crypto(CryptoError::Other(err.to_string()))
+            }
         }
     }
 }
 
-impl ZeroizeOnDrop for AttestationDocument {}
+type Result<T> = std::result::Result<T, NsmError>;
 
 pub struct NsmClient {
     nsm_fd: i32,
@@ -50,7 +66,7 @@ impl NsmClient {
     pub fn new() -> Result<Self> {
         let nsm_fd = nsm_init();
         if nsm_fd < 0 {
-            return Err(anyhow!("Failed to initialize NSM: fd = {nsm_fd}"));
+            return Err(NsmError::InitializationFailed(nsm_fd));
         }
 
         debug!("NSM initialized successfully with fd = {}", nsm_fd);
@@ -86,11 +102,15 @@ impl NsmClient {
             }
             Response::Error(error_code) => {
                 error!("NSM returned error: {:?}", error_code);
-                Err(anyhow!("NSM attestation failed with error: {error_code:?}"))
+                Err(NsmError::AttestationFailed(error_code))
             }
-            repsonse => {
-                error!("Unexpected NSM response type: {:?}", repsonse);
-                Err(anyhow!("Unexpected response from NSM: {:?}", repsonse))
+            response => {
+                error!(
+                    "Unexpected NSM response type for attestation: {:?}",
+                    response
+                );
+                // This is truly unexpected and indicates a bug, so use Internal
+                Err(NsmError::AttestationFailed(ErrorCode::InvalidOperation))?
             }
         }
     }
@@ -103,22 +123,21 @@ impl NsmClient {
         match response {
             Response::GetRandom { random } => {
                 if random.len() != num_bytes as usize {
-                    return Err(anyhow!(
-                        "Requested {} random bytes, got {}",
-                        num_bytes,
-                        random.len()
-                    ));
+                    return Err(NsmError::RandomBytesLengthMismatch {
+                        requested: num_bytes as usize,
+                        actual: random.len(),
+                    });
                 }
                 debug!("Generated {} random bytes", random.len());
                 Ok(random)
             }
             Response::Error(error_code) => {
                 error!("NSM GetRandom failed: {:?}", error_code);
-                Err(anyhow!("NSM GetRandom failed with error: {error_code:?}"))
+                Err(NsmError::GetRandomFailed(error_code))
             }
             response => {
                 error!("Unexpected NSM response type for GetRandom: {:?}", response);
-                Err(anyhow!("Unexpected response from NSM: {:?}", response))
+                Err(NsmError::GetRandomFailed(ErrorCode::InvalidOperation))?
             }
         }
     }
@@ -133,15 +152,15 @@ impl NsmClient {
     }
 
     fn parse_attestation_document(&self, document: &[u8]) -> Result<AttestationDocument> {
-        let cose_sign1 = CoseSign1::from_bytes(document)
-            .map_err(|e| anyhow!("Failed to parse COSE_Sign1 document: {e}"))?;
+        let cose_sign1 =
+            CoseSign1::from_bytes(document).map_err(|e| NsmError::CoseParseError(e.to_string()))?;
 
         let payload = cose_sign1
             .get_payload::<Openssl>(None)
-            .map_err(|e| anyhow!("Failed to get COSE payload: {e}"))?;
+            .map_err(|e| NsmError::CosePayloadError(e.to_string()))?;
 
-        let attestation_data: serde_cbor::Value = serde_cbor::from_slice(&payload)
-            .map_err(|e| anyhow!("Failed to parse attestation payload as CBOR: {e}"))?;
+        let attestation_data: serde_cbor::Value =
+            serde_cbor::from_slice(&payload).map_err(NsmError::CborParseError)?;
 
         let pcrs = self.extract_pcrs(&attestation_data)?;
 
@@ -304,11 +323,11 @@ impl NsmClient {
                         hex::encode(expected_value),
                         hex::encode(actual_value)
                     );
-                    return Err(anyhow!("PCR {pcr_name} verification failed"));
+                    return Err(NsmError::PcrVerificationFailed(pcr_name.clone()));
                 }
                 None => {
                     error!("PCR {} not found in attestation document", pcr_name);
-                    return Err(anyhow!("PCR {pcr_name} not found"));
+                    return Err(NsmError::PcrNotFound(pcr_name.clone()));
                 }
             }
         }
@@ -358,8 +377,7 @@ impl KeyMeldAttestation {
             enclave_public_key,
         )?;
 
-        let raw_bytes = serde_cbor::to_vec(&raw_document)
-            .map_err(|e| anyhow!("Failed to serialize attestation document: {e}"))?;
+        let raw_bytes = serde_cbor::to_vec(&raw_document).map_err(NsmError::SerializationFailed)?;
 
         Ok(Self {
             document: raw_bytes,

@@ -1,5 +1,6 @@
 use anyhow::Result;
-use keymeld_enclave::run_vsock_server;
+use keymeld_core::resilience::TimeoutConfig;
+use keymeld_enclave::run_until_stopped;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -13,7 +14,7 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse::<u32>().ok())
         .unwrap_or(0);
 
-    run_vsock_server(vsock_port, enclave_id).await?;
+    run_until_stopped(vsock_port, enclave_id, TimeoutConfig::default()).await?;
 
     Ok(())
 }

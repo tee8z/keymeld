@@ -57,14 +57,24 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
         )?;
 
         let user_ids: Vec<_> = self.expected_participants.to_vec();
-        let _assignment = enclave_manager
+
+        // Find the coordinator user_id from registered participants
+        // The coordinator is the one assigned to coordinator_enclave_id
+        let coordinator_user_id = self.registered_participants.keys().next().ok_or_else(|| {
+            KeyMeldError::EnclaveError(
+                "No registered participants found to determine coordinator".to_string(),
+            )
+        })?;
+
+        enclave_manager
             .create_session_assignment_with_coordinator(
                 self.keygen_session_id.clone(),
                 &user_ids,
+                coordinator_user_id,
                 self.coordinator_enclave_id,
             )
             .map_err(|e| {
-                KeyMeldError::EnclaveError(format!("Failed to create session assignment: {}", e))
+                KeyMeldError::EnclaveError(format!("Failed to create session assignment: {e}"))
             })?;
 
         info!(
@@ -89,13 +99,13 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
                     "Failed to initialize keygen session {} after {:?}: {}",
                     self.keygen_session_id, elapsed, e
                 );
-                KeyMeldError::EnclaveError(format!("Failed to initialize keygen session: {}", e))
+                KeyMeldError::EnclaveError(format!("Failed to initialize keygen session: {e}"))
             })?;
 
         info!(
-            "Session {} computed aggregate public key with {} bytes",
+            "Session {} computed aggregate public key: {}",
             self.keygen_session_id,
-            aggregate_public_key.len()
+            hex::encode(&aggregate_public_key)
         );
 
         Ok(KeygenSessionStatus::Completed(

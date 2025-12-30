@@ -54,7 +54,7 @@ impl LoggingConfig {
             enable_file_output: Some(false),
             file_path: None,
             component: Some("keymeld_enclave".to_string()),
-            disable_ansi: Some(true), // VSock doesn't support ANSI colors
+            disable_ansi: Some(true),
             include_target: Some(true),
             include_thread_ids: Some(true),
         }
@@ -67,20 +67,18 @@ pub fn init_logging(config: &LoggingConfig) {
     INIT.call_once(|| {
         let component = config.component.as_deref().unwrap_or("keymeld");
 
-        // Create environment filter with fallback
         let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             let default_filter = match config.level.as_str() {
-                "trace" => format!("{}=trace,tower_http=debug", component),
-                "debug" => format!("{}=debug,tower_http=debug", component),
-                "info" => format!("{}=info,tower_http=info", component),
-                "warn" => format!("{}=warn,tower_http=warn", component),
-                "error" => format!("{}=error,tower_http=error", component),
-                _ => format!("{}=info,tower_http=info", component),
+                "trace" => format!("{component}=trace,tower_http=debug"),
+                "debug" => format!("{component}=debug,tower_http=debug"),
+                "info" => format!("{component}=info,tower_http=info"),
+                "warn" => format!("{component}=warn,tower_http=warn"),
+                "error" => format!("{component}=error,tower_http=error"),
+                _ => format!("{component}=info,tower_http=info"),
             };
             default_filter.into()
         });
 
-        // Use a macro to handle different subscriber types
         macro_rules! init_subscriber {
             ($layer:expr) => {{
                 let subscriber = tracing_subscriber::registry()
@@ -92,7 +90,6 @@ pub fn init_logging(config: &LoggingConfig) {
             }};
         }
 
-        // Create the appropriate layer based on configuration
         let include_target = config.include_target.unwrap_or(true);
         let include_thread_ids = config.include_thread_ids.unwrap_or(true);
         let disable_ansi = config.disable_ansi.unwrap_or(false);
@@ -165,7 +162,7 @@ mod tests {
         let config = LoggingConfig::enclave_default();
         assert_eq!(config.level, "info");
         assert_eq!(config.component.as_deref(), Some("keymeld_enclave"));
-        assert_eq!(config.disable_ansi, Some(true)); // VSock compatibility
+        assert_eq!(config.disable_ansi, Some(true));
         assert_eq!(config.format.as_deref(), Some("compact"));
     }
 
