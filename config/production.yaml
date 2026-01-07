@@ -2,29 +2,27 @@
 # ===============================
 # This configuration requires dynamic CID assignment for AWS Nitro Enclaves
 
-environment: production
+environment: production # Runtime environment (development/production) - enables strict security validation
 server:
-  host: "0.0.0.0"
-  port: 443
-  enable_cors: false
-  enable_compression: true
-  request_timeout_secs: 60
-  max_request_size_bytes: 5242880
+  host: "0.0.0.0" # Server bind address - 0.0.0.0 listens on all interfaces
+  port: 443 # HTTPS server port (requires TLS termination via load balancer)
+  enable_cors: false # Disable CORS in production (handled by load balancer/proxy)
+  enable_compression: true # Enable HTTP response compression (gzip) for bandwidth efficiency
+kms:
+  enabled: true # Enable AWS KMS integration for secure key management
+  endpoint_url: null # Use default AWS KMS endpoint (region-based)
+  key_id: "${KMS_KEY_ARN}" # KMS key ARN from environment variable for enclave encryption
 database:
-  path: "/var/lib/keymeld/keymeld.db"
-  max_connections: 50
-  connection_timeout_secs: 10
-  idle_timeout_secs: 300
-  enable_wal_mode: true
+  path: "/var/lib/keymeld/keymeld.db" # SQLite database file path (should be on persistent storage)
+  max_connections: 50 # Maximum concurrent database connections in pool (higher for production load)
+  connection_timeout_secs: 10 # Timeout for acquiring database connections (faster timeout for production)
+  idle_timeout_secs: 300 # Timeout for idle connections before closing (5 minutes)
+  enable_wal_mode: true # Enable Write-Ahead Logging for better concurrency and durability
 enclaves:
-  # REQUIRED: Set via KEYMELD_KMS_KEY_ARN environment variable
-  # Example: arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012
-  kms_key_arn: ""
-
   # AWS Nitro Enclave Configuration
   # ===============================
-  # IMPORTANT: The CID values below are TEMPLATE values only.
-  # In production, AWS assigns CIDs dynamically when enclaves start.
+  # The CID values below are TEMPLATE values only - AWS assigns CIDs dynamically when enclaves start.
+  # Manual configuration is required to specify actual AWS-assigned CIDs.
   #
   # REQUIRED: Override with actual AWS-assigned CIDs using environment variables:
   #   KEYMELD_ENCLAVE_0_CID=<actual_cid_assigned_by_aws>
@@ -51,23 +49,29 @@ enclaves:
     - id: 2
       cid: 5 # TEMPLATE - Override with KEYMELD_ENCLAVE_2_CID
       port: 8000
-  max_users_per_enclave: 500
-  max_connections_per_enclave: 50 # Pool size: number of pooled VSock connections per enclave
-  enclave_timeout_secs: 60
+  max_channel_size: 1000 # Internal message buffer size per connection - controls backpressure when requests queue up faster than they can be processed
+  vsock_timeout_secs: 300 # Timeout for VSock operations and request/response cycles (5 minutes for crypto operations)
+  nonce_generation_timeout_secs: 180 # Timeout for cryptographic nonce generation (3 minutes)
+  session_init_timeout_secs: 1800 # Timeout for session initialization (30 minutes for complex key generation)
+  signing_timeout_secs: 600 # Timeout for cryptographic signing operations (10 minutes)
+  network_write_timeout_secs: 5 # Timeout for individual network write operations
+  network_read_timeout_secs: 300 # Timeout for reading crypto operation responses (5 minutes)
+  pool_acquire_timeout_secs: 30 # Timeout for acquiring connections from pool (30 seconds in production)
+  connection_retry_delay_ms: 100 # Delay between connection retry attempts (100ms)
+  max_message_size_bytes: 16777216 # Maximum message size (16MB) for VSock communication
 coordinator:
-  processing_interval_ms: 100
-  batch_size: 100
-  max_retries: 5
-  processing_timeout_mins: 1
+  processing_interval_ms: 100 # How often coordinator processes pending sessions (faster processing for production)
+  batch_size: 100 # Number of sessions to process in each batch
+  max_retries: 5 # Maximum retry attempts for failed session processing
+  processing_timeout_mins: 1 # Timeout for processing individual sessions
 logging:
-  level: "info"
-  format: "json"
-  enable_json: true
-  enable_file_output: true
-  file_path: "/var/log/keymeld/keymeld.log"
+  level: "info" # Log level (info/warn/error for production to reduce noise)
+  format: "json" # Log format (json for structured logging in production)
+  enable_json: true # Output logs in JSON format for log aggregation systems
+  enable_file_output: true # Write logs to file for persistence and rotation
+  file_path: "/var/log/keymeld/keymeld.log" # Log file path (ensure directory exists and is writable)
 security:
-  enable_attestation: true
-  strict_validation: true
-  allow_insecure_connections: false
-  max_session_duration_secs: 14400
-  require_tls: true
+  enable_attestation: true # Enable enclave attestation verification (required for production security)
+  strict_validation: true # Enable strict security validation (required for production)
+  allow_insecure_connections: false # Forbid non-TLS connections (production security requirement)
+  require_tls: true # Require TLS/HTTPS connections (production security requirement)

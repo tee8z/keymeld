@@ -1,19 +1,8 @@
 use anyhow::{Context, Result};
-use config::Config;
 use keymeld_core::logging::{init_logging, LoggingConfig};
-use startup::Application;
+use keymeld_gateway::{config::Config, startup::Application};
 use std::env;
 use tracing::{debug, info, warn};
-
-mod config;
-mod coordinator;
-mod database;
-mod errors;
-mod handlers;
-mod headers;
-mod metrics;
-mod middleware;
-mod startup;
 
 #[tokio::main]
 async fn main() -> Result<()> {

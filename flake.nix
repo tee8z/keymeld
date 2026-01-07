@@ -14,6 +14,7 @@
     crane = {
       url = "github:ipetkov/crane";
     };
+
   };
 
   # Disable eval cache to prevent SQLite busy issues during parallel builds
@@ -182,7 +183,12 @@
             pkgs.util-linux
             pkgs.netcat
             pkgs.procps
+            moto-env
+            pkgs.awscli2
+            pkgs.litestream
+            pkgs.haproxy
             self.packages.${system}.vsock-proxy
+            self.packages.${system}.bitcoin-rpc-proxy
           ];
 
           shellHook = ''
@@ -370,6 +376,143 @@
           esac
         '';
 
+        # Bitcoin RPC proxy using HAProxy for connection pooling and rate limiting
+        # This prevents overwhelming bitcoind with too many concurrent RPC requests
+        bitcoin-rpc-proxy = pkgs.writeShellScriptBin "bitcoin-rpc-proxy" ''
+          #!/usr/bin/env bash
+          PROXY_DIR="/tmp/keymeld-bitcoin-proxy"
+          HAPROXY_CFG="$PROXY_DIR/haproxy.cfg"
+          HAPROXY_PID="$PROXY_DIR/haproxy.pid"
+          PROXY_PORT="''${BITCOIN_PROXY_PORT:-18550}"
+          BACKEND_PORT="''${BITCOIN_RPC_PORT:-18443}"
+          MAX_CONN="''${BITCOIN_MAX_CONN:-50}"
+          QUEUE_TIMEOUT="''${BITCOIN_QUEUE_TIMEOUT:-60s}"
+
+          case "''${1:-start}" in
+            start)
+              echo "🚀 Starting Bitcoin RPC proxy (HAProxy)..."
+              echo "   Proxy port: $PROXY_PORT → Backend: 127.0.0.1:$BACKEND_PORT"
+              echo "   Max concurrent connections to bitcoind: $MAX_CONN"
+              echo "   Queue timeout: $QUEUE_TIMEOUT"
+
+              # Check if already running
+              if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
+                echo "⚠️  Bitcoin RPC proxy already running (PID: $(cat "$HAPROXY_PID"))"
+                exit 0
+              fi
+
+              mkdir -p "$PROXY_DIR"
+
+              # Generate HAProxy configuration
+              cat > "$HAPROXY_CFG" <<EOF
+global
+    daemon
+    maxconn 4096
+    pidfile $HAPROXY_PID
+    log stdout format raw local0 info
+
+defaults
+    mode http
+    timeout connect 10s
+    timeout client 120s
+    timeout server 120s
+    timeout queue $QUEUE_TIMEOUT
+    option httplog
+    log global
+
+frontend bitcoin_rpc_frontend
+    bind 127.0.0.1:$PROXY_PORT
+    default_backend bitcoin_rpc_backend
+
+backend bitcoin_rpc_backend
+    # Queue excess connections instead of rejecting them
+    # This is key for handling burst traffic from parallel tests
+    server bitcoind 127.0.0.1:$BACKEND_PORT maxconn $MAX_CONN check inter 5s
+
+    # Health check to ensure bitcoind is responsive (HAProxy 2.2+ syntax)
+    option httpchk
+    http-check send meth POST uri / ver HTTP/1.1 hdr Content-Type application/json hdr Authorization "Basic a2V5bWVsZDprZXltZWxkcGFzczEyMw==" body "{\"method\":\"getblockchaininfo\",\"params\":[],\"id\":1}"
+    http-check expect status 200
+
+# Stats interface for monitoring (optional)
+listen stats
+    bind 127.0.0.1:18480
+    mode http
+    stats enable
+    stats uri /
+    stats refresh 5s
+EOF
+
+              echo "📋 HAProxy configuration written to $HAPROXY_CFG"
+
+              # Start HAProxy
+              ${pkgs.haproxy}/bin/haproxy -f "$HAPROXY_CFG"
+
+              sleep 1
+              if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
+                echo "✅ Bitcoin RPC proxy started (PID: $(cat "$HAPROXY_PID"))"
+                echo ""
+                echo "📊 Usage:"
+                echo "   Bitcoin RPC via proxy: http://127.0.0.1:$PROXY_PORT"
+                echo "   Stats dashboard: http://127.0.0.1:18480"
+                echo ""
+                echo "   Update your Bitcoin RPC URL to use port $PROXY_PORT instead of $BACKEND_PORT"
+              else
+                echo "❌ Failed to start HAProxy"
+                cat "$PROXY_DIR/haproxy.log" 2>/dev/null || true
+                exit 1
+              fi
+              ;;
+            stop)
+              echo "🛑 Stopping Bitcoin RPC proxy..."
+              if [ -f "$HAPROXY_PID" ]; then
+                pid=$(cat "$HAPROXY_PID")
+                kill "$pid" 2>/dev/null && echo "✅ Stopped HAProxy (PID: $pid)" || echo "HAProxy already stopped"
+                rm -f "$HAPROXY_PID"
+              else
+                echo "No HAProxy running"
+              fi
+              ;;
+            status)
+              echo "📊 Bitcoin RPC Proxy Status:"
+              if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
+                echo "  HAProxy: ✅ Running (PID: $(cat "$HAPROXY_PID"))"
+                echo "  Proxy port: $PROXY_PORT → Backend: $BACKEND_PORT"
+                echo "  Stats: http://127.0.0.1:18480"
+
+                # Show queue stats if available
+                if command -v curl &>/dev/null; then
+                  echo ""
+                  echo "  Current stats:"
+                  curl -s "http://127.0.0.1:18480/;csv" 2>/dev/null | grep bitcoind | awk -F',' '{print "    Queue: "$18", Current conn: "$5"/"$6", Total: "$8}' || true
+                fi
+              else
+                echo "  HAProxy: ❌ Not running"
+              fi
+              ;;
+            reload)
+              echo "🔄 Reloading Bitcoin RPC proxy configuration..."
+              if [ -f "$HAPROXY_PID" ]; then
+                ${pkgs.haproxy}/bin/haproxy -f "$HAPROXY_CFG" -sf "$(cat "$HAPROXY_PID")"
+                echo "✅ Configuration reloaded"
+              else
+                echo "HAProxy not running, starting..."
+                $0 start
+              fi
+              ;;
+            *)
+              echo "Usage: bitcoin-rpc-proxy {start|stop|status|reload}"
+              echo ""
+              echo "Environment variables:"
+              echo "  BITCOIN_PROXY_PORT  - Port for proxy to listen on (default: 18444)"
+              echo "  BITCOIN_RPC_PORT    - Backend bitcoind RPC port (default: 18443)"
+              echo "  BITCOIN_MAX_CONN    - Max concurrent connections to bitcoind (default: 50)"
+              echo "  BITCOIN_QUEUE_TIMEOUT - How long to queue requests (default: 60s)"
+              exit 1
+              ;;
+          esac
+        '';
+
         # Simple script that just ensures bitcoind is available
         start-bitcoin = pkgs.writeShellScriptBin "start-bitcoin" ''
           echo "Bitcoin Core available via: ${pkgs.bitcoind}/bin/bitcoind"
@@ -390,6 +533,41 @@
           else
             echo "Bitcoin Core not running"
           fi
+        '';
+
+        # Python environment with moto and server dependencies
+        moto-env = pkgs.python3.withPackages (ps: with ps; [
+          moto
+          flask
+          flask-cors
+          werkzeug
+          boto3
+        ]);
+
+        # Script to run moto-server (AWS mock) with KMS
+        run-localstack = pkgs.writeShellScriptBin "run-localstack" ''
+          set -e
+          export LOCALSTACK_HOST=''${LOCALSTACK_HOST:-"127.0.0.1"}
+          export MOTO_PORT=''${MOTO_PORT:-"4566"}
+          export DATA_DIR=''${DATA_DIR:-"$PWD/data/localstack"}
+          export AWS_DEFAULT_REGION=''${AWS_DEFAULT_REGION:-"us-west-2"}
+          export AWS_ACCESS_KEY_ID=''${AWS_ACCESS_KEY_ID:-"test"}
+          export AWS_SECRET_ACCESS_KEY=''${AWS_SECRET_ACCESS_KEY:-"test"}
+
+          mkdir -p "$DATA_DIR"
+
+          echo "🔐 Starting Moto (AWS mock server) with KMS service..."
+          echo "   Host: $LOCALSTACK_HOST:$MOTO_PORT"
+          echo "   Services: kms, s3"
+          echo "   Region: $AWS_DEFAULT_REGION"
+          echo "   Data Directory: $DATA_DIR"
+          echo ""
+          echo "📋 AWS Endpoint: http://$LOCALSTACK_HOST:$MOTO_PORT"
+          echo "   Use with AWS CLI: aws --endpoint-url=http://$LOCALSTACK_HOST:$MOTO_PORT kms ..."
+          echo ""
+
+          # Start moto-server with KMS and S3 support
+          exec ${moto-env}/bin/moto_server -p $MOTO_PORT
         '';
 
         # Script to run gateway
@@ -482,6 +660,9 @@
 
           echo "🛑 Stopping KeyMeld services..."
 
+          # Stop Litestream if running
+          pkill -f litestream || true
+
           # Stop Bitcoin Core
           ${stop-bitcoin}/bin/stop-bitcoin
 
@@ -491,6 +672,70 @@
           pkill -f bitcoind || true
 
           echo "✅ All services stopped"
+        '';
+
+        # Script to setup S3 bucket in Moto and start Litestream
+        run-litestream = pkgs.writeShellScriptBin "run-litestream" ''
+          set -e
+          export AWS_ENDPOINT_URL=''${AWS_ENDPOINT_URL:-"http://localhost:4566"}
+          export AWS_DEFAULT_REGION=''${AWS_DEFAULT_REGION:-"us-west-2"}
+          export AWS_ACCESS_KEY_ID=''${AWS_ACCESS_KEY_ID:-"test"}
+          export AWS_SECRET_ACCESS_KEY=''${AWS_SECRET_ACCESS_KEY:-"test"}
+          export LITESTREAM_CONFIG=''${LITESTREAM_CONFIG:-"$PWD/config/litestream.yml"}
+          export LITESTREAM_S3_BUCKET=''${LITESTREAM_S3_BUCKET:-"keymeld-db-backups"}
+
+          echo "🗄️ Setting up Litestream for SQLite replication..."
+
+          # Check if Moto is running
+          if ! pgrep -f moto_server > /dev/null; then
+            echo "❌ Moto is not running. Start it first with: just kms start"
+            exit 1
+          fi
+
+          # Create S3 bucket in Moto if it doesn't exist
+          echo "📦 Creating S3 bucket in Moto: $LITESTREAM_S3_BUCKET"
+          ${pkgs.awscli2}/bin/aws --endpoint-url=$AWS_ENDPOINT_URL s3 mb s3://$LITESTREAM_S3_BUCKET 2>/dev/null || \
+            echo "   Bucket already exists"
+
+          # List buckets to verify
+          echo "📋 Available S3 buckets:"
+          ${pkgs.awscli2}/bin/aws --endpoint-url=$AWS_ENDPOINT_URL s3 ls
+
+          # Start Litestream
+          echo "🚀 Starting Litestream replication..."
+          echo "   Config: $LITESTREAM_CONFIG"
+          echo "   Database: ./data/keymeld.db"
+          echo "   S3 Bucket: s3://$LITESTREAM_S3_BUCKET"
+          echo ""
+
+          mkdir -p logs
+          exec ${pkgs.litestream}/bin/litestream replicate -config "$LITESTREAM_CONFIG" 2>&1 | tee logs/litestream.log
+        '';
+
+        # Script to restore database from Litestream backup
+        restore-litestream = pkgs.writeShellScriptBin "restore-litestream" ''
+          set -e
+          export AWS_ENDPOINT_URL=''${AWS_ENDPOINT_URL:-"http://localhost:4566"}
+          export AWS_DEFAULT_REGION=''${AWS_DEFAULT_REGION:-"us-west-2"}
+          export AWS_ACCESS_KEY_ID=''${AWS_ACCESS_KEY_ID:-"test"}
+          export AWS_SECRET_ACCESS_KEY=''${AWS_SECRET_ACCESS_KEY:-"test"}
+          export LITESTREAM_CONFIG=''${LITESTREAM_CONFIG:-"$PWD/config/litestream.yml"}
+
+          echo "📥 Restoring database from Litestream backup..."
+          echo "   Config: $LITESTREAM_CONFIG"
+          echo "   Target: ./data/keymeld.db"
+          echo ""
+
+          # Backup existing database if it exists
+          if [ -f "./data/keymeld.db" ]; then
+            echo "⚠️  Backing up existing database to ./data/keymeld.db.bak"
+            cp ./data/keymeld.db ./data/keymeld.db.bak
+          fi
+
+          # Restore from Litestream
+          ${pkgs.litestream}/bin/litestream restore -config "$LITESTREAM_CONFIG" -o ./data/keymeld.db ./data/keymeld.db
+
+          echo "✅ Database restored successfully"
         '';
 
         # CI/CD Pipeline: Build Enclave EIF
@@ -783,6 +1028,15 @@ EOF
           run-services = run-services;
           stop-all-nix = stop-all-nix;
           vsock-proxy = vsock-proxy;
+          bitcoin-rpc-proxy = bitcoin-rpc-proxy;
+
+          # Moto (AWS mock server for KMS and S3)
+          run-moto = run-localstack;
+          run-localstack = run-localstack;  # Alias for backwards compatibility
+
+          # Litestream (SQLite replication)
+          run-litestream = run-litestream;
+          restore-litestream = restore-litestream;
 
           # AWS deployment automation
           build-eif = build-enclave-eif;      # CI/CD: Build and upload EIF
@@ -853,6 +1107,45 @@ EOF
             meta = {
               description = "Start Bitcoin Core for development";
               mainProgram = "start-bitcoin";
+            };
+          };
+
+          # Moto (AWS mock server for KMS and S3)
+          moto = {
+            type = "app";
+            program = "${run-localstack}/bin/run-localstack";
+            meta = {
+              description = "Start Moto with KMS and S3 services for development";
+              mainProgram = "run-localstack";
+            };
+          };
+
+          # Alias for backwards compatibility
+          localstack = {
+            type = "app";
+            program = "${run-localstack}/bin/run-localstack";
+            meta = {
+              description = "Start Moto with KMS and S3 services for development (alias for moto)";
+              mainProgram = "run-localstack";
+            };
+          };
+
+          # Litestream (SQLite replication)
+          litestream = {
+            type = "app";
+            program = "${run-litestream}/bin/run-litestream";
+            meta = {
+              description = "Start Litestream to replicate SQLite database to S3";
+              mainProgram = "run-litestream";
+            };
+          };
+
+          restore = {
+            type = "app";
+            program = "${restore-litestream}/bin/restore-litestream";
+            meta = {
+              description = "Restore database from Litestream S3 backup";
+              mainProgram = "restore-litestream";
             };
           };
 
