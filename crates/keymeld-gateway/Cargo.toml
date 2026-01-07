@@ -66,3 +66,6 @@ tempfile = "3.15.0"
 [[bin]]
 name = "keymeld-gateway"
 path = "src/main.rs"
+
+[lints]
+workspace = true

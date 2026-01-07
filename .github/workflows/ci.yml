@@ -1,105 +1,191 @@
-name: CI - Pull Request Validation
+name: CI
 
 on:
-  pull_request:
-    branches: [master]
   push:
     branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  # Code quality checks
-  check:
-    name: Code Quality
+  # Build everything once, upload binaries for e2e tests
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-gha-cache: false
+          use-flakehub: false
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-nix-cargo-build-
+
+      - name: Build project
+        run: nix develop -c cargo build --workspace --locked
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+      - name: Upload binaries for e2e tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: keymeld-binaries
+          path: |
+            target/debug/keymeld-gateway
+            target/debug/keymeld-enclave
+            target/debug/keymeld_demo
+            target/debug/keymeld_session_test
+          retention-days: 1
+
+  # Format check (no build needed)
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
 
       - name: Check formatting
-        run: |
-          nix develop -c just fmt
-          # Ensure no files were changed by formatting
-          if ! git diff --exit-code; then
-            echo "Code is not properly formatted. Please run 'just fmt'"
-            exit 1
-          fi
+        run: cargo fmt --all -- --check
+
+  # Clippy linting
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
 
       - name: Run Clippy
-        run: |
-          nix develop -c just lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # Unit tests
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Run tests
-        run: |
-          nix develop -c just test
+        run: cargo test --workspace --locked
 
-      - name: Build all components
-        run: |
-          nix develop -c just build
-
-  # End-to-end demo test (optional, can be skipped with label)
-  demo:
-    name: End-to-End Demo
+  # End-to-end integration tests (uses pre-built binaries)
+  e2e-test:
+    name: E2E - ${{ matrix.test.name }}
     runs-on: ubuntu-latest
-    if: "!contains(github.event.pull_request.labels.*.name, 'skip-demo')"
+    needs: [build, fmt, clippy, test]
+    if: "!contains(github.event.pull_request.labels.*.name, 'skip-e2e')"
+    timeout-minutes: ${{ matrix.test.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - name: quickstart
+            command: just quickstart
+            timeout: 15
+          - name: stress-plain-100
+            command: just stress plain 100
+            timeout: 15
+          - name: quickstart-adaptors
+            command: just quickstart-adaptors
+            timeout: 15
+          - name: stress-adaptor-100
+            command: just stress adaptor 100
+            timeout: 15
+          - name: kms-restart
+            command: just test-kms-e2e
+            timeout: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-gha-cache: false
+          use-flakehub: false
 
-      - name: Run complete demo
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: keymeld-binaries
+          path: target/debug/
+
+      - name: Make binaries executable
+        run: chmod +x target/debug/keymeld-* target/debug/keymeld_*
+
+      - name: Set up VSock for CI
         run: |
-          # Clean start
-          nix develop -c just clean
+          echo "CI=true" >> $GITHUB_ENV
+          echo "AUTOMATED_RUN=true" >> $GITHUB_ENV
+          ./scripts/vsock-setup.sh setup
 
-          # Start services and run demo
-          nix develop -c just quickstart
+      - name: Run ${{ matrix.test.name }}
+        run: |
+          # Use nix develop to get 'just' command
+          # Set IN_NIX_SHELL to signal recipes to skip their internal nix develop wrapper
+          nix develop -c just clean || true
+          IN_NIX_SHELL=1 SKIP_BUILD=1 nix develop -c ${{ matrix.test.command }}
 
-          # Verify demo completed successfully
-          echo "✅ KeyMeld demo completed successfully"
-
-      - name: Upload demo logs on failure
+      - name: Upload e2e logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: demo-logs-${{ github.run_id }}
+          name: e2e-logs-${{ matrix.test.name }}-${{ github.run_id }}
           path: |
             logs/
             data/
+            *.log
           retention-days: 7
-
-  # Summary job for branch protection
-  ci-success:
-    name: CI Success
-    runs-on: ubuntu-latest
-    needs: [check, demo]
-    if: always()
-    steps:
-      - name: Check all jobs
-        run: |
-          # Check if any required job failed
-          if [[ "${{ needs.check.result }}" == "failure" ]]; then
-            echo "❌ Code quality checks failed"
-            exit 1
-          fi
-
-          # Demo can be skipped but if it runs, it must pass
-          if [[ "${{ needs.demo.result }}" == "failure" ]]; then
-            echo "❌ Demo test failed"
-            exit 1
-          fi
-
-          echo "✅ All CI checks passed!"

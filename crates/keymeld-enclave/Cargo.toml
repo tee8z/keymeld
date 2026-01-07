@@ -47,3 +47,6 @@ default = []
 [[bin]]
 name = "keymeld-enclave"
 path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -55,8 +55,12 @@ if [[ "$COUNT" -ge 100 ]]; then
     export USE_RPC_BATCHER=true
 fi
 
-echo "🔨 Building project..."
-cargo build > /dev/null 2>&1
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld-gateway" ]; then
+    echo "✅ Using pre-built binaries"
+else
+    echo "🔨 Building project..."
+    cargo build > /dev/null 2>&1
+fi
 
 echo "🚀 Starting services..."
 ./scripts/start-services.sh > /dev/null 2>&1

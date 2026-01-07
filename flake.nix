@@ -187,6 +187,7 @@
             pkgs.awscli2
             pkgs.litestream
             pkgs.haproxy
+            pkgs.lld  # Fast linker for Rust
             self.packages.${system}.vsock-proxy
             self.packages.${system}.bitcoin-rpc-proxy
           ];

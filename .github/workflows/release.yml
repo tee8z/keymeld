@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Extract version from tag
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      version_name: ${{ steps.get_version.outputs.version_name }}
+    steps:
+      - name: Get version from tag
+        id: get_version
+        run: |
+          # Extract version from tag (v1.2.3 -> 1.2.3)
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_name=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+  # Update version in Cargo.toml files
+  update-versions:
+    name: Update Crate Versions
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
+      - name: Update versions
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          echo "Updating all crates to version $VERSION"
+
+          # Update workspace Cargo.toml
+          cargo set-version --workspace $VERSION
+
+          # Verify the changes
+          echo "Updated versions:"
+          grep "^version" Cargo.toml
+          grep "^version" crates/*/Cargo.toml
+
+      - name: Commit version updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
+          git commit -m "chore: bump version to ${{ needs.prepare-release.outputs.version }}" || echo "No changes to commit"
+          git push origin HEAD:master || echo "No changes to push"
+
+  # Build release binaries
+  build-release:
+    name: Build Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, update-versions]
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ matrix.target }}-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Package binaries
+        run: |
+          mkdir -p release
+          cd target/${{ matrix.target }}/release
+
+          # Package gateway
+          if [ -f keymeld-gateway ]; then
+            tar czf ../../../release/keymeld-gateway-${{ needs.prepare-release.outputs.version }}-${{ matrix.target }}.tar.gz keymeld-gateway
+          fi
+
+          # Package enclave
+          if [ -f keymeld-enclave ]; then
+            tar czf ../../../release/keymeld-enclave-${{ needs.prepare-release.outputs.version }}-${{ matrix.target }}.tar.gz keymeld-enclave
+          fi
+
+          cd ../../..
+          ls -lh release/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release/*.tar.gz
+          retention-days: 7
+
+  # Create GitHub release
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, build-release]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ needs.prepare-release.outputs.version_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to crates.io (optional - uncomment when ready)
+  # publish-crates:
+  #   name: Publish to crates.io
+  #   runs-on: ubuntu-latest
+  #   needs: [prepare-release, build-release]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: master
+  #
+  #     - name: Install Rust
+  #       uses: dtolnay/rust-toolchain@stable
+  #
+  #     - name: Publish crates
+  #       run: |
+  #         # Publish in dependency order
+  #         cargo publish -p keymeld-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  #         sleep 10  # Wait for crates.io to update
+  #         cargo publish -p keymeld-sdk --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  #         sleep 10
+  #         cargo publish -p keymeld-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  #         sleep 10
+  #         cargo publish -p keymeld-gateway --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,140 @@
+[alias]
+# Build aliases
+b = "build"
+br = "build --release"
+bd = "build --debug"
+bw = "build --workspace"
+bwr = "build --workspace --release"
+
+# Run aliases
+r = "run"
+rr = "run --release"
+re = "run --bin keymeld-example"
+rer = "run --release --bin keymeld-example"
+rg = "run --bin keymeld-gateway"
+rgr = "run --release --bin keymeld-gateway"
+
+# Test aliases
+t = "test"
+ta = "test --all"
+tw = "test --workspace"
+tt = "test -- --test-threads=1"
+tq = "test --quiet"
+
+# Check aliases
+c = "check"
+cw = "check --workspace"
+ca = "check --all-targets"
+
+# Clippy aliases
+cl = "clippy"
+cla = "clippy --all-targets"
+clf = "clippy --all-targets --all-features"
+clfix = "clippy --fix --allow-dirty"
+
+# Format aliases
+f = "fmt"
+fa = "fmt --all"
+fc = "fmt --all -- --check"
+
+# Clean aliases
+clean-all = "clean"
+
+# Documentation aliases
+d = "doc"
+do = "doc --open"
+dd = "doc --no-deps"
+ddo = "doc --no-deps --open"
+
+# Watch aliases (requires cargo-watch)
+w = "watch -x build"
+wt = "watch -x test"
+wr = "watch -x run"
+wc = "watch -x check"
+
+# Keymeld specific aliases
+keymeld-example = "run --bin keymeld-example --"
+keymeld-gateway = "run --bin keymeld-gateway --"
+keymeld-test = "test --workspace -- --test-threads=1"
+
+# Development workflow
+dev = ["fmt", "clippy --all-targets", "test"]
+ci = ["fmt -- --check", "clippy --all-targets -- -D warnings", "test --workspace"]
+
+[build]
+# Note: target-cpu=native is set via RUSTFLAGS in justfile for local dev
+# CI uses generic target for cache compatibility across runners
+
+# Note: For faster linking with lld, run builds inside Nix devShell
+# or set RUSTFLAGS="-C link-arg=-fuse-ld=lld" manually
+
+[cargo-new]
+# Default template for new crates
+vcs = "git"
+
+[net]
+# Use sparse registry for faster dependency resolution
+git-fetch-with-cli = true
+
+[registries.crates-io]
+protocol = "sparse"
+
+# Cache-friendly settings for CI and Nix
+[http]
+# Network settings for better cache behavior
+multiplexing = true
+timeout = 60
+low-speed-limit = 10
+
+[env]
+# Default environment variables for development
+RUST_LOG = { value = "info,keymeld=debug", force = false }
+RUST_BACKTRACE = { value = "1", force = false }
+
+# KeyMeld specific environment variables
+KEYMELD_ENV = { value = "development", force = false }
+KEYMELD_LOG_FORMAT = { value = "pretty", force = false }
+
+# Cache-friendly environment variables for development
+# Enable incremental compilation for faster builds
+CARGO_INCREMENTAL = { value = "1", force = false }
+# Allow sharing build cache in CI environments
+SCCACHE_CACHE_SIZE = { value = "2G", force = false }
+
+[profile.dev]
+# Development profile optimizations
+debug = 2
+incremental = true
+# Enable debug assertions for better development experience
+
+[profile.release]
+# Release profile optimizations
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3
+
+[profile.test]
+# Test profile - balance between compilation speed and runtime performance
+opt-level = 1
+debug = true
+
+[profile.bench]
+# Benchmark profile
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+
+# Custom profile for enclave builds (requires additional security)
+[profile.enclave]
+inherits = "release"
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"  # Optimize for size in enclaves
+
+[unstable]
+# Enable unstable features for development
+# trim-paths = true  # Uncomment when stabilized

@@ -1,0 +1,12 @@
+# Security audit configuration for cargo-audit
+
+[advisories]
+# Ignore serde_cbor unmaintained warning - acceptable risk for enclave environment
+# AWS Nitro Enclaves crate also depends on it, and we're running in a secure enclave context
+#
+# Ignore RSA vulnerability in MySQL driver - we only use SQLite, never MySQL
+# The vulnerable RSA crate is pulled in by sqlx-mysql but we never execute MySQL code paths
+ignore = [
+    "RUSTSEC-2021-0127",  # serde_cbor unmaintained - transitive dependency only
+    "RUSTSEC-2023-0071",  # RSA Marvin Attack - MySQL driver only, we use SQLite
+]

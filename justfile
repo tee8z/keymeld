@@ -66,14 +66,24 @@ quickstart:
     set -euo pipefail
     echo "🚀 Starting KeyMeld quickstart..."
     QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
-    nix develop -c bash -c '\
+    # If already in nix shell, run directly; otherwise wrap with nix develop
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
         ./scripts/clean.sh && \
         QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
-        cargo build && \
+        ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
         ./scripts/start-services.sh && \
-        ./scripts/run-demo.sh plain 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
-    '
+        ./scripts/run-demo.sh plain 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80
+    else
+        nix develop -c bash -c '\
+            ./scripts/clean.sh && \
+            QUIET=true ./scripts/vsock-setup.sh start && \
+            ./scripts/setup-regtest.sh && \
+            ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
+            ./scripts/start-services.sh && \
+            ./scripts/run-demo.sh plain 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
+        '
+    fi
 
 # Complete setup + adaptor signatures demo for new users
 quickstart-adaptors:
@@ -82,14 +92,24 @@ quickstart-adaptors:
     echo "🚀 Starting KeyMeld adaptor signatures quickstart..."
     echo "🔧 Setting up VSock (CI-friendly, no password prompts)..."
     QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
-    nix develop -c bash -c '\
+    # If already in nix shell, run directly; otherwise wrap with nix develop
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
         ./scripts/clean.sh && \
         QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
-        cargo build && \
+        ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
         ./scripts/start-services.sh && \
-        ./scripts/run-demo.sh adaptor 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
-    '
+        ./scripts/run-demo.sh adaptor 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80
+    else
+        nix develop -c bash -c '\
+            ./scripts/clean.sh && \
+            QUIET=true ./scripts/vsock-setup.sh start && \
+            ./scripts/setup-regtest.sh && \
+            ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
+            ./scripts/start-services.sh && \
+            ./scripts/run-demo.sh adaptor 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
+        '
+    fi
 
 # Start all services
 start: build-dev
@@ -170,10 +190,12 @@ start: build-dev
 stop: stop-vsock-proxies
     #!/usr/bin/env bash
     echo "🛑 Stopping KeyMeld services..."
-    pkill -f keymeld-gateway || true
-    pkill -f keymeld-enclave || true
-    pkill -f bitcoind || true
-    pkill -f moto_server || true
+    # Use pgrep -x to match exact process names, avoiding parent shell matches
+    for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
+        pgrep -x "$proc" 2>/dev/null | xargs -r kill 2>/dev/null || true
+    done
+    pkill -x bitcoind || true
+    pkill -x moto_server || true
     echo "✅ All services stopped"
 
 # Restart all services
@@ -229,8 +251,13 @@ demo-adaptors amount="50000" dest="bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80"
 
 # Run parallel stress tests
 stress mode count amount="50000":
-    @echo "🚀 Running KeyMeld stress test..."
-    @nix develop -c ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
+    #!/usr/bin/env bash
+    echo "🚀 Running KeyMeld stress test..."
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
+    else
+        nix develop -c ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
+    fi
 
 # Monitor stress test progress in real-time
 stress-monitor interval="5":
@@ -244,8 +271,13 @@ fund-wallets count amount="0.00055" batch_size="50" creation_parallelism="10":
 
 # Run KMS end-to-end tests (requires services to be running)
 test-kms-e2e:
-    @echo "🧪 Running KMS End-to-End Tests..."
-    @nix develop -c ./scripts/test-kms-e2e.sh
+    #!/usr/bin/env bash
+    echo "🧪 Running KMS End-to-End Tests..."
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        ./scripts/test-kms-e2e.sh
+    else
+        nix develop -c ./scripts/test-kms-e2e.sh
+    fi
 
 # Mine Bitcoin regtest blocks
 mine blocks="6":
@@ -351,11 +383,11 @@ clean: stop
     #!/usr/bin/env bash
     echo "🧹 Cleaning all KeyMeld data..."
 
-    # Ensure all processes are stopped
-    pkill -9 -f keymeld-gateway 2>/dev/null || true
-    pkill -9 -f keymeld-enclave 2>/dev/null || true
-    pkill -9 -f keymeld_demo 2>/dev/null || true
-    pkill -9 -f haproxy 2>/dev/null || true
+    # Ensure all processes are stopped (use pgrep -x to avoid killing parent shell)
+    for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
+        pgrep -x "$proc" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    done
+    pkill -9 -x haproxy 2>/dev/null || true
     ./scripts/bitcoin-rpc-batcher.sh stop 2>/dev/null || true
     rm -rf /tmp/keymeld-bitcoin-proxy 2>/dev/null || true
     rm -rf /tmp/keymeld-rpc-queue 2>/dev/null || true

@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Enable version updates for Cargo dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: Etc/UTC
+    # Group all compatible updates into a single PR
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    # Limit the number of open PRs
+    open-pull-requests-limit: 10
+    # Add assignees and reviewers
+    assignees:
+      - "tee8z"
+    # Add labels to PRs
+    labels:
+      - "dependencies"
+      - "rust"
+    # Commit message prefix
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    # Allow all updates including patches
+    # This ensures we get security fixes and improvements
