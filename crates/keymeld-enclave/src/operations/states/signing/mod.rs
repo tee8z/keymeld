@@ -16,9 +16,11 @@ pub use generating_nonces::GeneratingNonces;
 pub use generating_partial_signatures::GeneratingPartialSignatures;
 pub use initialized::Initialized;
 
-use keymeld_core::enclave::{CryptoError, EnclaveError};
 use keymeld_core::{
-    encrypted_data::SigningSessionData, musig::AdaptorConfig, KeyMaterial, SessionSecret, UserId,
+    crypto::SessionSecret,
+    identifiers::UserId,
+    protocol::{AdaptorConfig, CryptoError, EnclaveError},
+    KeyMaterial,
 };
 
 #[derive(Debug, Clone)]
@@ -27,15 +29,11 @@ pub struct CoordinatorData {
     pub private_key: KeyMaterial,
 }
 
-pub fn has_adaptor_configs(session_data: &SigningSessionData) -> bool {
-    !session_data.adaptor_configs.is_empty()
-}
-
 pub fn decrypt_adaptor_configs(
     encrypted_adapator_configs: &str,
     session_secret: &SessionSecret,
 ) -> Result<Vec<AdaptorConfig>, EnclaveError> {
-    let configs = keymeld_core::api::validation::decrypt_adaptor_configs(
+    let configs = keymeld_core::validation::decrypt_adaptor_configs(
         encrypted_adapator_configs,
         &hex::encode(session_secret.as_bytes()),
     )

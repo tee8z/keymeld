@@ -2,10 +2,11 @@ use aws_nitro_enclaves_cose::crypto::Openssl;
 use aws_nitro_enclaves_cose::CoseSign1;
 use aws_nitro_enclaves_nsm_api::api::{ErrorCode, Request, Response};
 use aws_nitro_enclaves_nsm_api::driver::{nsm_exit, nsm_init, nsm_process_request};
-use keymeld_core::enclave::{AttestationError, CryptoError};
+use keymeld_core::protocol::{AttestationError, CryptoError};
 use keymeld_core::AttestationDocument;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+use serde_cbor;
 use std::collections::BTreeMap;
 use std::mem::discriminant;
 use thiserror::Error;
@@ -26,17 +27,17 @@ pub enum NsmError {
     CoseParseError(String),
     #[error("Failed to get COSE payload: {0}")]
     CosePayloadError(String),
-    #[error("Failed to parse attestation payload as CBOR")]
-    CborParseError(#[source] serde_cbor::Error),
+    #[error("Failed to parse attestation payload as CBOR: {0}")]
+    CborParseError(String),
     #[error("PCR {0} verification failed")]
     PcrVerificationFailed(String),
     #[error("PCR {0} not found in attestation")]
     PcrNotFound(String),
-    #[error("Failed to serialize attestation document")]
-    SerializationFailed(#[source] serde_cbor::Error),
+    #[error("Failed to serialize attestation document: {0}")]
+    SerializationFailed(String),
 }
 
-impl From<NsmError> for keymeld_core::enclave::EnclaveError {
+impl From<NsmError> for keymeld_core::protocol::EnclaveError {
     fn from(err: NsmError) -> Self {
         match err {
             NsmError::InitializationFailed(_)
@@ -46,11 +47,13 @@ impl From<NsmError> for keymeld_core::enclave::EnclaveError {
             | NsmError::CborParseError(_)
             | NsmError::PcrVerificationFailed(_)
             | NsmError::PcrNotFound(_)
-            | NsmError::SerializationFailed(_) => keymeld_core::enclave::EnclaveError::Attestation(
-                AttestationError::Other(err.to_string()),
-            ),
+            | NsmError::SerializationFailed(_) => {
+                keymeld_core::protocol::EnclaveError::Attestation(AttestationError::Other(
+                    err.to_string(),
+                ))
+            }
             NsmError::GetRandomFailed(_) | NsmError::RandomBytesLengthMismatch { .. } => {
-                keymeld_core::enclave::EnclaveError::Crypto(CryptoError::Other(err.to_string()))
+                keymeld_core::protocol::EnclaveError::Crypto(CryptoError::Other(err.to_string()))
             }
         }
     }
@@ -58,6 +61,7 @@ impl From<NsmError> for keymeld_core::enclave::EnclaveError {
 
 type Result<T> = std::result::Result<T, NsmError>;
 
+#[derive(Debug)]
 pub struct NsmClient {
     nsm_fd: i32,
 }
@@ -159,8 +163,8 @@ impl NsmClient {
             .get_payload::<Openssl>(None)
             .map_err(|e| NsmError::CosePayloadError(e.to_string()))?;
 
-        let attestation_data: serde_cbor::Value =
-            serde_cbor::from_slice(&payload).map_err(NsmError::CborParseError)?;
+        let attestation_data: serde_cbor::Value = serde_cbor::from_slice(&payload)
+            .map_err(|e| NsmError::CborParseError(e.to_string()))?;
 
         let pcrs = self.extract_pcrs(&attestation_data)?;
 
@@ -189,18 +193,25 @@ impl NsmClient {
         let mut pcrs = BTreeMap::new();
 
         if let serde_cbor::Value::Map(map) = data {
-            if let Some(serde_cbor::Value::Map(pcr_map)) =
-                map.get(&serde_cbor::Value::Text("pcrs".to_string()))
-            {
-                for (key, value) in pcr_map {
-                    if let (
-                        serde_cbor::Value::Integer(pcr_num),
-                        serde_cbor::Value::Bytes(pcr_value),
-                    ) = (key, value)
-                    {
-                        let pcr_name = format!("PCR{pcr_num}");
-                        pcrs.insert(pcr_name, pcr_value.clone());
-                        debug!("Extracted PCR{}: {} bytes", pcr_num, pcr_value.len());
+            // Find the "pcrs" entry in the map
+            for (k, v) in map {
+                if let serde_cbor::Value::Text(key_name) = k {
+                    if key_name == "pcrs" {
+                        if let serde_cbor::Value::Map(pcr_map) = v {
+                            for (key, value) in pcr_map {
+                                if let (
+                                    serde_cbor::Value::Integer(pcr_num),
+                                    serde_cbor::Value::Bytes(pcr_value),
+                                ) = (key, value)
+                                {
+                                    let idx: i128 = *pcr_num;
+                                    let pcr_name = format!("PCR{idx}");
+                                    pcrs.insert(pcr_name, pcr_value.clone());
+                                    debug!("Extracted PCR{}: {} bytes", idx, pcr_value.len());
+                                }
+                            }
+                        }
+                        break;
                     }
                 }
             }
@@ -217,11 +228,15 @@ impl NsmClient {
 
     fn extract_user_data(&self, data: &serde_cbor::Value) -> Option<Vec<u8>> {
         if let serde_cbor::Value::Map(map) = data {
-            if let Some(serde_cbor::Value::Bytes(user_data)) =
-                map.get(&serde_cbor::Value::Text("user_data".to_string()))
-            {
-                debug!("Extracted user data: {} bytes", user_data.len());
-                return Some(user_data.clone());
+            for (k, v) in map {
+                if let serde_cbor::Value::Text(key_name) = k {
+                    if key_name == "user_data" {
+                        if let serde_cbor::Value::Bytes(user_data) = v {
+                            debug!("Extracted user data: {} bytes", user_data.len());
+                            return Some(user_data.clone());
+                        }
+                    }
+                }
             }
         }
         None
@@ -229,11 +244,15 @@ impl NsmClient {
 
     fn extract_public_key(&self, data: &serde_cbor::Value) -> Option<Vec<u8>> {
         if let serde_cbor::Value::Map(map) = data {
-            if let Some(serde_cbor::Value::Bytes(public_key)) =
-                map.get(&serde_cbor::Value::Text("public_key".to_string()))
-            {
-                debug!("Extracted public key: {} bytes", public_key.len());
-                return Some(public_key.clone());
+            for (k, v) in map {
+                if let serde_cbor::Value::Text(key_name) = k {
+                    if key_name == "public_key" {
+                        if let serde_cbor::Value::Bytes(public_key) = v {
+                            debug!("Extracted public key: {} bytes", public_key.len());
+                            return Some(public_key.clone());
+                        }
+                    }
+                }
             }
         }
         None
@@ -241,15 +260,15 @@ impl NsmClient {
 
     fn extract_timestamp(&self, data: &serde_cbor::Value) -> Option<u64> {
         if let serde_cbor::Value::Map(map) = data {
-            if let Some(serde_cbor::Value::Integer(timestamp)) =
-                map.get(&serde_cbor::Value::Text("timestamp".to_string()))
-            {
-                return Some(*timestamp as u64);
-            }
-            if let Some(serde_cbor::Value::Integer(timestamp)) =
-                map.get(&serde_cbor::Value::Text("iat".to_string()))
-            {
-                return Some(*timestamp as u64);
+            for (k, v) in map {
+                if let serde_cbor::Value::Text(key_name) = k {
+                    if key_name == "timestamp" || key_name == "iat" {
+                        if let serde_cbor::Value::Integer(timestamp) = v {
+                            let ts: i128 = *timestamp;
+                            return Some(ts as u64);
+                        }
+                    }
+                }
             }
         }
         None
@@ -271,11 +290,15 @@ impl NsmClient {
                         serde_cbor::from_slice(protected_bytes)
                     {
                         for (key, value) in protected_map {
-                            if let serde_cbor::Value::Integer(33) = key {
-                                if let serde_cbor::Value::Array(cert_chain) = value {
-                                    if let Some(serde_cbor::Value::Bytes(cert)) = cert_chain.first()
-                                    {
-                                        return Ok(cert.clone());
+                            if let serde_cbor::Value::Integer(num) = key {
+                                let key_int: i128 = num;
+                                if key_int == 33 {
+                                    if let serde_cbor::Value::Array(cert_chain) = value {
+                                        if let Some(serde_cbor::Value::Bytes(cert)) =
+                                            cert_chain.first()
+                                        {
+                                            return Ok(cert.clone());
+                                        }
                                     }
                                 }
                             }
@@ -332,7 +355,7 @@ impl NsmClient {
             }
         }
 
-        info!("All PCR measurements verified successfully");
+        info!("All PCR measurements verified");
         Ok(())
     }
 }
@@ -377,7 +400,8 @@ impl KeyMeldAttestation {
             enclave_public_key,
         )?;
 
-        let raw_bytes = serde_cbor::to_vec(&raw_document).map_err(NsmError::SerializationFailed)?;
+        let raw_bytes = serde_cbor::to_vec(&raw_document)
+            .map_err(|e| NsmError::SerializationFailed(e.to_string()))?;
 
         Ok(Self {
             document: raw_bytes,

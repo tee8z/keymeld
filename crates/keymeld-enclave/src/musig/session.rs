@@ -1,12 +1,11 @@
-use crate::{
-    enclave::{EnclaveError, PhaseError},
+use keymeld_core::{
     identifiers::{SessionId, UserId},
+    protocol::{EnclaveError, PhaseError, TaprootTweak},
 };
 use musig2::secp256k1::PublicKey;
 use std::collections::BTreeMap;
 
 use super::types::{SessionMetadata, SessionPhase};
-use crate::api::TaprootTweak;
 
 impl SessionMetadata {
     /// Get all participant public keys in descending order by UserId (newest UUIDv7 first).
@@ -57,14 +56,11 @@ impl SessionMetadata {
             participant_public_keys: self.participant_public_keys.clone(),
             expected_participant_count: self.expected_participant_count,
             key_agg_ctx: self.key_agg_ctx.clone(), // Preserve key aggregation context
-            nonces: BTreeMap::new(),               // Reset nonces for new signing session
+
             phase: initial_phase,
             taproot_tweak: self.taproot_tweak.clone(), // Preserve taproot configuration
             adaptor_configs: self.adaptor_configs.clone(), // Preserve adaptor configurations
-            adaptor_aggregate_nonces: BTreeMap::new(), // Reset adaptor nonces
-            adaptor_partial_signatures: BTreeMap::new(), // Reset adaptor signatures
             adaptor_final_signatures: BTreeMap::new(), // Reset final adaptor signatures
-            regular_signature: None,                   // Reset regular signature
         })
     }
 
@@ -99,14 +95,10 @@ impl SessionMetadata {
             participant_public_keys: BTreeMap::new(),
             expected_participant_count,
             key_agg_ctx: None,
-            nonces: BTreeMap::new(),
             phase: SessionPhase::CollectingParticipants,
             taproot_tweak,
             adaptor_configs: Vec::new(),
-            adaptor_aggregate_nonces: BTreeMap::new(),
-            adaptor_partial_signatures: BTreeMap::new(),
             adaptor_final_signatures: BTreeMap::new(),
-            regular_signature: None,
         }
     }
 

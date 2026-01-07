@@ -1,114 +1,83 @@
-use keymeld_core::{musig::MusigProcessor, EncryptedData, SessionId, SessionSecret};
-use std::{sync::Arc, time::SystemTime};
-
+use crate::musig::MusigProcessor;
 use crate::operations::states::signing::CoordinatorData;
+use keymeld_core::{identifiers::SessionId, EncryptedData, SessionSecret};
+use std::time::SystemTime;
+use tracing::info;
 
-#[derive(Debug, Clone)]
-pub struct CompletedBuilder {
-    pub session_id: SessionId,
-    pub session_secret: SessionSecret,
-    pub encrypted_signed_message: EncryptedData,
-    pub participant_count: u32,
-    pub created_at: SystemTime,
-    pub coordinator_data: Option<CoordinatorData>,
-    pub musig_processor: Arc<MusigProcessor>,
-    pub encrypted_adaptor_signatures: Option<EncryptedData>,
-}
-
-impl CompletedBuilder {
-    pub fn new(
-        session_id: SessionId,
-        session_secret: SessionSecret,
-        encrypted_signed_message: EncryptedData,
-        musig_processor: Arc<MusigProcessor>,
-    ) -> Self {
-        Self {
-            session_id,
-            session_secret,
-            encrypted_signed_message,
-            participant_count: 0,
-            created_at: SystemTime::now(),
-            coordinator_data: None,
-            musig_processor,
-            encrypted_adaptor_signatures: None,
-        }
-    }
-
-    pub fn participant_count(mut self, count: u32) -> Self {
-        self.participant_count = count;
-        self
-    }
-
-    pub fn created_at(mut self, time: SystemTime) -> Self {
-        self.created_at = time;
-        self
-    }
-
-    pub fn coordinator_data(mut self, coordinator_data: Option<CoordinatorData>) -> Self {
-        self.coordinator_data = coordinator_data;
-        self
-    }
-
-    pub fn with_adaptor_signatures(mut self, signatures: EncryptedData) -> Self {
-        self.encrypted_adaptor_signatures = Some(signatures);
-        self
-    }
-
-    pub fn build(self) -> Completed {
-        Completed {
-            session_id: self.session_id,
-            session_secret: self.session_secret,
-            encrypted_signed_message: self.encrypted_signed_message,
-            participant_count: self.participant_count,
-            created_at: self.created_at,
-            completed_at: SystemTime::now(),
-            encrypted_adaptor_signatures: self.encrypted_adaptor_signatures,
-            coordinator_data: self.coordinator_data,
-            musig_processor: self.musig_processor,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Completed {
     pub session_id: SessionId,
-    pub session_secret: SessionSecret,
-    pub encrypted_signed_message: EncryptedData,
-    pub participant_count: u32,
     pub created_at: SystemTime,
-    pub completed_at: SystemTime,
-    pub encrypted_adaptor_signatures: Option<EncryptedData>,
-    pub coordinator_data: Option<CoordinatorData>,
-    pub musig_processor: Arc<MusigProcessor>,
+    session_secret: SessionSecret,
+    encrypted_signed_message: EncryptedData,
+    participant_count: u32,
+    encrypted_adaptor_signatures: Option<EncryptedData>,
+    coordinator_data: Option<CoordinatorData>,
+    musig_processor: MusigProcessor,
 }
 
 impl Completed {
-    pub fn builder(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         session_id: SessionId,
         session_secret: SessionSecret,
         encrypted_signed_message: EncryptedData,
-        musig_processor: Arc<MusigProcessor>,
-    ) -> CompletedBuilder {
-        CompletedBuilder::new(
+        participant_count: u32,
+        created_at: SystemTime,
+        coordinator_data: Option<CoordinatorData>,
+        musig_processor: MusigProcessor,
+        encrypted_adaptor_signatures: Option<EncryptedData>,
+    ) -> Self {
+        let completed_at = SystemTime::now();
+        let duration = completed_at.duration_since(created_at).unwrap_or_default();
+
+        info!(
+            "Signing session {} completed successfully in {:.2}s",
             session_id,
+            duration.as_secs_f64()
+        );
+
+        Self {
             session_secret,
             encrypted_signed_message,
+            participant_count,
+            encrypted_adaptor_signatures,
+            coordinator_data,
             musig_processor,
-        )
+            created_at,
+            session_id,
+        }
     }
 
-    pub fn new(
-        session_id: SessionId,
-        session_secret: SessionSecret,
-        encrypted_signed_message: EncryptedData,
-        musig_processor: Arc<MusigProcessor>,
-    ) -> Self {
-        CompletedBuilder::new(
-            session_id,
-            session_secret,
-            encrypted_signed_message,
-            musig_processor,
-        )
-        .build()
+    pub fn session_secret(&self) -> &SessionSecret {
+        &self.session_secret
+    }
+
+    pub fn coordinator_data(&self) -> &Option<CoordinatorData> {
+        &self.coordinator_data
+    }
+
+    pub fn musig_processor(&self) -> &MusigProcessor {
+        &self.musig_processor
+    }
+
+    pub fn encrypted_signed_message(&self) -> &EncryptedData {
+        &self.encrypted_signed_message
+    }
+
+    pub fn participant_count(&self) -> u32 {
+        self.participant_count
+    }
+
+    pub fn encrypted_adaptor_signatures(&self) -> &Option<EncryptedData> {
+        &self.encrypted_adaptor_signatures
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
     }
 }

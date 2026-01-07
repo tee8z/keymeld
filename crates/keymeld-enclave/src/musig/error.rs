@@ -1,9 +1,8 @@
-use crate::identifiers::{SessionId, UserId};
+use keymeld_core::identifiers::{SessionId, UserId};
 use thiserror::Error;
 
 use super::types::SessionPhase;
 
-/// Wrapper for musig2 library errors to implement std::error::Error
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Musig2LibError(pub(crate) String);
 
@@ -21,7 +20,6 @@ impl From<String> for Musig2LibError {
     }
 }
 
-// Implement From for common musig2 error types
 impl From<musig2::errors::KeyAggError> for Musig2LibError {
     fn from(err: musig2::errors::KeyAggError) -> Self {
         Musig2LibError(err.to_string())
@@ -81,4 +79,14 @@ pub enum MusigError {
     InvalidParticipant(UserId),
     #[error("Invalid adaptor configuration: {0}")]
     InvalidAdaptorConfig(String),
+    #[error("Session already initialized: {0}")]
+    SessionAlreadyInitialized(SessionId),
+    #[error("Failed to acquire lock: {0}")]
+    FailedLock(String),
+    #[error("User not found: {0}")]
+    UserNotFound(UserId),
+    #[error("Session not ready: {0}")]
+    SessionNotReady(String),
+    #[error("Signing error: {0}")]
+    SigningError(String),
 }
