@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO enclave_public_keys (enclave_id, public_key, cached_at, expires_at, is_healthy,\n                                                    attestation_document, key_epoch, key_generation_time, startup_time, active_sessions)\n                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n                     ON CONFLICT(enclave_id) DO UPDATE SET\n                         public_key = CASE WHEN excluded.public_key != 'unavailable' THEN excluded.public_key ELSE enclave_public_keys.public_key END,\n                         cached_at = excluded.cached_at,\n                         expires_at = excluded.expires_at,\n                         is_healthy = excluded.is_healthy,\n                         attestation_document = COALESCE(excluded.attestation_document, enclave_public_keys.attestation_document),\n                         key_epoch = COALESCE(excluded.key_epoch, enclave_public_keys.key_epoch),\n                         key_generation_time = COALESCE(excluded.key_generation_time, enclave_public_keys.key_generation_time),\n                         startup_time = COALESCE(excluded.startup_time, enclave_public_keys.startup_time),\n                         active_sessions = COALESCE(excluded.active_sessions, enclave_public_keys.active_sessions)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "1f09bc066a9ec75a826a48727bb2e892b90e8867d876e2880fc2cf18017ccda2"
+}

@@ -48,6 +48,32 @@ impl fmt::Display for EnclaveId {
     }
 }
 
+#[cfg(feature = "sqlx")]
+impl sqlx::Type<sqlx::Sqlite> for EnclaveId {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <i64 as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Encode<'_, sqlx::Sqlite> for EnclaveId {
+    fn encode_by_ref(
+        &self,
+        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        let value = self.0 as i64;
+        <i64 as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&value, args)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Decode<'_, sqlx::Sqlite> for EnclaveId {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
+        let id = <i64 as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        Ok(EnclaveId(id as u32))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(transparent)]
@@ -116,6 +142,15 @@ impl TryFrom<&str> for UserId {
 
     fn try_from(id: &str) -> Result<Self, Self::Error> {
         Self::parse(id)
+    }
+}
+
+impl TryFrom<Vec<u8>> for UserId {
+    type Error = uuid::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        let uuid = Uuid::from_slice(&bytes)?;
+        Ok(Self(uuid))
     }
 }
 
@@ -190,6 +225,15 @@ impl TryFrom<String> for SessionId {
 
     fn try_from(id: String) -> Result<Self, Self::Error> {
         Self::parse(id)
+    }
+}
+
+impl TryFrom<Vec<u8>> for SessionId {
+    type Error = uuid::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        let uuid = Uuid::from_slice(&bytes)?;
+        Ok(Self(uuid))
     }
 }
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE keygen_sessions\n                     SET status = $1, status_name = $2, updated_at = $3,\n                         completed_at = CASE WHEN $4 = 'completed' THEN $5 ELSE completed_at END,\n                         failed_at = CASE WHEN $6 = 'failed' THEN $7 ELSE failed_at END\n                     WHERE keygen_session_id = $8",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "14c22829030c735dde2f3c7283fefe82fe517e24ddd759fbd64994a3528643b8"
+}

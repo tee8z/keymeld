@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signing_sessions\n                     SET status = $1, status_name = $2, updated_at = $3,\n                         completed_at = CASE WHEN $4 = 'completed' THEN $5 ELSE completed_at END,\n                         failed_at = CASE WHEN $6 = 'failed' THEN $7 ELSE failed_at END\n                     WHERE signing_session_id = $8",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "ecd73144578e29889150e99fea090a1eb018c43ba5fc380b69c910c6916c898a"
+}

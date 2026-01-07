@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM keygen_sessions\n                     WHERE status_name IN ('completed', 'failed')\n                     AND (completed_at < $1 OR failed_at < $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9ac7c9fd3730f9d4bccd7f7d2d67695082df9a3ded001806808ff1a740a51996"
+}

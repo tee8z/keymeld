@@ -20,7 +20,6 @@ use keymeld_sdk::{
 };
 use secp256k1::PublicKey;
 use sqlx::{
-    query_scalar,
     sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow},
     FromRow, Row,
 };
@@ -164,30 +163,31 @@ impl Database {
 
     pub async fn get_stats(&self) -> Result<DatabaseStats, ApiError> {
         let keygen_session_count: i64 =
-            query_scalar("SELECT COUNT(keygen_session_id) FROM keygen_sessions")
+            sqlx::query_scalar!("SELECT COUNT(keygen_session_id) as count FROM keygen_sessions")
                 .fetch_one(&self.pool)
                 .await?;
 
         let signing_session_count: i64 =
-            query_scalar("SELECT COUNT(signing_session_id) FROM signing_sessions")
+            sqlx::query_scalar!("SELECT COUNT(signing_session_id) as count FROM signing_sessions")
                 .fetch_one(&self.pool)
                 .await?;
 
-        let active_keygen_sessions: i64 = query_scalar(
-            "SELECT COUNT(keygen_session_id) FROM keygen_sessions WHERE status_name NOT IN ('completed', 'failed')"
+        let active_keygen_sessions: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(keygen_session_id) as count FROM keygen_sessions WHERE status_name NOT IN ('completed', 'failed')"
         )
         .fetch_one(&self.pool)
         .await?;
 
-        let active_signing_sessions: i64 = query_scalar(
-            "SELECT COUNT(signing_session_id) FROM signing_sessions WHERE status_name NOT IN ('completed', 'failed')"
+        let active_signing_sessions: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(signing_session_id) as count FROM signing_sessions WHERE status_name NOT IN ('completed', 'failed')"
         )
         .fetch_one(&self.pool)
         .await?;
 
-        let total_participants: i64 = query_scalar("SELECT COUNT(id) FROM keygen_participants")
-            .fetch_one(&self.pool)
-            .await?;
+        let total_participants: i64 =
+            sqlx::query_scalar!("SELECT COUNT(id) as count FROM keygen_participants")
+                .fetch_one(&self.pool)
+                .await?;
 
         let database_size = std::fs::metadata(&self.path)
             .map(|metadata| metadata.len())
@@ -202,7 +202,7 @@ impl Database {
     }
 
     pub async fn health_check(&self) -> Result<(), ApiError> {
-        sqlx::query("SELECT 1")
+        sqlx::query!("SELECT 1 as health_check")
             .fetch_one(&self.pool)
             .await
             .map_err(|e| ApiError::database(format!("Database health check failed: {e}")))?;
@@ -215,12 +215,13 @@ impl Database {
             .execute(self.pool.clone(), |pool| async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
 
-                let deleted_sessions =
-                    sqlx::query("DELETE FROM keygen_sessions WHERE expires_at < ?")
-                        .bind(current_time)
-                        .execute(&pool)
-                        .await?
-                        .rows_affected();
+                let deleted_sessions = sqlx::query!(
+                    "DELETE FROM keygen_sessions WHERE expires_at < $1",
+                    current_time
+                )
+                .execute(&pool)
+                .await?
+                .rows_affected();
 
                 if deleted_sessions > 0 {
                     debug!("Cleaned up {} expired keygen sessions", deleted_sessions);
@@ -240,13 +241,13 @@ impl Database {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff_time = current_time - (retention_hours as i64 * 3600);
 
-                let deleted_sessions = sqlx::query(
-                    "DELETE FROM keygen_sessions
+                let deleted_sessions = sqlx::query!(
+                    r#"DELETE FROM keygen_sessions
                      WHERE status_name IN ('completed', 'failed')
-                     AND (completed_at < ? OR failed_at < ?)",
+                     AND (completed_at < $1 OR failed_at < $2)"#,
+                    cutoff_time,
+                    cutoff_time
                 )
-                .bind(cutoff_time)
-                .bind(cutoff_time)
                 .execute(&pool)
                 .await?
                 .rows_affected();
@@ -268,11 +269,10 @@ impl Database {
             .execute(self.pool.clone(), |pool| async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
 
-                let deleted_sessions = sqlx::query(
-                    "DELETE FROM signing_sessions
-                     WHERE expires_at < ?",
+                let deleted_sessions = sqlx::query!(
+                    "DELETE FROM signing_sessions WHERE expires_at < $1",
+                    current_time
                 )
-                .bind(current_time)
                 .execute(&pool)
                 .await?
                 .rows_affected();
@@ -295,13 +295,13 @@ impl Database {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff_time = current_time - (retention_hours as i64 * 3600);
 
-                let deleted_sessions = sqlx::query(
-                    "DELETE FROM signing_sessions
+                let deleted_sessions = sqlx::query!(
+                    r#"DELETE FROM signing_sessions
                      WHERE status_name IN ('completed', 'failed')
-                     AND (completed_at < ? OR failed_at < ?)",
+                     AND (completed_at < $1 OR failed_at < $2)"#,
+                    cutoff_time,
+                    cutoff_time
                 )
-                .bind(cutoff_time)
-                .bind(cutoff_time)
                 .execute(&pool)
                 .await?
                 .rows_affected();
@@ -322,11 +322,12 @@ impl Database {
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<usize, ApiError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM signing_sessions WHERE keygen_session_id = ?")
-                .bind(keygen_session_id.as_string())
-                .fetch_one(&self.pool)
-                .await?;
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) as count FROM signing_sessions WHERE keygen_session_id = $1",
+            keygen_session_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
 
         Ok(count as usize)
     }
@@ -335,14 +336,14 @@ impl Database {
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Option<u32>, ApiError> {
-        let max_sessions: Option<i64> = sqlx::query_scalar(
-            "SELECT max_signing_sessions FROM keygen_sessions WHERE keygen_session_id = ?",
+        let row = sqlx::query!(
+            "SELECT max_signing_sessions FROM keygen_sessions WHERE keygen_session_id = $1",
+            keygen_session_id
         )
-        .bind(keygen_session_id.as_string())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(max_sessions.map(|s| s as u32))
+        Ok(row.and_then(|r| r.max_signing_sessions.map(|s| s as u32)))
     }
 
     pub async fn reserve_keygen_session(
@@ -371,26 +372,31 @@ impl Database {
                     ApiError::Serialization(format!("Failed to serialize keygen status: {e}"))
                 })?;
 
-                let status_name = status.kind();
+                let status_name = status.kind().to_string();
+                let keygen_session_id = &request.keygen_session_id;
+                let coordinator_enclave_id_i64 = coordinator_enclave_id.as_u32() as i64;
+                let max_signing_sessions = request.max_signing_sessions.map(|max| max as i64);
+                let expected_participants_json =
+                    serde_json::to_string(&request.expected_participants)?;
 
-                sqlx::query(
-                    "INSERT INTO keygen_sessions (
+                sqlx::query!(
+                    r#"INSERT INTO keygen_sessions (
                         keygen_session_id, status_name, coordinator_enclave_id, created_at,
                         expires_at, updated_at, retry_count, max_signing_sessions,
                         expected_participants, status, session_encrypted_data, enclave_encrypted_data,
                         session_public_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL)"#,
+                    keygen_session_id,
+                    status_name,
+                    coordinator_enclave_id_i64,
+                    current_time,
+                    expires_at,
+                    current_time,
+                    0i32,
+                    max_signing_sessions,
+                    expected_participants_json,
+                    status_json
                 )
-                .bind(request.keygen_session_id.as_string())
-                .bind(status_name.to_string())
-                .bind(coordinator_enclave_id.as_u32() as i64)
-                .bind(current_time)
-                .bind(expires_at)
-                .bind(current_time)
-                .bind(0)
-                .bind(request.max_signing_sessions.map(|max| max as i64))
-                .bind(serde_json::to_string(&request.expected_participants)?)
-                .bind(status_json)
                 .execute(&pool)
                 .await?;
 
@@ -410,10 +416,10 @@ impl Database {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
                 // First get the existing reserved session
-                let existing_row = sqlx::query(
-                    "SELECT status, coordinator_enclave_id FROM keygen_sessions WHERE keygen_session_id = ?"
+                let existing_row = sqlx::query!(
+                    "SELECT status, coordinator_enclave_id FROM keygen_sessions WHERE keygen_session_id = $1",
+                    session_id
                 )
-                .bind(session_id.as_string())
                 .fetch_optional(&pool)
                 .await?;
 
@@ -421,7 +427,7 @@ impl Database {
                     ApiError::NotFound("Keygen session not found".to_string())
                 })?;
 
-                let status_json: String = existing_row.get("status");
+                let status_json: String = existing_row.status;
                 let existing_status: KeygenSessionStatus = serde_json::from_str(&status_json)
                     .map_err(|e| ApiError::Internal(format!("Failed to deserialize session status: {e}")))?;
 
@@ -460,27 +466,30 @@ impl Database {
                     ApiError::Serialization(format!("Failed to serialize keygen status: {e}"))
                 })?;
 
-                let status_name = new_status.kind();
+                let status_name = new_status.kind().to_string();
                 let current_time = DbUtils::current_timestamp();
+                let session_encrypted_data = request.encrypted_session_data.clone();
+                let enclave_encrypted_data = request.encrypted_enclave_data.clone();
+                let session_public_key = request.session_public_key.as_slice();
 
                 // Update the session with encrypted data and new status
-                sqlx::query(
-                    "UPDATE keygen_sessions SET
-                        status_name = ?,
-                        status = ?,
-                        session_encrypted_data = ?,
-                        enclave_encrypted_data = ?,
-                        session_public_key = ?,
-                        updated_at = ?
-                    WHERE keygen_session_id = ?"
+                sqlx::query!(
+                    r#"UPDATE keygen_sessions SET
+                        status_name = $1,
+                        status = $2,
+                        session_encrypted_data = $3,
+                        enclave_encrypted_data = $4,
+                        session_public_key = $5,
+                        updated_at = $6
+                    WHERE keygen_session_id = $7"#,
+                    status_name,
+                    status_json,
+                    session_encrypted_data,
+                    enclave_encrypted_data,
+                    session_public_key,
+                    current_time,
+                    session_id
                 )
-                .bind(status_name.to_string())
-                .bind(status_json)
-                .bind(request.encrypted_session_data.clone())
-                .bind(request.encrypted_enclave_data.clone())
-                .bind(request.session_public_key.as_slice())
-                .bind(current_time)
-                .bind(session_id.as_string())
                 .execute(&pool)
                 .await?;
 
@@ -493,14 +502,16 @@ impl Database {
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Option<KeygenSessionStatus>, ApiError> {
-        let row = sqlx::query("SELECT status FROM keygen_sessions WHERE keygen_session_id = ?")
-            .bind(keygen_session_id.as_string())
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query!(
+            "SELECT status FROM keygen_sessions WHERE keygen_session_id = $1",
+            keygen_session_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
 
         match row {
             Some(row) => {
-                let status_json: String = row.get("status");
+                let status_json: String = row.status;
                 let mut status: KeygenSessionStatus =
                     serde_json::from_str(&status_json).map_err(|e| {
                         ApiError::Serialization(format!("Failed to deserialize keygen status: {e}"))
@@ -527,18 +538,15 @@ impl Database {
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Option<Vec<u8>>, ApiError> {
-        let row = sqlx::query(
-            "SELECT session_public_key FROM keygen_sessions WHERE keygen_session_id = ?",
+        let row = sqlx::query!(
+            "SELECT session_public_key FROM keygen_sessions WHERE keygen_session_id = $1",
+            keygen_session_id
         )
-        .bind(keygen_session_id.as_string())
         .fetch_optional(&self.pool)
         .await?;
 
         match row {
-            Some(row) => {
-                let public_key: Option<Vec<u8>> = row.get("session_public_key");
-                Ok(public_key)
-            }
+            Some(row) => Ok(row.session_public_key),
             None => Ok(None),
         }
     }
@@ -557,23 +565,27 @@ impl Database {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
                 let current_time = DbUtils::current_timestamp();
+                let user_id = &request.user_id;
+                let enclave_id_i64 = enclave_id.as_u32() as i64;
+                let enclave_key_epoch_i64 = enclave_key_epoch as i64;
+                let auth_pubkey = request.auth_pubkey.as_slice();
 
-                sqlx::query(
-                    "INSERT OR REPLACE INTO keygen_participants (
+                sqlx::query!(
+                    r#"INSERT OR REPLACE INTO keygen_participants (
                         keygen_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
                         registered_at, require_signing_approval, auth_pubkey,
                         session_encrypted_data, enclave_encrypted_data
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+                    keygen_session_id,
+                    user_id,
+                    enclave_id_i64,
+                    enclave_key_epoch_i64,
+                    current_time,
+                    request.require_signing_approval,
+                    auth_pubkey,
+                    session_encrypted_data,
+                    enclave_encrypted_data
                 )
-                .bind(keygen_session_id.as_string())
-                .bind(request.user_id.as_str())
-                .bind(enclave_id.as_u32() as i64)
-                .bind(enclave_key_epoch as i64)
-                .bind(current_time)
-                .bind(request.require_signing_approval)
-                .bind(request.auth_pubkey.as_slice())
-                .bind(session_encrypted_data)
-                .bind(enclave_encrypted_data)
                 .execute(&pool)
                 .await?;
 
@@ -582,18 +594,24 @@ impl Database {
             .await
     }
 
-    pub async fn get_keygen_participants(
+    /// Note: We use `query_as::<_, T>()` (runtime) instead of `query_as!()` (macro) here
+    /// because `KeygenParticipantRow` has custom types (`UserId`, `EnclaveId`) that require
+    /// a `FromRow` implementation for proper type conversion from SQLite primitives.
+    /// The `query_as!` macro generates its own mapping code and doesn't use `FromRow`,
+    /// so it can't handle custom type conversions. If sqlx adds support for custom type
+    /// mappings in macros in the future, this could be converted to use `query_as!`.
+    async fn get_keygen_participants(
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<ParticipantData>, ApiError> {
         let rows = sqlx::query_as::<_, KeygenParticipantRow>(
-            "SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
+            r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
                     require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
              FROM keygen_participants
              WHERE keygen_session_id = ?
-             ORDER BY registered_at ASC",
+             ORDER BY registered_at ASC"#,
         )
-        .bind(keygen_session_id.as_string())
+        .bind(keygen_session_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -607,28 +625,27 @@ impl Database {
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<usize, ApiError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM keygen_participants WHERE keygen_session_id = ?",
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) as count FROM keygen_participants WHERE keygen_session_id = $1",
+            keygen_session_id
         )
-        .bind(keygen_session_id.as_string())
         .fetch_one(&self.pool)
         .await?;
 
         Ok(count as usize)
     }
 
-    /// Get participant's session-specific auth pubkey for authorization
     pub async fn get_participant_auth_pubkey(
         &self,
         user_id: &UserId,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<u8>, ApiError> {
-        let auth_pubkey: Vec<u8> = sqlx::query_scalar(
-            "SELECT auth_pubkey FROM keygen_participants
-             WHERE user_id = ? AND keygen_session_id = ?",
+        let auth_pubkey: Vec<u8> = sqlx::query_scalar!(
+            r#"SELECT auth_pubkey FROM keygen_participants
+             WHERE user_id = $1 AND keygen_session_id = $2"#,
+            user_id,
+            keygen_session_id
         )
-        .bind(user_id.as_str())
-        .bind(keygen_session_id.as_string())
         .fetch_one(&self.pool)
         .await?;
 
@@ -651,21 +668,21 @@ impl Database {
                 let status_name = status.kind().to_string();
                 let current_time = DbUtils::current_timestamp();
 
-                sqlx::query(
-                    "UPDATE keygen_sessions
-                     SET status = ?, status_name = ?, updated_at = ?,
-                         completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
-                         failed_at = CASE WHEN ? = 'failed' THEN ? ELSE failed_at END
-                     WHERE keygen_session_id = ?",
+                sqlx::query!(
+                    r#"UPDATE keygen_sessions
+                     SET status = $1, status_name = $2, updated_at = $3,
+                         completed_at = CASE WHEN $4 = 'completed' THEN $5 ELSE completed_at END,
+                         failed_at = CASE WHEN $6 = 'failed' THEN $7 ELSE failed_at END
+                     WHERE keygen_session_id = $8"#,
+                    status_json,
+                    status_name,
+                    current_time,
+                    status_name,
+                    current_time,
+                    status_name,
+                    current_time,
+                    keygen_session_id
                 )
-                .bind(status_json)
-                .bind(status_name.clone())
-                .bind(current_time)
-                .bind(status_name.clone())
-                .bind(current_time)
-                .bind(status_name)
-                .bind(current_time)
-                .bind(keygen_session_id.as_string())
                 .execute(&pool)
                 .await?;
 
@@ -682,14 +699,16 @@ impl Database {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
                 // First get the keygen session status
-                let keygen_row =
-                    sqlx::query("SELECT status FROM keygen_sessions WHERE keygen_session_id = ?")
-                        .bind(request.keygen_session_id.as_string())
-                        .fetch_optional(&pool)
-                        .await?
-                        .ok_or(ApiError::not_found("Keygen session not found"))?;
+                let keygen_session_id = &request.keygen_session_id;
+                let keygen_row = sqlx::query!(
+                    "SELECT status FROM keygen_sessions WHERE keygen_session_id = $1",
+                    keygen_session_id
+                )
+                .fetch_optional(&pool)
+                .await?
+                .ok_or(ApiError::not_found("Keygen session not found"))?;
 
-                let status_json: String = keygen_row.get("status");
+                let status_json: String = keygen_row.status;
                 let keygen_status: KeygenSessionStatus =
                     serde_json::from_str(&status_json).map_err(|e| {
                         ApiError::Serialization(format!("Failed to deserialize keygen status: {e}"))
@@ -709,15 +728,14 @@ impl Database {
                         }
                     };
 
-                // Get keygen participants
                 let keygen_participants_rows = sqlx::query_as::<_, KeygenParticipantRow>(
-                    "SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
+                    r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
                             require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
                      FROM keygen_participants
                      WHERE keygen_session_id = ?
-                     ORDER BY registered_at ASC",
+                     ORDER BY registered_at ASC"#,
                 )
-                .bind(request.keygen_session_id.as_string())
+                .bind(keygen_session_id)
                 .fetch_all(&pool)
                 .await?;
 
@@ -734,17 +752,13 @@ impl Database {
                 let current_time = DbUtils::current_timestamp();
                 let expires_at = current_time + request.timeout_secs as i64;
 
-                let participants_requiring_approval = sqlx::query_scalar(
-                    "SELECT user_id FROM keygen_participants
-                     WHERE keygen_session_id = ? AND require_signing_approval = true",
+                let participants_requiring_approval: Vec<UserId> = sqlx::query_scalar!(
+                    r#"SELECT user_id as "user_id: UserId" FROM keygen_participants
+                     WHERE keygen_session_id = $1 AND require_signing_approval = true"#,
+                    keygen_session_id
                 )
-                .bind(request.keygen_session_id.as_string())
                 .fetch_all(&pool)
-                .await?
-                .into_iter()
-                .map(|user_id_str: String| UserId::parse(&user_id_str))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| ApiError::database(format!("Invalid user ID in database: {e}")))?;
+                .await?;
 
                 // Convert keygen participants to registered participants map
                 let registered_participants: BTreeMap<UserId, ParticipantData> = keygen_participants
@@ -798,38 +812,42 @@ impl Database {
                     ApiError::Serialization(format!("Failed to serialize enclave data: {e}"))
                 })?;
 
-                sqlx::query(
-                    "INSERT INTO signing_sessions (
+                let signing_session_id = &request.signing_session_id;
+                let message_hash = request.message_hash.as_slice();
+                let expected_participants_json = serde_json::to_string(&expected_participants)?;
+
+                sqlx::query!(
+                    r#"INSERT INTO signing_sessions (
                         signing_session_id, keygen_session_id, status_name, created_at,
                         expires_at, updated_at, retry_count, correlation_id, message_hash,
                         expected_participants, status, session_encrypted_data, enclave_encrypted_data
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+                    signing_session_id,
+                    keygen_session_id,
+                    status_name,
+                    current_time,
+                    expires_at,
+                    current_time,
+                    0i32,
+                    correlation_id_bytes,
+                    message_hash,
+                    expected_participants_json,
+                    status_json,
+                    session_encrypted,
+                    enclave_encrypted
                 )
-                .bind(request.signing_session_id.as_string())
-                .bind(request.keygen_session_id.as_string())
-                .bind(status_name.to_string())
-                .bind(current_time)
-                .bind(expires_at)
-                .bind(current_time)
-                .bind(0)
-                .bind(correlation_id_bytes)
-                .bind(request.message_hash.as_slice())
-                .bind(serde_json::to_string(&expected_participants)?)
-                .bind(status_json)
-                .bind(session_encrypted)
-                .bind(enclave_encrypted)
                 .execute(&pool)
                 .await?;
 
-                // Get fresh keygen participants for database insertion
+                // Get fresh keygen participants for database insertion (uses runtime query_as for custom FromRow types)
                 let keygen_participants_for_db_rows = sqlx::query_as::<_, KeygenParticipantRow>(
-                    "SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
+                    r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
                             require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
                      FROM keygen_participants
                      WHERE keygen_session_id = ?
-                     ORDER BY registered_at ASC",
+                     ORDER BY registered_at ASC"#,
                 )
-                .bind(request.keygen_session_id.as_string())
+                .bind(keygen_session_id)
                 .fetch_all(&pool)
                 .await?;
 
@@ -839,22 +857,25 @@ impl Database {
                     .collect();
 
                 for participant in &keygen_participants_for_db {
-                    let session_encrypted = &participant.session_encrypted_data;
-                    let enclave_encrypted = &participant.enclave_encrypted_data;
+                    let participant_session_encrypted = &participant.session_encrypted_data;
+                    let participant_enclave_encrypted = &participant.enclave_encrypted_data;
+                    let user_id = &participant.user_id;
+                    let enclave_id_i64 = participant.enclave_id.as_u32() as i64;
+                    let enclave_key_epoch_i64 = participant.enclave_key_epoch as i64;
 
-                    sqlx::query(
-                        "INSERT INTO signing_participants (
+                    sqlx::query!(
+                        r#"INSERT INTO signing_participants (
                             signing_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
                             registered_at, session_encrypted_data, enclave_encrypted_data
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                        signing_session_id,
+                        user_id,
+                        enclave_id_i64,
+                        enclave_key_epoch_i64,
+                        current_time,
+                        participant_session_encrypted,
+                        participant_enclave_encrypted
                     )
-                    .bind(request.signing_session_id.as_string())
-                    .bind(participant.user_id.as_str())
-                    .bind(participant.enclave_id.as_u32() as i64)
-                    .bind(participant.enclave_key_epoch as i64)
-                    .bind(current_time)
-                    .bind(session_encrypted)
-                    .bind(enclave_encrypted)
                     .execute(&pool)
                     .await?;
                 }
@@ -871,6 +892,7 @@ impl Database {
         tracing::debug!("Loading signing session {}", signing_session_id);
 
         // Force WAL checkpoint to ensure we see recent writes
+        // PRAGMA returns columns with NULL type that sqlx macros can't map
         let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await
@@ -881,22 +903,24 @@ impl Database {
                 );
             });
 
-        let row = sqlx::query("SELECT status FROM signing_sessions WHERE signing_session_id = ?")
-            .bind(signing_session_id.as_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to fetch signing session {} from database: {}",
-                    signing_session_id,
-                    e
-                );
-                ApiError::database(format!("Failed to fetch signing session: {e}"))
-            })?;
+        let row = sqlx::query!(
+            "SELECT status FROM signing_sessions WHERE signing_session_id = $1",
+            signing_session_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch signing session {} from database: {}",
+                signing_session_id,
+                e
+            );
+            ApiError::database(format!("Failed to fetch signing session: {e}"))
+        })?;
 
         match row {
             Some(row) => {
-                let status_json: String = row.get("status");
+                let status_json: String = row.status;
                 tracing::debug!(
                     "Deserializing signing session {} status JSON",
                     signing_session_id
@@ -973,10 +997,10 @@ impl Database {
         &self,
         signing_session_id: &SessionId,
     ) -> Result<usize, ApiError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM signing_participants WHERE signing_session_id = ?",
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) as count FROM signing_participants WHERE signing_session_id = $1",
+            signing_session_id
         )
-        .bind(signing_session_id.as_string())
         .fetch_one(&self.pool)
         .await?;
 
@@ -999,23 +1023,21 @@ impl Database {
                 let status_name = status.kind().to_string();
                 let current_time = DbUtils::current_timestamp();
 
-                // Simple update - approved_participants are always loaded fresh from signing_approvals table
-                // This eliminates complex JSON merging race conditions under high concurrency
-                sqlx::query(
-                    "UPDATE signing_sessions
-                     SET status = ?, status_name = ?, updated_at = ?,
-                         completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
-                         failed_at = CASE WHEN ? = 'failed' THEN ? ELSE failed_at END
-                     WHERE signing_session_id = ?",
+                sqlx::query!(
+                    r#"UPDATE signing_sessions
+                     SET status = $1, status_name = $2, updated_at = $3,
+                         completed_at = CASE WHEN $4 = 'completed' THEN $5 ELSE completed_at END,
+                         failed_at = CASE WHEN $6 = 'failed' THEN $7 ELSE failed_at END
+                     WHERE signing_session_id = $8"#,
+                    status_json,
+                    status_name,
+                    current_time,
+                    status_name,
+                    current_time,
+                    status_name,
+                    current_time,
+                    signing_session_id
                 )
-                .bind(status_json)
-                .bind(status_name.clone())
-                .bind(current_time)
-                .bind(status_name.clone())
-                .bind(current_time)
-                .bind(status_name)
-                .bind(current_time)
-                .bind(signing_session_id.as_string())
                 .execute(&pool)
                 .await?;
 
@@ -1028,149 +1050,23 @@ impl Database {
         &self,
         signing_session_id: &SessionId,
     ) -> Result<Option<SessionId>, ApiError> {
-        let row = sqlx::query_scalar::<_, String>(
-            "SELECT keygen_session_id FROM signing_sessions WHERE signing_session_id = ?",
+        let row: Option<SessionId> = sqlx::query_scalar!(
+            r#"SELECT keygen_session_id as "keygen_session_id: SessionId" FROM signing_sessions WHERE signing_session_id = $1"#,
+            signing_session_id
         )
-        .bind(signing_session_id.as_string())
         .fetch_optional(&self.pool)
         .await?;
 
-        match row {
-            Some(keygen_session_id_str) => {
-                let keygen_session_id = keygen_session_id_str.try_into().map_err(|e| {
-                    ApiError::Serialization(format!("Invalid keygen session ID: {e:?}"))
-                })?;
-                Ok(Some(keygen_session_id))
-            }
-            None => Ok(None),
-        }
+        Ok(row)
     }
 
-    pub async fn get_processable_keygen_sessions_batch(
-        &self,
-        active_states: &[KeygenStatusKind],
-        batch_size: u32,
-        offset: u32,
-        _processing_timeout_mins: u64,
-        max_retries: u16,
-    ) -> Result<Vec<ProcessableSessionRecord>, ApiError> {
-        let current_time = DbUtils::current_timestamp();
-
-        let placeholders = active_states
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let query = format!(
-            r#"
-            SELECT keygen_session_id as session_id
-            FROM keygen_sessions
-            WHERE status_name IN ({placeholders})
-              AND expires_at > ?
-              AND retry_count < ?
-            ORDER BY updated_at ASC
-            LIMIT ? OFFSET ?
-            "#
-        );
-
-        let mut query_builder = sqlx::query_as::<_, ProcessableSessionRecord>(&query);
-
-        for status in active_states {
-            query_builder = query_builder.bind(status.as_ref());
-        }
-
-        query_builder = query_builder
-            .bind(current_time)
-            .bind(max_retries)
-            .bind(batch_size as i32)
-            .bind(offset as i32);
-
-        let records = query_builder.fetch_all(&self.pool).await.map_err(|e| {
-            ApiError::database(format!(
-                "Failed to fetch processable keygen sessions batch: {e}"
-            ))
-        })?;
-
-        Ok(records)
-    }
-
-    pub async fn get_processable_signing_sessions_batch(
-        &self,
-        active_states: &[SigningStatusKind],
-        batch_size: u32,
-        offset: u32,
-        processing_timeout_mins: u64,
-        max_retries: u16,
-    ) -> Result<Vec<ProcessableSessionRecord>, ApiError> {
-        // Force WAL checkpoint to ensure we see all recent writes
-        let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    "Failed to checkpoint WAL before signing session query: {}",
-                    e
-                );
-            });
-
-        let timeout_seconds = (processing_timeout_mins * 60) as i64;
-        let current_time = DbUtils::current_timestamp();
-
-        let placeholders = active_states
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let query = format!(
-            r#"
-            SELECT signing_session_id as session_id
-            FROM signing_sessions
-            WHERE status_name IN ({placeholders})
-              AND expires_at > ?
-              AND (processing_started_at IS NULL
-                   OR processing_started_at < ? - ?)
-              AND (last_processing_attempt IS NULL
-                   OR last_processing_attempt < ? - (retry_count * retry_count * 2))
-              AND retry_count < ?
-            ORDER BY updated_at ASC
-            LIMIT ? OFFSET ?
-            "#
-        );
-
-        let mut query_builder = sqlx::query_as::<_, ProcessableSessionRecord>(&query);
-
-        for status in active_states {
-            query_builder = query_builder.bind(status.as_ref());
-        }
-
-        query_builder = query_builder
-            .bind(current_time)
-            .bind(current_time)
-            .bind(timeout_seconds)
-            .bind(current_time)
-            .bind(max_retries)
-            .bind(batch_size as i32)
-            .bind(offset as i32);
-
-        let records = query_builder.fetch_all(&self.pool).await.map_err(|e| {
-            tracing::error!("Database query failed for signing sessions: {}", e);
-            ApiError::database(format!(
-                "Failed to fetch processable signing sessions batch: {e}"
-            ))
-        })?;
-
-        tracing::debug!(
-            "Found {} processable signing sessions (offset: {}, batch_size: {})",
-            records.len(),
-            offset,
-            batch_size
-        );
-
-        Ok(records)
-    }
-
+    /// Note: This function uses dynamic SQL building instead of `sqlx::query!` macros because
+    /// SQLite does not support binding arrays to `IN` clauses. The sqlx macros require all
+    /// query parameters to be known at compile time, but the number of `active_states` varies
+    /// at runtime. PostgreSQL supports `= ANY($1)` with array binding as an alternative, but
+    /// SQLite has no equivalent. If sqlx adds support for array parameter expansion in macros
+    /// for SQLite in the future, this could be converted to use compile-time checked queries.
+    /// See: https://github.com/launchbadge/sqlx/blob/main/FAQ.md
     pub async fn get_processable_keygen_sessions_cursor(
         &self,
         active_states: &[KeygenStatusKind],
@@ -1228,7 +1124,7 @@ impl Database {
             .bind(max_retries);
 
         if let Some(cursor) = cursor {
-            query_builder = query_builder.bind(cursor.as_string());
+            query_builder = query_builder.bind(cursor);
         }
 
         query_builder = query_builder.bind(batch_size as i32);
@@ -1299,7 +1195,7 @@ impl Database {
             .bind(max_retries);
 
         if let Some(cursor) = cursor {
-            query_builder = query_builder.bind(cursor.as_string());
+            query_builder = query_builder.bind(cursor);
         }
 
         query_builder = query_builder.bind(batch_size as i32);
@@ -1314,7 +1210,7 @@ impl Database {
         tracing::debug!(
             "Found {} processable signing sessions (cursor: {:?}, batch_size: {})",
             records.len(),
-            cursor.map(|c| c.as_string()),
+            cursor,
             batch_size
         );
 
@@ -1347,8 +1243,9 @@ impl Database {
 
         let mut sessions = Vec::new();
         for row in rows {
-            let session_id_str: String = row.try_get("keygen_session_id")?;
-            let session_id = SessionId::new(session_id_str);
+            let session_id_bytes: Vec<u8> = row.try_get("keygen_session_id")?;
+            let session_id = SessionId::try_from(session_id_bytes)
+                .map_err(|e| ApiError::Serialization(format!("Invalid session ID: {e:?}")))?;
             let status_json: String = row.try_get("status")?;
 
             let mut status: KeygenSessionStatus =
@@ -1358,11 +1255,10 @@ impl Database {
 
             // Load and merge participants
             let participants = self.get_keygen_participants(&session_id).await?;
-            let participants_map: std::collections::BTreeMap<UserId, ParticipantData> =
-                participants
-                    .into_iter()
-                    .map(|p| (p.user_id.clone(), p))
-                    .collect();
+            let participants_map: BTreeMap<UserId, ParticipantData> = participants
+                .into_iter()
+                .map(|p| (p.user_id.clone(), p))
+                .collect();
 
             if let Err(e) = status.merge_participants(participants_map) {
                 warn!(
@@ -1391,26 +1287,23 @@ impl Database {
     ) -> Result<Vec<SigningSessionStatus>, ApiError> {
         // Get signing sessions where this enclave has participants assigned
         // and the session is still active (not completed or failed)
-        let rows = sqlx::query(
+        let enclave_id_i64 = enclave_id as i64;
+        let rows = sqlx::query!(
             r#"
             SELECT DISTINCT ss.signing_session_id, ss.status
             FROM signing_sessions ss
             INNER JOIN signing_participants sp ON ss.signing_session_id = sp.signing_session_id
             WHERE ss.status_name NOT IN ('completed', 'failed')
-              AND sp.assigned_enclave_id = ?
+              AND sp.assigned_enclave_id = $1
             "#,
+            enclave_id_i64
         )
-        .bind(enclave_id as i64)
         .fetch_all(&self.pool)
         .await?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let session_id_str: String = row.try_get("signing_session_id")?;
-            let _session_id = SessionId::new(session_id_str);
-            let status_json: String = row.try_get("status")?;
-
-            let status: SigningSessionStatus = serde_json::from_str(&status_json).map_err(|e| {
+            let status: SigningSessionStatus = serde_json::from_str(&row.status).map_err(|e| {
                 ApiError::Serialization(format!("Failed to deserialize signing status: {e}"))
             })?;
 
@@ -1436,17 +1329,18 @@ impl Database {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
                 // First get the current session to extract needed data
-                let row =
-                    sqlx::query("SELECT status FROM signing_sessions WHERE signing_session_id = ?")
-                        .bind(signing_session_id.as_string())
-                        .fetch_optional(&pool)
-                        .await?;
+                let row = sqlx::query!(
+                    "SELECT status FROM signing_sessions WHERE signing_session_id = $1",
+                    signing_session_id
+                )
+                .fetch_optional(&pool)
+                .await?;
 
                 let row = row.ok_or_else(|| {
                     ApiError::NotFound(format!("Signing session {} not found", signing_session_id))
                 })?;
 
-                let status_json: String = row.get("status");
+                let status_json: String = row.status;
                 let current_status: SigningSessionStatus = serde_json::from_str(&status_json)
                     .map_err(|e| {
                         ApiError::Serialization(format!(
@@ -1460,7 +1354,7 @@ impl Database {
                     SigningSessionStatus::CollectingParticipants(collecting) => {
                         // Already in collecting state - just clear enclave epochs
                         SigningSessionStatus::CollectingParticipants(
-                            crate::session::signing::SigningCollectingParticipants {
+                            SigningCollectingParticipants {
                                 required_enclave_epochs: std::collections::BTreeMap::new(),
                                 ..collecting
                             },
@@ -1469,40 +1363,25 @@ impl Database {
                     SigningSessionStatus::InitializingSession(init) => {
                         // InitializingSession has encrypted_session_secret but not approval fields
                         // Query approval data from signing_approvals table
-                        let approved_rows = sqlx::query(
-                            "SELECT user_id FROM signing_approvals WHERE signing_session_id = ?",
+                        let approved_participants: Vec<UserId> = sqlx::query_scalar!(
+                            r#"SELECT user_id as "user_id: UserId" FROM signing_approvals WHERE signing_session_id = $1"#,
+                            signing_session_id
                         )
-                        .bind(signing_session_id.as_string())
                         .fetch_all(&pool)
                         .await?;
-
-                        let approved_participants: Vec<UserId> = approved_rows
-                            .iter()
-                            .filter_map(|row| {
-                                let user_id_str: String = row.try_get("user_id").ok()?;
-                                UserId::parse(&user_id_str).ok()
-                            })
-                            .collect();
 
                         // Get participants requiring approval from keygen session
-                        let requiring_rows = sqlx::query(
-                            "SELECT user_id FROM keygen_participants
-                             WHERE keygen_session_id = ? AND require_signing_approval = true",
+                        let keygen_session_id = &init.keygen_session_id;
+                        let participants_requiring_approval: Vec<UserId> = sqlx::query_scalar!(
+                            r#"SELECT user_id as "user_id: UserId" FROM keygen_participants
+                             WHERE keygen_session_id = $1 AND require_signing_approval = true"#,
+                            keygen_session_id
                         )
-                        .bind(init.keygen_session_id.as_string())
                         .fetch_all(&pool)
                         .await?;
 
-                        let participants_requiring_approval: Vec<UserId> = requiring_rows
-                            .iter()
-                            .filter_map(|row| {
-                                let user_id_str: String = row.try_get("user_id").ok()?;
-                                UserId::parse(&user_id_str).ok()
-                            })
-                            .collect();
-
                         SigningSessionStatus::CollectingParticipants(
-                            crate::session::signing::SigningCollectingParticipants {
+                            SigningCollectingParticipants {
                                 signing_session_id: init.signing_session_id,
                                 keygen_session_id: init.keygen_session_id,
                                 message_hash: init.message_hash,
@@ -1547,14 +1426,14 @@ impl Database {
 
                 let current_time = DbUtils::current_timestamp();
 
-                sqlx::query(
-                    "UPDATE signing_sessions
-                     SET status = ?, status_name = 'collecting_participants', updated_at = ?
-                     WHERE signing_session_id = ?",
+                sqlx::query!(
+                    r#"UPDATE signing_sessions
+                     SET status = $1, status_name = 'collecting_participants', updated_at = $2
+                     WHERE signing_session_id = $3"#,
+                    status_json,
+                    current_time,
+                    signing_session_id
                 )
-                .bind(status_json)
-                .bind(current_time)
-                .bind(signing_session_id.as_string())
                 .execute(&pool)
                 .await?;
 
@@ -1581,11 +1460,17 @@ impl Database {
                 let current_time = DbUtils::current_timestamp();
                 let expires_at = current_time + cache_duration_secs;
                 let public_key_value = public_key.unwrap_or_else(|| "unavailable".to_string());
+                let enclave_id_i32 = enclave_id as i32;
+                let attestation_doc = attestation_document.unwrap_or_default();
+                let key_epoch_i64 = key_epoch.unwrap_or(1) as i64;
+                let key_gen_time_i64 = key_generation_time.unwrap_or(0) as i64;
+                let startup_time_i64 = startup_time.unwrap_or(current_time as u64) as i64;
+                let active_sessions_i32 = active_sessions.unwrap_or(0) as i32;
 
-                sqlx::query(
-                    "INSERT INTO enclave_public_keys (enclave_id, public_key, cached_at, expires_at, is_healthy,
+                sqlx::query!(
+                    r#"INSERT INTO enclave_public_keys (enclave_id, public_key, cached_at, expires_at, is_healthy,
                                                     attestation_document, key_epoch, key_generation_time, startup_time, active_sessions)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                      ON CONFLICT(enclave_id) DO UPDATE SET
                          public_key = CASE WHEN excluded.public_key != 'unavailable' THEN excluded.public_key ELSE enclave_public_keys.public_key END,
                          cached_at = excluded.cached_at,
@@ -1595,18 +1480,18 @@ impl Database {
                          key_epoch = COALESCE(excluded.key_epoch, enclave_public_keys.key_epoch),
                          key_generation_time = COALESCE(excluded.key_generation_time, enclave_public_keys.key_generation_time),
                          startup_time = COALESCE(excluded.startup_time, enclave_public_keys.startup_time),
-                         active_sessions = COALESCE(excluded.active_sessions, enclave_public_keys.active_sessions)"
+                         active_sessions = COALESCE(excluded.active_sessions, enclave_public_keys.active_sessions)"#,
+                    enclave_id_i32,
+                    public_key_value,
+                    current_time,
+                    expires_at,
+                    is_healthy,
+                    attestation_doc,
+                    key_epoch_i64,
+                    key_gen_time_i64,
+                    startup_time_i64,
+                    active_sessions_i32
                 )
-                .bind(enclave_id as i32)
-                .bind(public_key_value)
-                .bind(current_time)
-                .bind(expires_at)
-                .bind(is_healthy)
-                .bind(attestation_document.unwrap_or_default())
-                .bind(key_epoch.unwrap_or(1) as i64)
-                .bind(key_generation_time.unwrap_or(0) as i64)
-                .bind(startup_time.unwrap_or(current_time as u64) as i64)
-                .bind(active_sessions.unwrap_or(0) as i32)
                 .execute(&pool)
                 .await?;
 
@@ -1620,14 +1505,14 @@ impl Database {
         enclave_id: u32,
     ) -> Result<Option<EnclaveHealthInfo>, ApiError> {
         let row = sqlx::query_as::<_, EnclaveHealthInfo>(
-            "SELECT enclave_id, public_key, cached_at, expires_at, is_healthy,
+            r#"SELECT enclave_id, public_key, cached_at, expires_at, is_healthy,
                     COALESCE(attestation_document, '') as attestation_document,
                     COALESCE(key_epoch, 1) as key_epoch,
                     COALESCE(key_generation_time, 0) as key_generation_time,
                     COALESCE(startup_time, 0) as startup_time,
                     COALESCE(active_sessions, 0) as active_sessions
              FROM enclave_public_keys
-             WHERE enclave_id = ?",
+             WHERE enclave_id = ?"#,
         )
         .bind(enclave_id as i32)
         .fetch_optional(&self.pool)
@@ -1638,14 +1523,14 @@ impl Database {
 
     pub async fn get_all_enclave_health(&self) -> Result<Vec<EnclaveHealthInfo>, ApiError> {
         let rows = sqlx::query_as::<_, EnclaveHealthInfo>(
-            "SELECT enclave_id, public_key, cached_at, expires_at, is_healthy,
+            r#"SELECT enclave_id, public_key, cached_at, expires_at, is_healthy,
                     COALESCE(attestation_document, '') as attestation_document,
                     COALESCE(key_epoch, 1) as key_epoch,
                     COALESCE(key_generation_time, 0) as key_generation_time,
                     COALESCE(startup_time, 0) as startup_time,
                     COALESCE(active_sessions, 0) as active_sessions
              FROM enclave_public_keys
-             ORDER BY enclave_id",
+             ORDER BY enclave_id"#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1657,14 +1542,15 @@ impl Database {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
                 let current_time = DbUtils::current_timestamp();
+                let enclave_id_i32 = enclave_id as i32;
 
-                sqlx::query(
-                    "UPDATE enclave_public_keys
-                     SET expires_at = ?
-                     WHERE enclave_id = ?",
+                sqlx::query!(
+                    r#"UPDATE enclave_public_keys
+                     SET expires_at = $1
+                     WHERE enclave_id = $2"#,
+                    current_time,
+                    enclave_id_i32
                 )
-                .bind(current_time)
-                .bind(enclave_id as i32)
                 .execute(&pool)
                 .await?;
 
@@ -1684,56 +1570,44 @@ impl Database {
             .execute(self.pool.clone(), move |pool| async move {
                 let current_time = DbUtils::current_timestamp();
 
-                sqlx::query(
-                    "INSERT OR REPLACE INTO signing_approvals (
+                sqlx::query!(
+                    r#"INSERT OR REPLACE INTO signing_approvals (
                         signing_session_id, user_id, approved_at, user_signature_validated, session_signature_validated
-                    ) VALUES (?, ?, ?, ?, ?)",
+                    ) VALUES ($1, $2, $3, $4, $5)"#,
+                    signing_session_id,
+                    user_id,
+                    current_time,
+                    true,
+                    true
                 )
-                .bind(signing_session_id.as_string())
-                .bind(user_id.as_str())
-                .bind(current_time)
-                .bind(true)
-                .bind(true)
                 .execute(&pool)
                 .await?;
-
-                // No need to update JSON - approved_participants are managed solely via signing_approvals table
-                // This eliminates race conditions and simplifies the logic
-
                 Ok(())
             })
             .await
     }
 
-    pub async fn get_participants_requiring_approval(
+    async fn get_participants_requiring_approval(
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<UserId>, ApiError> {
-        let rows = sqlx::query(
-            "SELECT user_id FROM keygen_participants
-             WHERE keygen_session_id = ? AND require_signing_approval = true",
+        let user_ids: Vec<UserId> = sqlx::query_scalar!(
+            r#"SELECT user_id as "user_id: UserId" FROM keygen_participants
+             WHERE keygen_session_id = $1 AND require_signing_approval = true"#,
+            keygen_session_id
         )
-        .bind(keygen_session_id.as_string())
         .fetch_all(&self.pool)
         .await?;
-
-        let mut user_ids = Vec::new();
-        for row in rows {
-            let user_id_str: String = row.try_get("user_id")?;
-            user_ids
-                .push(UserId::parse(&user_id_str).map_err(|e| {
-                    ApiError::database(format!("Invalid user ID in database: {e}"))
-                })?);
-        }
 
         Ok(user_ids)
     }
 
-    pub async fn get_signing_session_approvals(
+    async fn get_signing_session_approvals(
         &self,
         signing_session_id: &SessionId,
     ) -> Result<Vec<UserId>, ApiError> {
         // Force WAL checkpoint to ensure we see recent approval writes
+        // PRAGMA returns columns with NULL type that sqlx macros can't map
         let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await
@@ -1741,22 +1615,13 @@ impl Database {
                 tracing::warn!("Failed to checkpoint WAL before approval query: {}", e);
             });
 
-        let rows = sqlx::query(
-            "SELECT user_id FROM signing_approvals
-             WHERE signing_session_id = ?",
+        let user_ids: Vec<UserId> = sqlx::query_scalar!(
+            r#"SELECT user_id as "user_id: UserId" FROM signing_approvals
+             WHERE signing_session_id = $1"#,
+            signing_session_id
         )
-        .bind(signing_session_id.as_string())
         .fetch_all(&self.pool)
         .await?;
-
-        let mut user_ids = Vec::new();
-        for row in rows {
-            let user_id_str: String = row.try_get("user_id")?;
-            user_ids
-                .push(UserId::parse(&user_id_str).map_err(|e| {
-                    ApiError::database(format!("Invalid user ID in database: {e}"))
-                })?);
-        }
 
         Ok(user_ids)
     }
@@ -1773,20 +1638,22 @@ impl Database {
         let kms_key_id = kms_key_id.to_string();
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
-                sqlx::query(
-                    "INSERT INTO enclave_master_keys (
+                let enclave_id_i64 = enclave_id.as_u32() as i64;
+
+                sqlx::query!(
+                    r#"INSERT INTO enclave_master_keys (
                         enclave_id, kms_encrypted_dek, encrypted_private_key, kms_key_id
-                    ) VALUES (?, ?, ?, ?)
+                    ) VALUES ($1, $2, $3, $4)
                     ON CONFLICT(enclave_id) DO UPDATE SET
                         kms_encrypted_dek = excluded.kms_encrypted_dek,
                         encrypted_private_key = excluded.encrypted_private_key,
                         kms_key_id = excluded.kms_key_id,
-                        key_epoch = key_epoch + 1",
+                        key_epoch = key_epoch + 1"#,
+                    enclave_id_i64,
+                    kms_encrypted_dek,
+                    encrypted_private_key,
+                    kms_key_id
                 )
-                .bind(enclave_id.as_u32() as i64)
-                .bind(kms_encrypted_dek)
-                .bind(encrypted_private_key)
-                .bind(kms_key_id)
                 .execute(&pool)
                 .await?;
 
@@ -1795,14 +1662,15 @@ impl Database {
             .await
     }
 
+    /// Uses runtime query_as for custom FromRow type
     pub async fn get_enclave_master_key(
         &self,
         enclave_id: EnclaveId,
     ) -> Result<Option<EnclaveMasterKeyRecord>, ApiError> {
         let row = sqlx::query_as::<_, EnclaveMasterKeyRecord>(
-            "SELECT kms_encrypted_dek, encrypted_private_key, kms_key_id, key_epoch
+            r#"SELECT kms_encrypted_dek, encrypted_private_key, kms_key_id, key_epoch
              FROM enclave_master_keys
-             WHERE enclave_id = ?",
+             WHERE enclave_id = ?"#,
         )
         .bind(enclave_id.as_u32() as i64)
         .fetch_optional(&self.pool)
@@ -1826,14 +1694,9 @@ pub struct KeygenParticipantRow {
 
 impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
     fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        let user_id_str: String = row.try_get("user_id")?;
-        let user_id = UserId::parse(user_id_str).map_err(|e| sqlx::Error::ColumnDecode {
-            index: "user_id".to_string(),
-            source: Box::new(e),
-        })?;
+        let user_id: UserId = row.try_get("user_id")?;
 
-        let enclave_id_i64: i64 = row.try_get("enclave_id")?;
-        let enclave_id = EnclaveId::new(enclave_id_i64 as u32);
+        let enclave_id: EnclaveId = row.try_get("enclave_id")?;
 
         let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
         let registered_at: i64 = row.try_get("registered_at")?;
@@ -1875,20 +1738,11 @@ pub struct ProcessableSessionRecord {
 
 impl FromRow<'_, SqliteRow> for ProcessableSessionRecord {
     fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        let session_kind_str: String = row.try_get("session_kind")?;
-        let session_kind = match session_kind_str.as_str() {
-            "keygen" => SessionKind::Keygen,
-            "signing" => SessionKind::Signing,
-            _ => {
-                return Err(sqlx::Error::ColumnDecode {
-                    index: "session_kind".to_string(),
-                    source: format!("Unknown session kind: {}", session_kind_str).into(),
-                })
-            }
-        };
+        let session_kind: SessionKind = row.try_get("session_kind")?;
+        let session_id: SessionId = row.try_get("session_id")?;
 
         Ok(ProcessableSessionRecord {
-            session_id: SessionId::new(row.try_get::<String, _>("session_id")?),
+            session_id,
             session_kind,
         })
     }

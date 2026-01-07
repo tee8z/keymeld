@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT max_signing_sessions FROM keygen_sessions WHERE keygen_session_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_signing_sessions",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "3503807b848b1f6d0e0f798640a7efb6d8e24fa5e4cba0082af4e68e819c37a3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO keygen_sessions (\n                        keygen_session_id, status_name, coordinator_enclave_id, created_at,\n                        expires_at, updated_at, retry_count, max_signing_sessions,\n                        expected_participants, status, session_encrypted_data, enclave_encrypted_data,\n                        session_public_key\n                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "c8a1abb99373f7f0c7d828143c1f58ff8f35cf01f3b9ea66367c222b7124726c"
+}
