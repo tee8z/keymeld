@@ -194,9 +194,10 @@ process_confirm_batch() {
     [[ $count -eq 0 ]] && return 0
 
     # Second pass: call gettransaction once per unique txid
+    # Must specify wallet since multiple wallets may be loaded during stress tests
     for txid in "${!txid_requests[@]}"; do
         local result
-        if result=$($BTC_CLI gettransaction "$txid" 2>&1); then
+        if result=$($BTC_CLI -rpcwallet=keymeld_coordinator gettransaction "$txid" 2>&1); then
             txid_results["$txid"]="$result"
         else
             txid_errors["$txid"]="$result"

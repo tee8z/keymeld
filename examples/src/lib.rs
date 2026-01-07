@@ -278,6 +278,7 @@ pub struct KeyMeldE2ETest {
     pub coordinator_user_id: UserId,
     pub participant_user_ids: Vec<UserId>,
     pub rpc_client: RpcClient,
+    pub rpc_client_with_wallet: RpcClient, // Wallet-specific RPC client for get_transaction calls
     pub amount: u64,
     pub destination: String,
     pub session_secrets: HashMap<SessionId, String>,
@@ -305,8 +306,14 @@ impl KeyMeldE2ETest {
             config.bitcoin_rpc_auth.password.clone(),
         );
 
-        let rpc_client = RpcClient::new(&config.bitcoin_rpc_url, auth)
+        let rpc_client = RpcClient::new(&config.bitcoin_rpc_url, auth.clone())
             .map_err(|e| anyhow!("Failed to create RPC client: {e}"))?;
+
+        // Create wallet-specific RPC client for get_transaction calls
+        // This is needed when multiple wallets are loaded (high-concurrency stress tests)
+        let wallet_rpc_url = format!("{}/wallet/keymeld_coordinator", config.bitcoin_rpc_url);
+        let rpc_client_with_wallet = RpcClient::new(&wallet_rpc_url, auth)
+            .map_err(|e| anyhow!("Failed to create wallet RPC client: {e}"))?;
 
         let coordinator_mnemonic = Self::load_or_create_coordinator_private_key(&config)?;
         let coordinator_user_id = Uuid::now_v7().into();
@@ -350,6 +357,7 @@ impl KeyMeldE2ETest {
             coordinator_user_id,
             participant_user_ids,
             rpc_client,
+            rpc_client_with_wallet,
             amount,
             destination,
             session_secrets: HashMap::new(),
@@ -472,9 +480,9 @@ impl KeyMeldE2ETest {
                 .await?;
             txid_str.parse::<Txid>()?
         } else {
-            // Direct RPC for low concurrency
+            // Direct RPC for low concurrency - use wallet-specific client
             retry_bitcoin_rpc("send_to_address (coordinator)", || {
-                self.rpc_client.send_to_address(
+                self.rpc_client_with_wallet.send_to_address(
                     &coordinator_address,
                     Amount::from_sat(funding_amount),
                     None,
@@ -562,8 +570,9 @@ impl KeyMeldE2ETest {
             bitcoin::Txid::from_str(&txid_str)
                 .map_err(|e| anyhow!("Invalid txid from batcher: {}", e))?
         } else {
+            // Use wallet-specific client for send_to_address
             retry_bitcoin_rpc("send_to_address (aggregate)", || {
-                self.rpc_client.send_to_address(
+                self.rpc_client_with_wallet.send_to_address(
                     &aggregate_address,
                     Amount::from_sat(required_amount),
                     None,
@@ -598,7 +607,8 @@ impl KeyMeldE2ETest {
                 sleep(Duration::from_secs(1)).await;
 
                 if let Ok(info) = retry_bitcoin_rpc("get_transaction", || {
-                    self.rpc_client.get_transaction(&funding_txid, None)
+                    self.rpc_client_with_wallet
+                        .get_transaction(&funding_txid, None)
                 })
                 .await
                 {
@@ -611,8 +621,10 @@ impl KeyMeldE2ETest {
         }
 
         // Find the correct output index for our aggregate address
+        // Use wallet-specific client to handle multiple wallets during stress tests
         let funding_tx_info = retry_bitcoin_rpc("get_transaction", || {
-            self.rpc_client.get_transaction(&funding_txid, None)
+            self.rpc_client_with_wallet
+                .get_transaction(&funding_txid, None)
         })
         .await?;
 
@@ -691,7 +703,7 @@ impl KeyMeldE2ETest {
             .map_err(|e| anyhow!("Destination address invalid for network: {e}"))?;
 
         let utxo_info = self
-            .rpc_client
+            .rpc_client_with_wallet
             .get_transaction(&aggregate_utxo.txid, None)
             .map_err(|e| anyhow!("Failed to get UTXO info: {e}"))?;
 
