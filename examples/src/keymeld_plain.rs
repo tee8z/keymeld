@@ -59,10 +59,10 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
     let keygen_session_id = test.create_keygen_session().await?;
 
     info!("📋 Approval Configuration:");
-    info!("   - Coordinator requires signing approval: YES");
-    info!("   - Participant 0 requires signing approval: YES");
+    info!("   - Coordinator requires signing approval: yes");
+    info!("   - Participant 0 requires signing approval: yes");
     if test.participants.len() > 1 {
-        info!("   - Other participants require signing approval: NO");
+        info!("   - Other participants require signing approval: no");
     }
 
     test.register_keygen_participants(&keygen_session_id)
@@ -70,10 +70,12 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
     let aggregate_key = test.wait_for_keygen_completion(&keygen_session_id).await?;
     info!("✅ Keygen complete: {}", aggregate_key);
 
-    let aggregate_utxo = test.fund_aggregate_key_address(&aggregate_key).await?;
+    let aggregate_utxo = test
+        .fund_aggregate_key_address(&aggregate_key, &keygen_session_id)
+        .await?;
 
     let psbt = test
-        .create_musig2_transaction(&aggregate_key, &aggregate_utxo)
+        .create_musig2_transaction(&aggregate_key, &keygen_session_id, &aggregate_utxo)
         .await?;
 
     info!("✍️ Starting Phase 2: Signing Session");
@@ -84,7 +86,7 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
     info!("📋 Starting Phase 2a: Signing Approvals");
     info!("⚠️  Participants requiring approval before signing can proceed:");
     info!(
-        "   - Coordinator: {} (requires approval: YES)",
+        "   - Coordinator: {} (requires approval: yes)",
         test.coordinator_user_id.as_str()
     );
     for idx in 0..test.participant_user_ids.len() {
@@ -93,7 +95,7 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
             "   - Participant {}: {} (requires approval: {})",
             idx,
             test.participant_user_ids[idx].as_str(),
-            if requires_approval { "YES" } else { "NO" }
+            if requires_approval { "yes" } else { "no" }
         );
     }
     info!("ℹ️  Note: Approval requests may retry if signing session initialization is still in progress");
@@ -125,11 +127,14 @@ async fn run_test(test: &mut KeyMeldE2ETest) -> Result<()> {
 
     let signed_tx = test.apply_signature_and_broadcast(psbt, &signature).await?;
 
+    let decrypted_aggregate_key =
+        test.decrypt_aggregate_key_for_display(&aggregate_key, &keygen_session_id)?;
+
     println!("\n🎉 Three-Phase KeyMeld Test Completed Successfully!");
     println!("✅ Phase 1: Keygen session completed");
     println!("✅ Phase 2a: Signing approvals completed (with signature authentication)");
     println!("✅ Phase 2b: Signing session completed (participants inherited from keygen)");
-    println!("✅ Aggregate key: {aggregate_key}");
+    println!("✅ Aggregate key: {decrypted_aggregate_key}");
     println!("✅ Transaction broadcast: {}", signed_tx.compute_txid());
     println!("📋 Keygen Session ID: {keygen_session_id}");
     println!("📋 Signing Session ID: {signing_session_id}");

@@ -1,28 +1,103 @@
 use crate::{
-    config::CoordinatorConfig,
+    config::{CoordinatorConfig, KmsConfig},
     database::{Database, DbUtils, ProcessableSessionRecord},
+    enclave::EnclaveManager,
     errors::ApiError,
     metrics::{Metrics, MetricsTimer},
-};
-use keymeld_core::{
-    enclave::EnclaveManager,
-    identifiers::EnclaveId,
     session::{Session, SessionKind, SigningSessionStatus},
     Advanceable, KeygenSessionStatus,
 };
-use std::{sync::Arc, time::Duration};
+use dashmap::DashSet;
+use futures::stream::{FuturesUnordered, StreamExt};
+use keymeld_core::identifiers::{EnclaveId, SessionId};
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::{
-    sync::oneshot::{Receiver, Sender},
+    sync::{
+        mpsc,
+        oneshot::{Receiver, Sender},
+    },
     task::JoinHandle,
     time::interval,
 };
 use tracing::{debug, error, info, warn};
 
+/// Message sent to the database writer task
+struct DbWriteRequest {
+    session_id: keymeld_core::SessionId,
+    session: Session,
+}
+
+/// Circuit breaker for coordinator database operations
+#[derive(Debug, Clone)]
+pub struct CircuitBreaker {
+    failure_count: Arc<AtomicU32>,
+    last_failure_time: Arc<std::sync::Mutex<Option<Instant>>>,
+    failure_threshold: u32,
+    reset_timeout: Duration,
+}
+
+const MAX_RETRIES_DEFAULT: u32 = 3;
+const PROCESSING_TIMEOUT_DEFAULT: u64 = 10;
+const DEFAULT_BATCH_SIZE: u32 = 20;
+/// Threshold in seconds to log a warning about slow session processing
+const SLOW_SESSION_THRESHOLD_SECS: u64 = 30;
+
+impl CircuitBreaker {
+    pub fn new(failure_threshold: u32, reset_timeout: Duration) -> Self {
+        Self {
+            failure_count: Arc::new(AtomicU32::new(0)),
+            last_failure_time: Arc::new(std::sync::Mutex::new(None)),
+            failure_threshold,
+            reset_timeout,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        let failure_count = self.failure_count.load(Ordering::Relaxed);
+        if failure_count < self.failure_threshold {
+            return false;
+        }
+
+        // Check if enough time has passed to reset
+        if let Ok(last_failure) = self.last_failure_time.lock() {
+            if let Some(last_time) = *last_failure {
+                if last_time.elapsed() >= self.reset_timeout {
+                    self.failure_count.store(0, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn record_success(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+    }
+
+    pub fn record_failure(&self) {
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut last_failure) = self.last_failure_time.lock() {
+            *last_failure = Some(Instant::now());
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Coordinator {
     db: Arc<Database>,
     enclave_manager: Arc<EnclaveManager>,
     config: CoordinatorConfig,
+    kms_config: KmsConfig,
     metrics: Arc<Metrics>,
+    circuit_breaker: CircuitBreaker,
+    /// Sessions currently being processed - prevents concurrent processing of the same session
+    processing_sessions: Arc<DashSet<keymeld_core::SessionId>>,
+    /// Channel to send session updates to the database writer
+    db_write_tx: mpsc::Sender<DbWriteRequest>,
 }
 
 impl Coordinator {
@@ -30,34 +105,150 @@ impl Coordinator {
         db: Arc<Database>,
         enclave_manager: Arc<EnclaveManager>,
         config: Option<CoordinatorConfig>,
+        kms_config: KmsConfig,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let config = config.unwrap_or_default();
+
+        let circuit_breaker = CircuitBreaker::new(
+            config.circuit_breaker_failure_threshold.unwrap_or(5),
+            Duration::from_secs(config.circuit_breaker_reset_timeout_secs.unwrap_or(60)),
+        );
+
+        // Create channel for database writes
+        // Size based on batch_size * number of batches we could process in ~10 seconds
+        // This ensures the channel can buffer all writes if the DB is temporarily slow
+        let batch_size = config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE) as usize;
+        let processing_interval_ms = config.processing_interval_ms.unwrap_or(200);
+        let batches_per_10_secs = (10_000 / processing_interval_ms) as usize;
+        let db_writer_channel_size = batch_size * batches_per_10_secs;
+        let (db_write_tx, db_write_rx) = mpsc::channel(db_writer_channel_size);
+        info!(
+            "Database writer channel capacity: {} (batch_size={}, interval={}ms, batches_per_10s={})",
+            db_writer_channel_size, batch_size, processing_interval_ms, batches_per_10_secs
+        );
+
+        // Spawn the database writer task
+        let db_for_writer = Arc::clone(&db);
+        let metrics_for_writer = Arc::clone(&metrics);
+        tokio::spawn(Self::run_db_writer(
+            db_for_writer,
+            metrics_for_writer,
+            db_write_rx,
+        ));
+
         Self {
             db,
             enclave_manager,
-            config: config.unwrap_or_default(),
+            config,
+            kms_config,
             metrics,
+            circuit_breaker,
+            processing_sessions: Arc::new(DashSet::new()),
+            db_write_tx,
         }
+    }
+
+    /// Background task that processes database write requests
+    async fn run_db_writer(
+        db: Arc<Database>,
+        metrics: Arc<Metrics>,
+        mut rx: mpsc::Receiver<DbWriteRequest>,
+    ) {
+        info!("Database writer task started");
+
+        while let Some(request) = rx.recv().await {
+            let session_id = request.session_id;
+            let result = match &request.session {
+                Session::Keygen(keygen_status) => {
+                    db.update_keygen_session_status(&session_id, keygen_status)
+                        .await
+                }
+                Session::Signing(signing_status) => {
+                    db.update_signing_session_status(&session_id, signing_status)
+                        .await
+                }
+            };
+
+            if let Err(e) = result {
+                let kind = match &request.session {
+                    Session::Keygen(_) => "keygen",
+                    Session::Signing(_) => "signing",
+                };
+                error!(
+                    "Database writer failed to update {} session {}: {}",
+                    kind, session_id, e
+                );
+                metrics.record_session_error(kind, "db_write_failed");
+            }
+        }
+
+        info!("Database writer task stopped");
+    }
+
+    /// Monitor database pool health using actual database health check
+    async fn monitor_db_pool_health(&self) -> Result<(), ApiError> {
+        // Use the existing database health check method
+        self.db.health_check().await?;
+
+        // Log that health check passed
+        debug!("Database health check passed");
+
+        Ok(())
     }
 
     pub async fn process_sessions(&self) -> Result<u32, ApiError> {
         let timer = MetricsTimer::start((*self.metrics).clone(), "all", "process_sessions");
 
-        let keygen_processed = match self.process_sessions_by_kind(SessionKind::Keygen).await {
-            Ok(count) => count,
+        // Check circuit breaker before processing
+        if self.circuit_breaker.is_open() {
+            warn!("Coordinator circuit breaker is OPEN - skipping processing cycle");
+            return Ok(0);
+        }
+
+        // Monitor DB pool health before processing
+        if let Err(e) = self.monitor_db_pool_health().await {
+            warn!("Database health check failed: {}", e);
+        }
+
+        // Process both keygen and signing sessions in parallel
+        debug!("Starting parallel processing of keygen and signing sessions");
+        let parallel_start = Instant::now();
+        let (keygen_result, signing_result) = tokio::join!(
+            self.process_sessions_by_kind_with_recovery(SessionKind::Keygen),
+            self.process_sessions_by_kind_with_recovery(SessionKind::Signing)
+        );
+        let parallel_duration = parallel_start.elapsed();
+        debug!(
+            "Completed parallel session processing in {:?}",
+            parallel_duration
+        );
+
+        let keygen_processed = match keygen_result {
+            Ok(count) => {
+                self.circuit_breaker.record_success();
+                count
+            }
             Err(e) => {
+                self.circuit_breaker.record_failure();
                 self.metrics
                     .record_session_error("coordinator", "keygen_processing_failed");
-                return Err(e);
+                warn!("Keygen processing failed, continuing with signing: {}", e);
+                0 // Continue with signing sessions instead of failing entirely
             }
         };
 
-        let signing_processed = match self.process_sessions_by_kind(SessionKind::Signing).await {
-            Ok(count) => count,
+        let signing_processed = match signing_result {
+            Ok(count) => {
+                self.circuit_breaker.record_success();
+                count
+            }
             Err(e) => {
+                self.circuit_breaker.record_failure();
                 self.metrics
                     .record_session_error("coordinator", "signing_processing_failed");
-                return Err(e);
+                warn!("Signing processing failed: {}", e);
+                0 // Don't fail the entire cycle
             }
         };
 
@@ -67,87 +258,239 @@ impl Coordinator {
 
         if total_processed > 0 {
             info!(
-                "Processed {} total sessions (keygen: {}, signing: {})",
-                total_processed, keygen_processed, signing_processed
+                "Processed {} total sessions (keygen: {}, signing: {}) in parallel in {:?}",
+                total_processed, keygen_processed, signing_processed, parallel_duration
             );
+        } else {
+            debug!("No sessions processed this cycle");
         }
 
         Ok(total_processed)
     }
 
-    async fn process_sessions_by_kind(&self, kind: SessionKind) -> Result<u32, ApiError> {
+    /// Process sessions with recovery - no artificial limits
+    async fn process_sessions_by_kind_with_recovery(
+        &self,
+        kind: SessionKind,
+    ) -> Result<u32, ApiError> {
         let kind_str = kind.to_string();
         let timer = MetricsTimer::start((*self.metrics).clone(), &kind_str, "batch_processing");
 
-        let batch_size = self.config.batch_size.unwrap_or(50);
-        let max_retries = self.config.max_retries.unwrap_or(3) as u16;
-        let processing_timeout = self.config.processing_timeout_mins.unwrap_or(5);
+        let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+        let max_retries = self.config.max_retries.unwrap_or(MAX_RETRIES_DEFAULT) as u16;
+        let processing_timeout = self
+            .config
+            .processing_timeout_mins
+            .unwrap_or(PROCESSING_TIMEOUT_DEFAULT);
 
+        // Use cursor-based pagination to handle concurrent session creation
+        // UUIDv7 IDs are naturally ordered by creation time
         let mut total_processed_count = 0;
-        let mut offset = 0u32;
+        let mut cursor: Option<SessionId> = None;
+        let mut batch_count = 0;
 
         loop {
-            let sessions = self
-                .get_processable_sessions(kind, batch_size, offset, processing_timeout, max_retries)
-                .await;
+            // Get next batch using cursor pagination
+            let sessions = match self
+                .get_processable_sessions_cursor(
+                    kind,
+                    batch_size,
+                    cursor.as_ref(),
+                    processing_timeout,
+                    max_retries,
+                )
+                .await
+            {
+                Ok(sessions) => sessions,
+                Err(e) => {
+                    error!(
+                        "Failed to get processable {} sessions (cursor-based): {}",
+                        kind_str, e
+                    );
+                    break;
+                }
+            };
 
-            match sessions {
-                Ok(sessions) => {
-                    if sessions.is_empty() {
-                        break;
-                    }
+            if sessions.is_empty() {
+                info!("No more {} sessions to process", kind_str);
+                break;
+            }
 
-                    let mut batch_advanced_count = 0;
-                    let mut batch_failed_count = 0;
+            batch_count += 1;
+            info!(
+                "Processing batch {} with {} {} sessions",
+                batch_count,
+                sessions.len(),
+                kind_str
+            );
 
-                    for session_record in sessions {
-                        let session_id = session_record.session_id.clone();
+            // Update cursor to last session ID for next batch
+            cursor = sessions.last().map(|s| s.session_id.clone());
 
-                        match self.advance_session(session_record, kind).await {
-                            Ok(advanced) => {
-                                if advanced {
-                                    batch_advanced_count += 1;
-                                }
-                                // Record successful processing regardless of advancement
-                                self.metrics
-                                    .record_musig_operation("session_batch_process", true);
-                            }
-                            Err(e) => {
-                                batch_failed_count += 1;
-                                error!(
-                                    "Failed to advance {} session {}: {}",
-                                    kind_str, session_id, e
-                                );
-                                self.metrics
-                                    .record_session_error(&kind_str, "advance_failed");
-                                self.metrics
-                                    .record_musig_operation("session_batch_process", false);
-                            }
-                        }
-                    }
-
-                    total_processed_count += batch_advanced_count;
-                    offset += batch_size;
-
-                    self.metrics
-                        .record_musig_operation("session_batch_complete", batch_failed_count == 0);
+            // Process this batch
+            match self.process_batch_sessions(sessions).await {
+                Ok(count) => {
+                    total_processed_count += count;
+                    info!("Batch {} processed {} sessions", batch_count, count);
                 }
                 Err(e) => {
-                    error!("Failed to fetch processable {} sessions: {}", kind_str, e);
-                    self.metrics.record_session_error(&kind_str, "fetch_failed");
-                    self.metrics
-                        .record_musig_operation("session_batch_fetch", false);
-                    break;
+                    warn!("Batch {} failed: {}", batch_count, e);
+                    self.metrics.record_session_error(&kind_str, "batch_failed");
                 }
             }
         }
 
+        info!(
+            "Completed cursor-based processing: {} batches, {} sessions processed",
+            batch_count, total_processed_count
+        );
+
         timer.finish();
+        Ok(total_processed_count)
+    }
+
+    async fn process_batch_sessions(
+        &self,
+        sessions: Vec<ProcessableSessionRecord>,
+    ) -> Result<u32, ApiError> {
+        let kind_str = "session"; // Generic since this processes any session type
+
+        info!("Processing batch of {} sessions", sessions.len());
+
+        // Filter out sessions that are already being processed by another batch
+        let sessions_to_process: Vec<_> = sessions
+            .into_iter()
+            .filter(|session_record| {
+                // Atomically try to insert the session into the processing set
+                if self
+                    .processing_sessions
+                    .insert(session_record.session_id.clone())
+                {
+                    true
+                } else {
+                    debug!(
+                        "Session {} already being processed, skipping",
+                        session_record.session_id
+                    );
+                    false
+                }
+            })
+            .collect();
+
+        if sessions_to_process.is_empty() {
+            debug!("All sessions in batch already being processed, skipping");
+            return Ok(0);
+        }
+
+        let session_timeout = Duration::from_secs(10 * 60); // 10 minutes default
+        let mut session_futures: FuturesUnordered<_> = sessions_to_process
+            .into_iter()
+            .map(|session_record| {
+                let session_id = session_record.session_id.clone();
+                let processing_sessions = Arc::clone(&self.processing_sessions);
+                let coordinator = self.clone();
+
+                async move {
+                    let _session_start = Instant::now();
+                    debug!("Starting parallel processing for session {}", session_id);
+
+                    let slow_threshold = Duration::from_secs(SLOW_SESSION_THRESHOLD_SECS);
+                    let session_id_for_warning = session_id.clone();
+                    let warning_task = tokio::spawn(async move {
+                        tokio::time::sleep(slow_threshold).await;
+                        warn!("Session {} is taking longer than {:?} - still processing", session_id_for_warning, slow_threshold);
+                    });
+
+                    // Use session_kind from ProcessableSessionRecord
+                    let kind = session_record.session_kind;
+
+                    let result = match tokio::time::timeout(
+                        session_timeout,
+                        coordinator.advance_session(session_record, kind)
+                    ).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            error!("Session {} ABANDONED after {:?} - possible deadlock or stuck enclave call", session_id, session_timeout);
+                            Err(ApiError::Internal(format!("Session {} abandoned after {:?}", session_id, session_timeout)))
+                        }
+                    };
+
+                    warning_task.abort();
+                    processing_sessions.remove(&session_id);
+                    (session_id, result)
+                }
+            })
+            .collect();
+
+        let mut batch_processed_count = 0;
+        let mut batch_failed_count = 0;
+
+        while let Some((session_id, result)) = session_futures.next().await {
+            match result {
+                Ok(advanced) => {
+                    if advanced {
+                        batch_processed_count += 1;
+                    }
+                    self.metrics
+                        .record_musig_operation("session_batch_process", true);
+                }
+                Err(e) => {
+                    batch_failed_count += 1;
+                    warn!("Failed to process session {}: {}", session_id, e);
+                    self.metrics
+                        .record_session_error(kind_str, "advance_failed");
+                    self.metrics
+                        .record_musig_operation("session_batch_process", false);
+                }
+            }
+        }
 
         self.metrics
-            .record_musig_operation("session_batch_complete", true);
+            .record_musig_operation("session_batch_complete", batch_failed_count == 0);
+        Ok(batch_processed_count)
+    }
 
-        Ok(total_processed_count)
+    async fn get_processable_sessions_cursor(
+        &self,
+        kind: SessionKind,
+        batch_size: u32,
+        cursor: Option<&SessionId>,
+        processing_timeout: u64,
+        max_retries: u16,
+    ) -> Result<Vec<ProcessableSessionRecord>, ApiError> {
+        match kind {
+            SessionKind::Keygen => {
+                use keymeld_core::protocol::KeygenStatusKind;
+                let active_states = vec![KeygenStatusKind::CollectingParticipants];
+                self.db
+                    .get_processable_keygen_sessions_cursor(
+                        &active_states,
+                        batch_size,
+                        cursor,
+                        processing_timeout,
+                        max_retries,
+                    )
+                    .await
+            }
+            SessionKind::Signing => {
+                use keymeld_core::protocol::SigningStatusKind;
+                let active_states = vec![
+                    SigningStatusKind::CollectingParticipants,
+                    SigningStatusKind::InitializingSession,
+                    SigningStatusKind::DistributingNonces,
+                    SigningStatusKind::FinalizingSignature,
+                ];
+                self.db
+                    .get_processable_signing_sessions_cursor(
+                        &active_states,
+                        batch_size,
+                        cursor,
+                        processing_timeout,
+                        max_retries,
+                    )
+                    .await
+            }
+        }
     }
 
     async fn advance_session(
@@ -159,8 +502,14 @@ impl Coordinator {
         let kind_str = kind.to_string();
         let timer = MetricsTimer::start((*self.metrics).clone(), &kind_str, "advance_session");
 
+        debug!("Attempting to advance {} session: {}", kind_str, session_id);
+
+        // Load session from database with timeout protection
         let current_session = match self.load_session(&session_id, kind).await {
-            Ok(Some(session)) => session,
+            Ok(Some(session)) => {
+                debug!("Loaded {} session: {}", kind_str, session_id);
+                session
+            }
             Ok(None) => {
                 error!("{} session {} not found", kind_str, session_id);
                 self.metrics
@@ -181,6 +530,11 @@ impl Coordinator {
 
         let current_state_name = current_session.as_ref().to_string();
 
+        debug!(
+            "Processing {} session {} from state: {}",
+            kind_str, session_id, current_state_name
+        );
+
         self.metrics.record_session_state_transition(
             &kind_str,
             &current_state_name,
@@ -188,6 +542,7 @@ impl Coordinator {
             true,
         );
 
+        // Process session with enclave (this involves network calls, not DB operations)
         match current_session.process(&self.enclave_manager).await {
             Ok(next_session) => {
                 let next_state_name = next_session.as_ref();
@@ -196,6 +551,10 @@ impl Coordinator {
                 self.metrics.record_musig_operation("session_process", true);
 
                 if advanced {
+                    info!(
+                        "{} session {} advanced: {} -> {}",
+                        kind_str, session_id, current_state_name, next_state_name
+                    );
                     self.record_advancement_metrics(&next_session);
                     self.metrics.record_session_state_transition(
                         &kind_str,
@@ -204,11 +563,25 @@ impl Coordinator {
                         true,
                     );
                 } else {
+                    debug!(
+                        "{} session {} stayed in state: {}",
+                        kind_str, session_id, current_state_name
+                    );
                     self.check_stuck_session(&next_session);
                 }
 
-                self.update_session_status(&session_id, &next_session)
-                    .await?;
+                // Send session update to database writer (non-blocking)
+                if let Err(e) = self.db_write_tx.try_send(DbWriteRequest {
+                    session_id: session_id.clone(),
+                    session: next_session,
+                }) {
+                    error!(
+                        "Failed to queue {} session {} for database update: {}",
+                        kind_str, session_id, e
+                    );
+                    self.metrics
+                        .record_session_error(&kind_str, "db_queue_full");
+                }
 
                 timer.finish();
                 Ok(advanced)
@@ -251,41 +624,6 @@ impl Coordinator {
         }
     }
 
-    async fn update_session_status(
-        &self,
-        session_id: &keymeld_core::SessionId,
-        session: &Session,
-    ) -> Result<(), ApiError> {
-        match session {
-            Session::Keygen(keygen_status) => self
-                .db
-                .update_keygen_session_status(session_id, keygen_status)
-                .await
-                .map_err(|e| {
-                    error!(
-                        "Failed to update keygen session {} status in database: {}",
-                        session_id, e
-                    );
-                    self.metrics
-                        .record_session_error("keygen", "db_update_failed");
-                    e
-                }),
-            Session::Signing(signing_status) => self
-                .db
-                .update_signing_session_status(session_id, signing_status)
-                .await
-                .map_err(|e| {
-                    error!(
-                        "Failed to update signing session {} status in database: {}",
-                        session_id, e
-                    );
-                    self.metrics
-                        .record_session_error("signing", "db_update_failed");
-                    e
-                }),
-        }
-    }
-
     fn record_advancement_metrics(&self, session: &Session) {
         match session {
             Session::Keygen(keygen_status) => {
@@ -294,33 +632,21 @@ impl Coordinator {
                 }
             }
             Session::Signing(signing_status) => match signing_status {
-                SigningSessionStatus::SessionFull(_) => {
+                SigningSessionStatus::InitializingSession(_) => {
                     self.metrics
                         .record_musig_operation("session_initialization", true);
                 }
-                SigningSessionStatus::GeneratingNonces(_) => {
+                SigningSessionStatus::DistributingNonces(_) => {
                     self.metrics
-                        .record_musig_operation("nonce_generation_start", true);
-                }
-                SigningSessionStatus::CollectingNonces(_) => {
-                    self.metrics
-                        .record_musig_operation("nonce_generation_complete", true);
-                }
-                SigningSessionStatus::GeneratingPartialSignatures(_) => {
-                    self.metrics
-                        .record_musig_operation("nonce_aggregation_complete", true);
-                }
-                SigningSessionStatus::CollectingPartialSignatures(_) => {
-                    self.metrics
-                        .record_musig_operation("partial_signature_generation", true);
+                        .record_musig_operation("nonce_distribution", true);
                 }
                 SigningSessionStatus::FinalizingSignature(_) => {
                     self.metrics
-                        .record_musig_operation("signature_aggregation_start", true);
+                        .record_musig_operation("signature_finalization_start", true);
                 }
                 SigningSessionStatus::Completed(_) => {
                     self.metrics
-                        .record_musig_operation("signature_finalization", true);
+                        .record_musig_operation("signature_complete", true);
                 }
                 _ => {}
             },
@@ -333,11 +659,8 @@ impl Coordinator {
                 // Keygen sessions that stay in collecting_participants might be waiting for participants
                 // This is normal, so no failure metric needed
             }
-            Session::Signing(SigningSessionStatus::SessionFull(_))
-            | Session::Signing(SigningSessionStatus::GeneratingNonces(_))
-            | Session::Signing(SigningSessionStatus::CollectingNonces(_))
-            | Session::Signing(SigningSessionStatus::GeneratingPartialSignatures(_))
-            | Session::Signing(SigningSessionStatus::CollectingPartialSignatures(_))
+            Session::Signing(SigningSessionStatus::InitializingSession(_))
+            | Session::Signing(SigningSessionStatus::DistributingNonces(_))
             | Session::Signing(SigningSessionStatus::FinalizingSignature(_)) => {
                 // Signing sessions that don't advance might indicate processing issues
                 self.metrics.record_musig_operation("session_stuck", false);
@@ -348,7 +671,7 @@ impl Coordinator {
 
     pub async fn run_continuous(&self, mut shutdown_rx: Receiver<()>) -> Result<(), ApiError> {
         let mut processing_interval_ms = interval(Duration::from_millis(
-            self.config.processing_interval_ms.unwrap_or(1000),
+            self.config.processing_interval_ms.unwrap_or(200),
         ));
 
         let mut cleanup_interval = interval(Duration::from_secs(
@@ -358,12 +681,21 @@ impl Coordinator {
             self.config.metric_record_interval_secs.unwrap_or(30),
         ));
 
+        // Stats logging interval (every 60 seconds)
+        let mut stats_logging_interval = interval(Duration::from_secs(60));
+
         // Fast health check interval for epoch change detection (every 5 seconds)
         let mut fast_health_interval = interval(Duration::from_secs(5));
 
+        // Heartbeat interval for coordinator health monitoring
+        let mut heartbeat_interval = interval(Duration::from_secs(
+            self.config.health_check_interval_secs.unwrap_or(10),
+        ));
+
         info!(
-            "Starting session coordinator with {}ms interval and 5s epoch detection",
-            self.config.processing_interval_ms.unwrap_or(1000)
+            "Coordinator background task starting with {}ms processing interval and {}s heartbeat",
+            self.config.processing_interval_ms.unwrap_or(200),
+            self.config.health_check_interval_secs.unwrap_or(10)
         );
 
         self.perform_startup_enclave_health_check().await;
@@ -371,15 +703,35 @@ impl Coordinator {
         loop {
             tokio::select! {
                 _ = processing_interval_ms.tick() => {
-                    match self.process_sessions().await {
-                        Ok(_count) => {
+                    let cycle_start = Instant::now();
+                    debug!("Coordinator processing cycle starting");
 
+                    // Monitor DB health before processing
+                    if let Err(e) = self.monitor_db_pool_health().await {
+                        warn!("DB pool health check failed: {}", e);
+                    }
+
+                    match self.process_sessions().await {
+                        Ok(count) => {
+                            let duration = cycle_start.elapsed();
+                            if duration > Duration::from_secs(1) {
+                                warn!("Slow coordinator processing: {} sessions in {:?}", count, duration);
+                            } else if count > 0 {
+                                debug!("Processed {} sessions in {:?}", count, duration);
+                            } else {
+                                debug!("No sessions processed this cycle (duration: {:?})", duration);
+                            }
                         }
                         Err(e) => {
                             error!("Session processing cycle failed: {}", e);
                             self.metrics.record_session_error("coordinator", "processing_cycle_failed");
+                            // Continue processing instead of crashing
                         }
                     }
+                }
+                _ = heartbeat_interval.tick() => {
+                    info!("Coordinator heartbeat - task alive, DB pool healthy");
+                    self.log_coordinator_stats().await;
                 }
                 _ = cleanup_interval.tick() => {
                     match self.cleanup_expired_sessions().await {
@@ -400,6 +752,10 @@ impl Coordinator {
                         error!("Enclave health metrics update failed: {}", e);
                     }
                 }
+                _ = stats_logging_interval.tick() => {
+                    self.log_operational_stats().await;
+                    self.update_prometheus_stats().await;
+                }
                 _ = fast_health_interval.tick() => {
                     // Fast epoch detection - only check epoch changes, not full health
                     let _ = self.fast_epoch_detection().await;
@@ -415,39 +771,26 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn get_processable_sessions(
-        &self,
-        kind: SessionKind,
-        batch_size: u32,
-        offset: u32,
-        processing_timeout: u64,
-        max_retries: u16,
-    ) -> Result<Vec<crate::database::ProcessableSessionRecord>, ApiError> {
-        match kind {
-            SessionKind::Keygen => {
-                let active_states = Session::active_keygen_states();
-                self.db
-                    .get_processable_keygen_sessions_batch(
-                        &active_states,
-                        batch_size,
-                        offset,
-                        processing_timeout,
-                        max_retries,
-                    )
-                    .await
+    /// Log coordinator statistics for monitoring
+    async fn log_coordinator_stats(&self) {
+        // Get actual database stats using existing method
+        match self.db.get_stats().await {
+            Ok(stats) => {
+                debug!(
+                    "Coordinator stats: {} active sessions, {} total sessions, {} participants, DB size: {} bytes",
+                    stats.active_sessions, stats.total_sessions, stats.total_participants, stats.database_size_bytes.unwrap_or_default()
+                );
             }
-            SessionKind::Signing => {
-                let active_states = Session::active_signing_states();
-                self.db
-                    .get_processable_signing_sessions_batch(
-                        &active_states,
-                        batch_size,
-                        offset,
-                        processing_timeout,
-                        max_retries,
-                    )
-                    .await
+            Err(e) => {
+                warn!("Failed to get coordinator stats: {}", e);
             }
+        }
+
+        // Log circuit breaker status
+        if self.circuit_breaker.is_open() {
+            warn!("Circuit breaker is OPEN - coordinator degraded");
+        } else {
+            debug!("Circuit breaker is CLOSED - coordinator healthy");
         }
     }
 
@@ -560,15 +903,32 @@ impl Coordinator {
 
     async fn update_enclave_health_metrics(&self) -> Result<(), ApiError> {
         let enclaves = self.enclave_manager.health_check().await;
-        for (enclave_id, health) in enclaves {
-            self.metrics
-                .update_enclave_health(enclave_id.as_u32(), health);
 
-            // Check if this enclave already exists in database to determine if we need to set startup_time
+        let connection_stats = self.enclave_manager.get_connection_stats();
+
+        for (enclave_id, health) in enclaves {
+            let connection_health = connection_stats
+                .get(&enclave_id)
+                .map(|stats| stats.health_status)
+                .unwrap_or(false);
+
+            let overall_health = health && connection_health;
+
+            self.metrics
+                .update_enclave_health(enclave_id.as_u32(), overall_health);
+
+            if let Some(stats) = connection_stats.get(&enclave_id) {
+                if !overall_health {
+                    warn!(
+                        "Enclave {} health issue - enclave_health: {}, connection_health: {}, failure_rate: {:.1}%",
+                        enclave_id.as_u32(), health, connection_health, stats.prometheus_metrics.failure_rate
+                    );
+                }
+            }
+
             let existing_enclave = self.db.get_enclave_health(enclave_id.as_u32()).await?;
             let current_time = DbUtils::current_timestamp();
 
-            // Set startup_time for new enclaves or preserve existing startup_time
             let startup_time = if existing_enclave.is_none() && health {
                 Some(current_time as u64)
             } else {
@@ -611,11 +971,9 @@ impl Coordinator {
                             .await
                         {
                             Ok((key, attestation, sessions, _uptime, epoch, key_time)) => {
-                                info!(
-                                    "Successfully retrieved public key for enclave {} (epoch {}): {} chars",
-                                    enclave_id,
-                                    epoch,
-                                    key.len()
+                                debug!(
+                                    "Retrieved public key for enclave {} (epoch {})",
+                                    enclave_id, epoch
                                 );
                                 (
                                     true,
@@ -673,15 +1031,19 @@ impl Coordinator {
         let enclave_ids = self.enclave_manager.get_enclave_ids();
 
         for enclave_id in enclave_ids {
-            // Only validate epochs - don't do full health check
+            // Validate epochs with full KMS reconfiguration on restart
             match self
                 .enclave_manager
-                .validate_enclave_epoch(&enclave_id)
+                .validate_enclave_epoch_with_kms(
+                    &enclave_id,
+                    Some(&self.db),
+                    Some(&self.kms_config),
+                )
                 .await
             {
                 Ok(had_restart) => {
                     if had_restart {
-                        info!("Fast epoch detection: Enclave {} restart detected, forcing cache refresh", enclave_id);
+                        info!("Fast epoch detection: Enclave {} restart detected, reconfigured with KMS", enclave_id);
 
                         // Immediately invalidate cache for this enclave
                         if let Err(e) = self.db.invalidate_enclave_cache(enclave_id.as_u32()).await
@@ -701,6 +1063,29 @@ impl Coordinator {
                                 "Failed to update enclave {} health after epoch change: {}",
                                 enclave_id, e
                             );
+                        }
+
+                        // Restore sessions after enclave restart detection
+                        info!("Restoring sessions for restarted enclave {}", enclave_id);
+                        match self
+                            .enclave_manager
+                            .restore_sessions_for_enclave(&enclave_id, &self.db)
+                            .await
+                        {
+                            Ok(stats) => {
+                                if stats.keygen_restored > 0 || stats.signing_reset > 0 {
+                                    info!(
+                                        "Restored sessions for enclave {}: {} keygen, {} signing reset",
+                                        enclave_id, stats.keygen_restored, stats.signing_reset
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to restore sessions for enclave {}: {}",
+                                    enclave_id, e
+                                );
+                            }
                         }
                     }
                 }
@@ -786,10 +1171,7 @@ impl Coordinator {
             )
             .await?;
 
-        info!(
-            "Successfully updated enclave {} health after epoch change",
-            enclave_id
-        );
+        info!("Updated enclave {} health after epoch change", enclave_id);
         Ok(())
     }
 
@@ -877,7 +1259,37 @@ impl Coordinator {
 
                     // Require all enclaves to be both healthy and epoch-validated
                     if epoch_validated_count == enclave_ids.len() && epoch_validated_count > 0 {
-                        info!("All {} enclaves are healthy and epoch-synchronized - startup complete!", enclave_ids.len());
+                        info!(
+                            "All {} enclaves are healthy and epoch-synchronized",
+                            enclave_ids.len()
+                        );
+
+                        // Restore sessions to all enclaves
+                        info!("Restoring sessions to enclaves after startup...");
+                        for enclave_id in &enclave_ids {
+                            match self
+                                .enclave_manager
+                                .restore_sessions_for_enclave(enclave_id, &self.db)
+                                .await
+                            {
+                                Ok(stats) => {
+                                    if stats.keygen_restored > 0 || stats.signing_reset > 0 {
+                                        info!(
+                                            "Restored sessions for enclave {}: {} keygen, {} signing reset",
+                                            enclave_id, stats.keygen_restored, stats.signing_reset
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to restore sessions for enclave {}: {}",
+                                        enclave_id, e
+                                    );
+                                }
+                            }
+                        }
+
+                        info!("Startup complete!");
                         break;
                     } else if retry_count + 1 >= MAX_STARTUP_RETRIES {
                         warn!(
@@ -918,5 +1330,69 @@ impl Coordinator {
                 }
             }
         }
+    }
+
+    async fn log_operational_stats(&self) {
+        let enclave_stats = self.enclave_manager.get_connection_stats();
+        for (enclave_id, stats) in enclave_stats {
+            // For dynamic pools, measure load as percentage of threshold (10 requests per connection)
+            let load_percent = (stats.avg_load_per_connection / 10.0) * 100.0;
+
+            info!(
+                "Connection Stats [Enclave {}]: connections={}, avg_load={:.1} ({:.1}% of threshold), healthy={}, req/min={:.1}, success={:.1}/min, fail={:.1}/min, failure_rate={:.1}%",
+                enclave_id.as_u32(),
+                stats.active_connections,
+                stats.avg_load_per_connection,
+                load_percent,
+                stats.health_status,
+                stats.prometheus_metrics.requests_per_minute,
+                stats.prometheus_metrics.successful_requests_per_minute,
+                stats.prometheus_metrics.failed_requests_per_minute,
+                stats.prometheus_metrics.failure_rate
+            );
+
+            // Warn if average load exceeds threshold (connections are overloaded)
+            if stats.avg_load_per_connection > 10.0 {
+                warn!(
+                    "Enclave {} connections overloaded: avg load {:.1} (threshold: 10)",
+                    enclave_id.as_u32(),
+                    stats.avg_load_per_connection
+                );
+            }
+            if stats.prometheus_metrics.failure_rate > 10.0 {
+                warn!(
+                    "Enclave {} high failure rate: {:.1}%",
+                    enclave_id.as_u32(),
+                    stats.prometheus_metrics.failure_rate
+                );
+            }
+        }
+
+        match self.db.get_stats().await {
+            Ok(db_stats) => {
+                info!(
+                    "Database Stats: total_sessions={}, active_sessions={}, total_participants={}, size={}MB",
+                    db_stats.total_sessions,
+                    db_stats.active_sessions,
+                    db_stats.total_participants,
+                    db_stats.database_size_bytes.unwrap_or_default() / (1024 * 1024)
+                );
+            }
+            Err(e) => {
+                debug!("Failed to get database stats: {}", e);
+            }
+        }
+
+        info!("Operational stats logged successfully");
+    }
+
+    async fn update_prometheus_stats(&self) {
+        let enclave_stats = self.enclave_manager.get_connection_stats();
+        for (enclave_id, stats) in enclave_stats {
+            self.metrics
+                .update_enclave_connection_stats(enclave_id.as_u32(), &stats);
+        }
+
+        debug!("Prometheus connection stats updated successfully");
     }
 }

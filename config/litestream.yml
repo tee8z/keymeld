@@ -1,0 +1,27 @@
+# Litestream Configuration for KeyMeld
+# Continuously replicates SQLite database to S3 for disaster recovery
+
+dbs:
+  - path: ./data/keymeld.db
+    replicas:
+      # Moto S3 for local development
+      - type: s3
+        bucket: keymeld-db-backups
+        path: keymeld.db
+        region: us-west-2
+        endpoint: http://localhost:4566
+        force-path-style: true
+        # Sync interval - how often to replicate changes
+        sync-interval: 10s
+        # Retention - keep snapshots for disaster recovery
+        retention: 24h
+        # Snapshot interval - full database snapshots
+        snapshot-interval: 1h
+        # Validation interval - verify replica integrity
+        validation-interval: 6h
+
+# Access log for monitoring
+access-key-id: test
+secret-access-key: test
+# Metrics (optional)
+# addr: ":9090"
