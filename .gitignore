@@ -52,3 +52,12 @@ bitcoin-data/
 *.swo
 *~
 logs/*
+
+# Cargo cache files (keep .cargo/config.toml but ignore cache)
+.cargo/registry/
+.cargo/git/
+.cargo/.global-cache
+.cargo/credentials*
+.cargo/config.toml.backup
+.cargo/config.toml.cache
+.cargo/config.toml.temp

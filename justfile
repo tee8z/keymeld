@@ -11,8 +11,8 @@ help:
     @echo "========================================="
     @echo ""
     @echo "🚀 Quick Start:"
-    @echo "  quickstart          Complete setup + plain demo (new users start here)"
-    @echo "  quickstart-adaptors Complete setup + adaptor signatures demo"
+    @echo "  quickstart          Complete setup + plain demo (auto VSock setup)"
+    @echo "  quickstart-adaptors Complete setup + adaptor signatures demo (auto VSock setup)"
     @echo ""
     @echo "📋 Service Management:"
     @echo "  start               Start all services"
@@ -23,6 +23,7 @@ help:
     @echo "🎮 Demo & Testing:"
     @echo "  demo [amount] [dest] Run MuSig2 demo with optional params"
     @echo "  demo-adaptors       Run adaptor signatures demo"
+    @echo "  test-kms-e2e        Run KMS end-to-end tests with restart"
     @echo "  mine <blocks>       Mine Bitcoin regtest blocks"
     @echo "  setup-regtest       Setup Bitcoin regtest environment"
     @echo ""
@@ -43,7 +44,7 @@ help:
     @echo "🧹 Maintenance:"
     @echo "  clean               Clean all data (works for quickstart & stress tests)"
     @echo "  reset-cache         Reset Nix build cache"
-
+    @echo "  kms <cmd>           Manage KMS service (start|stop|status|clean)"
     @echo "  vsock-proxy <cmd>   Manage VSock proxy services (start|stop|status)"
     @echo "  logs <service>      Show logs for specific service"
     @echo ""
@@ -64,9 +65,10 @@ quickstart:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "🚀 Starting KeyMeld quickstart..."
+    QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
     nix develop -c bash -c '\
         ./scripts/clean.sh && \
-        vsock-proxy start && \
+        QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
         cargo build && \
         ./scripts/start-services.sh && \
@@ -78,9 +80,11 @@ quickstart-adaptors:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "🚀 Starting KeyMeld adaptor signatures quickstart..."
+    echo "🔧 Setting up VSock (CI-friendly, no password prompts)..."
+    QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
     nix develop -c bash -c '\
         ./scripts/clean.sh && \
-        vsock-proxy start && \
+        QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
         cargo build && \
         ./scripts/start-services.sh && \
@@ -91,36 +95,71 @@ quickstart-adaptors:
 start: build-dev
     #!/usr/bin/env bash
     echo "🚀 Starting KeyMeld services..."
-    # Create data directory
-    mkdir -p data logs
+    # Create data directories
+    mkdir -p data/bitcoin logs
 
-    # Start Bitcoin Core in regtest mode (if not already running)
-    if ! pgrep -f bitcoind > /dev/null; then
-        echo "Starting Bitcoin Core..."
-        nix develop -c bitcoind -regtest -daemon -datadir=./data/bitcoin \
-            -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcport=18443 \
-            -port=18444 -fallbackfee=0.0001 -mintxfee=0.00001 \
-            -txconfirmtarget=1 -blockmintxfee=0.00001
-        sleep 3
+    # Start Moto (AWS mock server for KMS) (if not already running)
+    if ! pgrep -f moto_server > /dev/null; then
+        echo "🔐 Starting Moto (KMS)..."
+        nix run .#localstack > logs/localstack.log 2>&1 &
+        sleep 5
+        echo "✅ Moto started on port 4566"
+
+        # Create KMS key in Moto with alias
+        echo "🔑 Creating KMS key in Moto..."
+        KEY_OUTPUT=$(AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+            aws --endpoint-url=http://localhost:4566 kms create-key \
+            --description "KeyMeld Enclave Master Key" \
+            --key-usage ENCRYPT_DECRYPT 2>&1)
+
+        if echo "$KEY_OUTPUT" | grep -q "KeyId"; then
+            KEY_ID=$(echo "$KEY_OUTPUT" | grep -o '"KeyId": "[^"]*"' | cut -d'"' -f4)
+            echo "   Created key: $KEY_ID"
+
+            # Create alias for the key
+            AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+                aws --endpoint-url=http://localhost:4566 kms create-alias \
+                --alias-name alias/keymeld-enclave-master-key \
+                --target-key-id "$KEY_ID" 2>&1 || echo "   Alias might already exist"
+            echo "   ✅ KMS key ready: alias/keymeld-enclave-master-key"
+        else
+            echo "   ⚠️  KMS key might already exist"
+        fi
     else
-        echo "Bitcoin Core already running"
+        echo "✅ Moto already running"
     fi
 
-    # Start KeyMeld Gateway
-    nix develop -c bash -c 'RUST_LOG=info KEYMELD_ENVIRONMENT=development \
-        LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
-        ./target/debug/keymeld-gateway > logs/gateway.log 2>&1 &'
-
-    # Start KeyMeld Enclaves (simulated) - all 3 enclaves with VSock
-    # Note: All enclaves use CID 2 (host CID) in development. In production AWS Nitro Enclaves,
-    # each would have a unique CID. Local simulation cannot use guest CIDs (3+) without real VMs.
-    for i in {0..2}; do
-        port=$((5000 + i))
-        cid=2  # Host CID - required for local VSock simulation
-        nix develop -c bash -c "RUST_LOG=info ENCLAVE_ID=${i} ENCLAVE_CID=${cid} VSOCK_PORT=${port} \
-            LD_LIBRARY_PATH=\${CMAKE_LIBRARY_PATH:-} \
-            ./target/debug/keymeld-enclave > logs/enclave-${i}.log 2>&1 &"
-    done
+    # Start services in a single nix develop session to reduce overhead
+    nix develop -c bash -c ' \
+        # Start Bitcoin Core in regtest mode (if not already running) \
+        if ! pgrep -f bitcoind > /dev/null; then \
+            echo "Starting Bitcoin Core..."; \
+            bitcoind -regtest -daemon -datadir=./data/bitcoin \
+                -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcport=18443 \
+                -port=18444 -fallbackfee=0.0001 -mintxfee=0.00001 \
+                -txconfirmtarget=1 -blockmintxfee=0.00001 \
+                -rpcthreads=128 -rpcworkqueue=512; \
+            sleep 3; \
+        else \
+            echo "Bitcoin Core already running"; \
+        fi; \
+        \
+        # Start KeyMeld Gateway \
+        RUST_LOG=info KEYMELD_ENVIRONMENT=development \
+            AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+            LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
+            ./target/debug/keymeld-gateway > logs/gateway.log 2>&1 & \
+        \
+        # Start KeyMeld Enclaves (simulated) - all 3 enclaves with VSock \
+        for i in {0..2}; do \
+            port=$((5000 + i)); \
+            cid=2; \
+            RUST_LOG=info ENCLAVE_ID=${i} ENCLAVE_CID=${cid} VSOCK_PORT=${port} \
+                AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+                LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
+                ./target/debug/keymeld-enclave > logs/enclave-${i}.log 2>&1 & \
+        done \
+    '
 
     echo "✅ Services started! Logs available in logs/ directory"
     echo "🌐 Gateway: http://localhost:8080"
@@ -134,6 +173,7 @@ stop: stop-vsock-proxies
     pkill -f keymeld-gateway || true
     pkill -f keymeld-enclave || true
     pkill -f bitcoind || true
+    pkill -f moto_server || true
     echo "✅ All services stopped"
 
 # Restart all services
@@ -144,6 +184,11 @@ status:
     #!/usr/bin/env bash
     echo "📊 KeyMeld Service Status:"
     echo "=========================="
+    if pgrep -f moto_server > /dev/null; then
+        echo "✅ Moto (KMS): Running (port 4566)"
+    else
+        echo "❌ Moto (KMS): Stopped"
+    fi
     if pgrep -f bitcoind > /dev/null; then
         echo "✅ Bitcoin Core: Running"
     else
@@ -187,7 +232,20 @@ stress mode count amount="50000":
     @echo "🚀 Running KeyMeld stress test..."
     @nix develop -c ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
 
+# Monitor stress test progress in real-time
+stress-monitor interval="5":
+    @echo "📊 Monitoring stress test..."
+    @nix develop -c ./scripts/monitor-stress-test.sh {{interval}}
 
+# Test wallet funding performance (requires Bitcoin regtest)
+fund-wallets count amount="0.00055" batch_size="50" creation_parallelism="10":
+    @echo "💰 Testing wallet funding with {{count}} wallets..."
+    @nix develop -c bash -c 'scripts/setup-regtest.sh && scripts/fund-wallets.sh {{count}} {{amount}} {{batch_size}} {{creation_parallelism}}'
+
+# Run KMS end-to-end tests (requires services to be running)
+test-kms-e2e:
+    @echo "🧪 Running KMS End-to-End Tests..."
+    @nix develop -c ./scripts/test-kms-e2e.sh
 
 # Mine Bitcoin regtest blocks
 mine blocks="6":
@@ -208,7 +266,8 @@ setup-regtest:
         echo "Starting Bitcoin Core..."
         nix develop -c bitcoind -regtest -daemon -datadir=./data/bitcoin \
             -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcport=18443 \
-            -port=18444 -fallbackfee=0.0001 -mintxfee=0.00001
+            -port=18444 -fallbackfee=0.0001 -mintxfee=0.00001 \
+            -rpcthreads=128 -rpcworkqueue=512
         echo "Waiting for Bitcoin Core to start..."
         sleep 5
 
@@ -296,6 +355,11 @@ clean: stop
     pkill -9 -f keymeld-gateway 2>/dev/null || true
     pkill -9 -f keymeld-enclave 2>/dev/null || true
     pkill -9 -f keymeld_demo 2>/dev/null || true
+    pkill -9 -f haproxy 2>/dev/null || true
+    ./scripts/bitcoin-rpc-batcher.sh stop 2>/dev/null || true
+    rm -rf /tmp/keymeld-bitcoin-proxy 2>/dev/null || true
+    rm -rf /tmp/keymeld-rpc-queue 2>/dev/null || true
+    rm -f /tmp/keymeld-rpc-batcher.pid /tmp/keymeld-rpc-batcher.log 2>/dev/null || true
     sleep 1
 
     # Remove all data, logs, and build artifacts
@@ -315,7 +379,59 @@ clean: stop
         fi
     ' 2>/dev/null || true
 
+    # Clean KMS data
+    rm -rf ./data/kms-data
+    rm -f ./data/kms-seed.yaml
+
     echo "✅ Complete clean finished - ready for quickstart or stress tests"
+
+# ==================================================================================
+# KMS (Key Management Service)
+# ==================================================================================
+
+# Manage Moto KMS service (start|stop|status|clean)
+kms cmd:
+    #!/usr/bin/env bash
+    case "{{cmd}}" in
+        start)
+            echo "🔐 Starting Moto (KMS)..."
+            if pgrep -f moto_server > /dev/null; then
+                echo "⚠️  Moto already running"
+                exit 0
+            fi
+            mkdir -p logs
+            nix run .#localstack > logs/localstack.log 2>&1 &
+            sleep 3
+            echo "✅ Moto started on port 4566"
+            ;;
+        stop)
+            echo "🛑 Stopping Moto..."
+            pkill -f moto_server || true
+            echo "✅ Moto stopped"
+            ;;
+        status)
+            echo "📊 Moto KMS Status:"
+            if pgrep -f moto_server > /dev/null; then
+                echo "  Moto: ✅ Running (PID: $(pgrep -f moto_server))"
+                echo "  Endpoint: http://127.0.0.1:4566"
+            else
+                echo "  Moto: ❌ Not running"
+            fi
+            ;;
+        clean)
+            echo "🧹 Cleaning Moto data..."
+            rm -rf ./data/localstack
+            echo "✅ Moto data cleaned"
+            ;;
+        *)
+            echo "Usage: just kms {start|stop|status|clean}"
+            exit 1
+            ;;
+    esac
+
+# ==================================================================================
+# Nix Cache & System
+# ==================================================================================
 
 # Reset Nix build cache (fix SQLite conflicts)
 reset-cache:

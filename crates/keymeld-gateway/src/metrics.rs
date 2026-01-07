@@ -40,6 +40,61 @@ lazy_static::lazy_static! {
         &["enclave_id"]
     ).unwrap();
 
+    static ref ENCLAVE_CONNECTION_ACTIVE: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_connection_active",
+        "Number of active connections to enclave",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_CONNECTION_AVG_LOAD: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_connection_avg_load",
+        "Average number of concurrent requests per connection",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_CONNECTION_LOAD_PERCENT: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_connection_load_percent",
+        "Connection load as percentage of threshold (10 requests per connection)",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_REQUESTS_PER_MINUTE: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_requests_per_minute_total",
+        "Total request rate to enclave (requests per minute)",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_SUCCESSFUL_REQUESTS_PER_MINUTE: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_successful_requests_per_minute",
+        "Successful request rate to enclave (requests per minute)",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_FAILED_REQUESTS_PER_MINUTE: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_failed_requests_per_minute",
+        "Failed request rate to enclave (requests per minute)",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_FAILURE_RATE: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_failure_rate_percent",
+        "Request failure rate percentage",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_REQUESTS_IN_WINDOW: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_requests_in_current_window",
+        "Number of requests in current time window",
+        &["enclave_id"]
+    ).unwrap();
+
+    static ref ENCLAVE_LATENCY_HISTOGRAM: HistogramVec = register_histogram_vec!(
+        "keymeld_enclave_request_duration_seconds",
+        "Request latency to enclave",
+        &["enclave_id"],
+        vec![0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    ).unwrap();
+
     static ref API_REQUESTS: CounterVec = register_counter_vec!(
         "keymeld_api_requests_total",
         "Total number of API requests",
@@ -160,6 +215,77 @@ impl Metrics {
 
         if !success {
             warn!(operation = operation, "MuSig2 operation failed");
+        }
+    }
+
+    pub fn update_enclave_connection_stats(
+        &self,
+        enclave_id: u32,
+        stats: &keymeld_core::managed_vsock::pool::ConnectionStats,
+    ) {
+        let enclave_id_str = enclave_id.to_string();
+
+        // Connection pool metrics
+        ENCLAVE_CONNECTION_ACTIVE
+            .with_label_values(&[&enclave_id_str])
+            .set(stats.active_connections as f64);
+
+        ENCLAVE_CONNECTION_AVG_LOAD
+            .with_label_values(&[&enclave_id_str])
+            .set(stats.avg_load_per_connection);
+
+        // Load as percentage of threshold (10 requests per connection)
+        ENCLAVE_CONNECTION_LOAD_PERCENT
+            .with_label_values(&[&enclave_id_str])
+            .set((stats.avg_load_per_connection / 10.0) * 100.0);
+
+        // Request rate metrics from enhanced prometheus metrics
+        let prometheus_metrics = &stats.prometheus_metrics;
+
+        ENCLAVE_REQUESTS_PER_MINUTE
+            .with_label_values(&[&enclave_id_str])
+            .set(prometheus_metrics.requests_per_minute);
+
+        ENCLAVE_SUCCESSFUL_REQUESTS_PER_MINUTE
+            .with_label_values(&[&enclave_id_str])
+            .set(prometheus_metrics.successful_requests_per_minute);
+
+        ENCLAVE_FAILED_REQUESTS_PER_MINUTE
+            .with_label_values(&[&enclave_id_str])
+            .set(prometheus_metrics.failed_requests_per_minute);
+
+        ENCLAVE_FAILURE_RATE
+            .with_label_values(&[&enclave_id_str])
+            .set(prometheus_metrics.failure_rate);
+
+        ENCLAVE_REQUESTS_IN_WINDOW
+            .with_label_values(&[&enclave_id_str])
+            .set(prometheus_metrics.requests_in_current_window as f64);
+
+        // Update latency histogram from core metrics
+        let histogram = &prometheus_metrics.latency_histogram;
+        let enclave_histogram = ENCLAVE_LATENCY_HISTOGRAM.with_label_values(&[&enclave_id_str]);
+
+        // Clear and update histogram based on bucket data from core
+        // This simulates the latency distribution by observing based on bucket data
+        for (bucket_idx, &count) in histogram.bucket_counts.iter().enumerate() {
+            if count > 0 && bucket_idx < histogram.buckets.len() {
+                let bucket_value = histogram.buckets[bucket_idx];
+                // Observe each count as separate observations at the bucket boundary
+                for _ in 0..count {
+                    enclave_histogram.observe(bucket_value / 1000.0); // Convert ms to seconds
+                }
+            }
+        }
+
+        // Log health status changes
+        if !stats.health_status {
+            warn!(
+                enclave_id = enclave_id,
+                failure_rate = prometheus_metrics.failure_rate,
+                active_connections = stats.active_connections,
+                "Unhealthy enclave connection detected"
+            );
         }
     }
 

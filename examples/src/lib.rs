@@ -1,4 +1,6 @@
 pub mod adaptor_utils;
+pub mod rpc_batcher;
+
 use anyhow::{anyhow, Result};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use bdk_wallet::{
@@ -19,24 +21,23 @@ use bdk_wallet::{
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::Message;
 use bitcoin::sighash::{Prevouts, SighashCache};
-use keymeld_core::{
-    api::{
-        CreateKeygenSessionRequest, CreateKeygenSessionResponse, CreateSigningSessionRequest,
-        EnclavePublicKeyResponse, GetAvailableSlotsResponse, HealthCheckResponse,
-        KeygenSessionStatusResponse, RegisterKeygenParticipantRequest,
-        SigningSessionStatusResponse, TaprootTweak,
-    },
-    crypto::SecureCrypto,
-    encrypted_data::KeygenParticipantSessionData,
-    identifiers::{EnclaveId, UserId},
-    session::{KeygenStatusKind, SigningStatusKind},
-    SessionId,
+use bitcoin::Txid;
+
+use keymeld_sdk::{
+    CreateSigningSessionRequest, EnclaveId, EnclavePublicKeyResponse, EncryptedData,
+    GetAvailableSlotsResponse, HealthCheckResponse, KeygenSessionStatusResponse, KeygenStatusKind,
+    RegisterKeygenParticipantRequest, SecureCrypto, SessionId, SessionSecret,
+    SigningSessionStatusResponse, SigningStatusKind, TaprootTweak, UserId,
+};
+use keymeld_sdk::{
+    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, ReserveKeygenSessionRequest,
+    ReserveKeygenSessionResponse,
 };
 use rand::RngCore;
 use reqwest::Client;
 use secp256k1::PublicKey as Secp256k1PublicKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::fs::read_to_string;
 use std::path::Path;
@@ -44,6 +45,114 @@ use std::str::FromStr;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Configuration for Bitcoin RPC retry logic
+/// For high-concurrency stress tests (1000+ parallel sessions), Bitcoin Core's
+/// RPC queue can get backed up. These values allow for longer waits.
+const BITCOIN_RPC_MAX_RETRIES: u32 = 20;
+const BITCOIN_RPC_BASE_DELAY_MS: u64 = 100;
+const BITCOIN_RPC_MAX_DELAY_MS: u64 = 30000;
+
+/// Helper to retry Bitcoin RPC operations with exponential backoff
+/// This handles 503 errors when the Bitcoin node is overloaded
+async fn retry_bitcoin_rpc<T, F>(operation_name: &str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> std::result::Result<T, bdk_bitcoind_rpc::bitcoincore_rpc::Error>,
+{
+    let mut last_error = None;
+
+    for attempt in 1..=BITCOIN_RPC_MAX_RETRIES {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let error_str = e.to_string();
+                let is_retryable = error_str.contains("503")
+                    || error_str.contains("Service Unavailable")
+                    || error_str.contains("transport error")
+                    || error_str.contains("connection refused")
+                    || error_str.contains("Connection refused");
+
+                if is_retryable && attempt < BITCOIN_RPC_MAX_RETRIES {
+                    // Exponential backoff with jitter
+                    let delay = std::cmp::min(
+                        BITCOIN_RPC_BASE_DELAY_MS * (1 << (attempt - 1)),
+                        BITCOIN_RPC_MAX_DELAY_MS,
+                    );
+                    // Add some jitter (0-50% of delay)
+                    let jitter = (rand::random::<u64>() % (delay / 2 + 1)) as u64;
+                    let total_delay = delay + jitter;
+
+                    warn!(
+                        "⚠️  Bitcoin RPC {} failed (attempt {}/{}): {}. Retrying in {}ms...",
+                        operation_name, attempt, BITCOIN_RPC_MAX_RETRIES, error_str, total_delay
+                    );
+                    sleep(Duration::from_millis(total_delay)).await;
+                    last_error = Some(e);
+                    continue;
+                }
+
+                return Err(anyhow!("{} failed: {}", operation_name, e));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "{} failed after {} retries: {}",
+        operation_name,
+        BITCOIN_RPC_MAX_RETRIES,
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Unknown error".to_string())
+    ))
+}
+
+/// Session data for keygen (coordinator)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeygenSessionData {
+    pub coordinator_pubkey: Vec<u8>,
+    pub aggregate_pubkey: Option<Vec<u8>>,
+}
+
+impl KeygenSessionData {
+    pub fn new(coordinator_pubkey: Vec<u8>) -> Self {
+        Self {
+            coordinator_pubkey,
+            aggregate_pubkey: None,
+        }
+    }
+}
+
+/// Enclave data for keygen (coordinator)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeygenEnclaveData {
+    pub coordinator_private_key: String,
+    pub session_secret: String,
+}
+
+impl KeygenEnclaveData {
+    pub fn new(coordinator_private_key: String, session_secret: String) -> Self {
+        Self {
+            coordinator_private_key,
+            session_secret,
+        }
+    }
+}
+
+/// Session data for keygen participants
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeygenParticipantSessionData {
+    pub participant_public_keys: BTreeMap<UserId, Vec<u8>>,
+}
+
+impl KeygenParticipantSessionData {
+    pub fn new_with_public_key(user_id: UserId, participant_public_key: Vec<u8>) -> Self {
+        let mut participant_public_keys = BTreeMap::new();
+        participant_public_keys.insert(user_id, participant_public_key);
+        Self {
+            participant_public_keys,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExampleConfig {
@@ -54,6 +163,18 @@ pub struct ExampleConfig {
     pub bitcoin_rpc_url: String,
     pub bitcoin_rpc_auth: BitcoinRpcAuth,
     pub key_files_dir: String,
+    /// Use RPC batcher for high-concurrency stress tests (100+ instances)
+    /// When enabled, funding and broadcast requests are queued to files
+    /// and processed by a background batcher script
+    #[serde(default)]
+    pub use_rpc_batcher: bool,
+    /// Directory for RPC batcher queue files (default: /tmp/keymeld-rpc-queue)
+    #[serde(default = "default_rpc_queue_dir")]
+    pub rpc_queue_dir: String,
+}
+
+fn default_rpc_queue_dir() -> String {
+    "/tmp/keymeld-rpc-queue".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +284,7 @@ pub struct KeyMeldE2ETest {
     pub session_private_keys: HashMap<SessionId, secp256k1::SecretKey>,
     pub coordinator_enclave_ids: HashMap<SessionId, EnclaveId>,
     pub participants_requiring_approval: Vec<usize>, // Indices of participants requiring approval (0 = first participant, not coordinator)
+    pub rpc_batcher: Option<rpc_batcher::RpcBatcher>, // Queue-based RPC for high concurrency
 }
 
 impl KeyMeldE2ETest {
@@ -210,6 +332,14 @@ impl KeyMeldE2ETest {
 
         let participant_user_ids: Vec<UserId> = Vec::new();
 
+        // Initialize RPC batcher if enabled for high-concurrency tests
+        let rpc_batcher = if config.use_rpc_batcher {
+            info!("📦 RPC batcher enabled - using queue-based Bitcoin RPC");
+            Some(rpc_batcher::RpcBatcher::new(&config.rpc_queue_dir))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             client,
@@ -226,6 +356,7 @@ impl KeyMeldE2ETest {
             session_private_keys: HashMap::new(),
             coordinator_enclave_ids: HashMap::new(),
             participants_requiring_approval: vec![0], // By default, only first participant (index 0) requires approval
+            rpc_batcher,
         })
     }
 
@@ -331,54 +462,84 @@ impl KeyMeldE2ETest {
         let funding_amount = required_amount - current_balance.to_sat() + 50_000; // Extra buffer
         info!("💸 Sending {} sats to coordinator", funding_amount);
 
-        let funding_txid = self
-            .rpc_client
-            .send_to_address(
-                &coordinator_address,
-                Amount::from_sat(funding_amount),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| anyhow!("Failed to fund coordinator: {e}"))?;
+        let funding_txid = if let Some(ref batcher) = self.rpc_batcher {
+            // Use batcher for high concurrency - avoids overwhelming bitcoind
+            let txid_str = batcher
+                .send_to_address(
+                    &coordinator_address.to_string(),
+                    funding_amount as f64 / 100_000_000.0,
+                )
+                .await?;
+            txid_str.parse::<Txid>()?
+        } else {
+            // Direct RPC for low concurrency
+            retry_bitcoin_rpc("send_to_address (coordinator)", || {
+                self.rpc_client.send_to_address(
+                    &coordinator_address,
+                    Amount::from_sat(funding_amount),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .await?
+        };
 
         info!("📡 Funding transaction: {}", funding_txid);
 
-        // Generate a block to confirm
-        let _ = self
-            .rpc_client
-            .generate_to_address(1, &coordinator_address)
-            .map_err(|e| anyhow!("Failed to generate block: {e}"))?;
-
         // Wait for confirmation
-        loop {
-            sleep(Duration::from_secs(1)).await;
-
-            let tx_info = self.rpc_client.get_transaction(&funding_txid, None);
-            if let Ok(info) = tx_info {
-                if info.info.confirmations >= 1 {
-                    info!(
-                        "✅ Funding confirmed with {} confirmations",
-                        info.info.confirmations
-                    );
-                    break;
-                }
-            }
+        if let Some(ref batcher) = self.rpc_batcher {
+            // High concurrency mode: use batcher for confirmation polling
+            // Background miner handles block generation
+            info!("⏳ Waiting for background miner to confirm transaction...");
+            let confirmations = batcher
+                .wait_for_confirmation(&funding_txid.to_string(), 1)
+                .await?;
+            info!("✅ Funding confirmed with {} confirmations", confirmations);
+        } else {
+            // Low concurrency mode: generate blocks ourselves
+            info!("⛏️ Mining block to confirm transaction...");
+            let addr = self
+                .coordinator_wallet
+                .peek_address(KeychainKind::External, 1)
+                .address;
+            retry_bitcoin_rpc("generatetoaddress", || {
+                self.rpc_client.generate_to_address(1, &addr)
+            })
+            .await?;
+            info!("✅ Funding confirmed");
         }
 
         Ok(())
     }
 
-    pub async fn fund_aggregate_key_address(&mut self, aggregate_key: &str) -> Result<OutPoint> {
+    pub async fn fund_aggregate_key_address(
+        &mut self,
+        encrypted_aggregate_key: &str,
+        keygen_session_id: &SessionId,
+    ) -> Result<OutPoint> {
         info!("💰 Funding aggregate key address...");
 
-        let key_bytes =
-            hex::decode(aggregate_key).map_err(|e| anyhow!("Invalid hex in aggregate key: {e}"))?;
+        // Get the session secret for decryption
+        let session_secret_hex = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
+            anyhow!(
+                "Session secret not found for keygen session: {}",
+                keygen_session_id
+            )
+        })?;
+        let session_secret = SessionSecret::from_hex(session_secret_hex)?;
+
+        // Decrypt the aggregate public key
+        let encrypted_data = EncryptedData::from_hex(encrypted_aggregate_key)
+            .map_err(|e| anyhow!("Failed to decode encrypted aggregate key: {}", e))?;
+        let key_bytes = session_secret
+            .decrypt(&encrypted_data, "aggregate_public_key")
+            .map_err(|e| anyhow!("Failed to decrypt aggregate key: {}", e))?;
         let pubkey =
-            PublicKey::from_slice(&key_bytes).map_err(|e| anyhow!("Invalid public key: {e}"))?;
+            PublicKey::from_slice(&key_bytes).map_err(|e| anyhow!("Invalid public key: {}", e))?;
         let (x_only, _) = pubkey.x_only_public_key();
         let aggregate_pubkey = TweakedPublicKey::dangerous_assume_tweaked(x_only);
 
@@ -391,44 +552,69 @@ impl KeyMeldE2ETest {
             .address;
 
         let required_amount = self.amount + 5_000;
-        let funding_txid = self
-            .rpc_client
-            .send_to_address(
-                &aggregate_address,
-                Amount::from_sat(required_amount),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| anyhow!("Failed to fund aggregate address: {e}"))?;
+        let required_btc = required_amount as f64 / 100_000_000.0;
+
+        // Use batcher if enabled, otherwise direct RPC
+        let funding_txid = if let Some(ref batcher) = self.rpc_batcher {
+            let txid_str = batcher
+                .send_to_address(&aggregate_address.to_string(), required_btc)
+                .await?;
+            bitcoin::Txid::from_str(&txid_str)
+                .map_err(|e| anyhow!("Invalid txid from batcher: {}", e))?
+        } else {
+            retry_bitcoin_rpc("send_to_address (aggregate)", || {
+                self.rpc_client.send_to_address(
+                    &aggregate_address,
+                    Amount::from_sat(required_amount),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .await?
+        };
 
         info!("📡 Funding transaction: {}", funding_txid);
 
-        let _ = self
-            .rpc_client
-            .generate_to_address(1, &coordinator_address)
-            .map_err(|e| anyhow!("Failed to generate block: {e}"))?;
+        // Skip generate_to_address when using batcher - background miner handles it
+        if self.rpc_batcher.is_none() {
+            let _ = retry_bitcoin_rpc("generate_to_address", || {
+                self.rpc_client.generate_to_address(1, &coordinator_address)
+            })
+            .await?;
+        }
 
-        loop {
-            sleep(Duration::from_secs(1)).await;
+        // Wait for confirmation - use batcher if enabled
+        if let Some(ref batcher) = self.rpc_batcher {
+            batcher
+                .wait_for_confirmation(&funding_txid.to_string(), 1)
+                .await?;
+            info!("✅ Aggregate funding confirmed");
+        } else {
+            loop {
+                sleep(Duration::from_secs(1)).await;
 
-            let tx_info = self.rpc_client.get_transaction(&funding_txid, None);
-            if let Ok(info) = tx_info {
-                if info.info.confirmations >= 1 {
-                    info!("✅ Aggregate funding confirmed");
-                    break;
+                if let Ok(info) = retry_bitcoin_rpc("get_transaction", || {
+                    self.rpc_client.get_transaction(&funding_txid, None)
+                })
+                .await
+                {
+                    if info.info.confirmations >= 1 {
+                        info!("✅ Aggregate funding confirmed");
+                        break;
+                    }
                 }
             }
         }
 
         // Find the correct output index for our aggregate address
-        let funding_tx_info = self
-            .rpc_client
-            .get_transaction(&funding_txid, None)
-            .map_err(|e| anyhow!("Failed to get funding transaction info: {e}"))?;
+        let funding_tx_info = retry_bitcoin_rpc("get_transaction", || {
+            self.rpc_client.get_transaction(&funding_txid, None)
+        })
+        .await?;
 
         let funding_tx = funding_tx_info.transaction()?;
         let aggregate_script_pubkey = aggregate_address.script_pubkey();
@@ -454,16 +640,30 @@ impl KeyMeldE2ETest {
     }
 
     pub async fn create_musig2_transaction(
-        &self,
-        aggregate_key: &str,
+        &mut self,
+        encrypted_aggregate_key: &str,
+        keygen_session_id: &SessionId,
         aggregate_utxo: &OutPoint,
     ) -> Result<Psbt> {
         info!("📝 Creating MuSig2 transaction...");
 
-        let key_bytes =
-            hex::decode(aggregate_key).map_err(|e| anyhow!("Invalid hex in aggregate key: {e}"))?;
+        // Get the session secret for decryption
+        let session_secret_hex = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
+            anyhow!(
+                "Session secret not found for keygen session: {}",
+                keygen_session_id
+            )
+        })?;
+        let session_secret = SessionSecret::from_hex(session_secret_hex)?;
+
+        // Decrypt the aggregate public key
+        let encrypted_data = EncryptedData::from_hex(encrypted_aggregate_key)
+            .map_err(|e| anyhow!("Failed to decode encrypted aggregate key: {}", e))?;
+        let key_bytes = session_secret
+            .decrypt(&encrypted_data, "aggregate_public_key")
+            .map_err(|e| anyhow!("Failed to decrypt aggregate key: {}", e))?;
         let pubkey =
-            PublicKey::from_slice(&key_bytes).map_err(|e| anyhow!("Invalid public key: {e}"))?;
+            PublicKey::from_slice(&key_bytes).map_err(|e| anyhow!("Invalid public key: {}", e))?;
         let (x_only_key, parity) = pubkey.x_only_public_key();
 
         // KeyMeld's KeyAggContext already applied the unspendable taproot tweak
@@ -472,7 +672,7 @@ impl KeyMeldE2ETest {
         let aggregate_pubkey = TweakedPublicKey::dangerous_assume_tweaked(x_only_key);
 
         info!("🔍 Key details for transaction:");
-        info!("  - Original aggregate key: {}", aggregate_key);
+        info!("  - Original aggregate key: {}", encrypted_aggregate_key);
         info!(
             "  - Aggregate key (compressed): {}",
             hex::encode(&key_bytes)
@@ -571,19 +771,17 @@ impl KeyMeldE2ETest {
     }
 
     pub async fn create_keygen_session(&mut self) -> Result<SessionId> {
-        info!("🔑 Creating keygen session...");
+        info!("🔑 Creating keygen session using two-phase approach...");
 
         let keygen_session_id: SessionId = Uuid::now_v7().into();
 
-        let seed = keymeld_core::crypto::SecureCrypto::generate_session_seed()
+        let seed = SecureCrypto::generate_session_seed()
             .map_err(|e| anyhow!("Failed to generate session seed: {e}"))?;
 
-        let session_private_key =
-            keymeld_core::crypto::SecureCrypto::derive_private_key_from_seed(&seed)
-                .map_err(|e| anyhow!("Failed to derive private key from seed: {e}"))?;
-        let session_public_key =
-            keymeld_core::crypto::SecureCrypto::derive_public_key_from_seed(&seed)
-                .map_err(|e| anyhow!("Failed to derive public key from seed: {e}"))?;
+        let session_private_key = SecureCrypto::derive_private_key_from_seed(&seed)
+            .map_err(|e| anyhow!("Failed to derive private key from seed: {e}"))?;
+        let session_public_key = SecureCrypto::derive_public_key_from_seed(&seed)
+            .map_err(|e| anyhow!("Failed to derive public key from seed: {e}"))?;
 
         let session_secret = hex::encode(&seed);
 
@@ -594,96 +792,6 @@ impl KeyMeldE2ETest {
 
         let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
 
-        let coordinator_enclave_id = 1u32.into();
-
-        // Get the coordinator enclave's public key with retry logic
-        let enclave_public_key_response: EnclavePublicKeyResponse = {
-            const MAX_RETRIES: u32 = 10;
-            const INITIAL_DELAY_MS: u64 = 500;
-
-            let mut retry_count = 0;
-            loop {
-                let response = self
-                    .client
-                    .get(format!(
-                        "{}/api/v1/enclaves/{}/public-key",
-                        self.config.gateway_url, 1
-                    ))
-                    .send()
-                    .await?
-                    .json::<EnclavePublicKeyResponse>()
-                    .await?;
-
-                // Check if the public key is valid (not "unavailable")
-                if response.public_key != "unavailable" && !response.public_key.is_empty() {
-                    // Verify it's valid hex before proceeding
-                    if hex::decode(&response.public_key).is_ok() {
-                        break response;
-                    }
-                }
-
-                if retry_count >= MAX_RETRIES {
-                    return Err(anyhow!(
-                        "Enclave public key still unavailable after {} retries. The enclave may not be fully initialized yet.",
-                        MAX_RETRIES
-                    ));
-                }
-
-                retry_count += 1;
-                let delay_ms = INITIAL_DELAY_MS * (2_u64.pow((retry_count - 1).min(4))); // Cap at 2^4 = 16x multiplier
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-            }
-        };
-
-        // Encrypt the session secret with the coordinator enclave's public key
-        let enclave_public_key_bytes = hex::decode(&enclave_public_key_response.public_key)
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to decode enclave public key '{}', {}",
-                    enclave_public_key_response.public_key,
-                    e
-                )
-            })?;
-        let enclave_public_key = Secp256k1PublicKey::from_slice(&enclave_public_key_bytes)
-            .map_err(|e| anyhow!("Invalid enclave public key: {e}"))?;
-
-        // Encrypt the seed (not the hex-encoded session_secret) to the coordinator enclave
-        let encrypted_session_secret_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &seed)
-                .map_err(|e| anyhow!("Failed to encrypt session seed: {e}"))?;
-
-        let encrypted_session_secret = hex::encode(&encrypted_session_secret_bytes);
-
-        // Encrypt the coordinator private key with the same enclave public key
-        let encrypted_coordinator_key_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &coordinator_private_key_bytes)
-                .map_err(|e| anyhow!("Failed to encrypt coordinator private key: {e}"))?;
-        let encrypted_key = hex::encode(&encrypted_coordinator_key_bytes);
-
-        // Create and encrypt session data
-        let session_data = keymeld_core::encrypted_data::KeygenSessionData::new(
-            self.coordinator_public_key.serialize().to_vec(),
-        );
-        let encrypted_session_data =
-            keymeld_core::api::validation::encrypt_structured_data_with_session_key(
-                &session_data,
-                &session_secret,
-                "keygen_session",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
-
-        // Create and encrypt enclave data
-        let enclave_data = keymeld_core::encrypted_data::KeygenEnclaveData::new(
-            encrypted_key.clone(),
-            session_secret.clone(),
-        );
-        let encrypted_enclave_data =
-            keymeld_core::api::validation::encrypt_structured_data_with_enclave_key(
-                &enclave_data,
-                &enclave_public_key_response.public_key,
-            )
-            .map_err(|e| anyhow!("Failed to encrypt enclave data: {e}"))?;
-
         let mut expected_participants = vec![self.coordinator_user_id.clone()];
         for user_id in &self.participant_user_ids {
             expected_participants.push(user_id.clone());
@@ -691,55 +799,234 @@ impl KeyMeldE2ETest {
         // Sort in descending order to match the ordering in session.rs (newest UUIDv7 first)
         expected_participants.sort_by(|a, b| b.cmp(a));
 
-        let request = CreateKeygenSessionRequest {
+        // Encrypt the TaprootTweak with session secret
+        let taproot_tweak = TaprootTweak::UnspendableTaproot;
+        let encrypted_taproot_tweak =
+            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
+                &taproot_tweak,
+                &session_secret,
+                "taproot_tweak",
+            )
+            .map_err(|e| anyhow!("Failed to encrypt taproot tweak: {e}"))?;
+
+        // Phase 1: Reserve the keygen session
+        info!("📋 Phase 1: Reserving keygen session slot...");
+        let reserve_request = ReserveKeygenSessionRequest {
             keygen_session_id: keygen_session_id.clone(),
             coordinator_user_id: self.coordinator_user_id.clone(),
+            expected_participants: expected_participants.clone(),
+            timeout_secs: 3600,
+            max_signing_sessions: Some(10),
+            encrypted_taproot_tweak,
+        };
+
+        let reserve_response = self
+            .client
+            .post(format!("{}/api/v1/keygen/reserve", self.config.gateway_url))
+            .json(&reserve_request)
+            .send()
+            .await?;
+
+        if !reserve_response.status().is_success() {
+            return Err(anyhow!(
+                "Failed to reserve keygen session: {}",
+                reserve_response.text().await?
+            ));
+        }
+
+        let reserve_data: ReserveKeygenSessionResponse = reserve_response.json().await?;
+
+        info!(
+            "✅ Phase 1 complete: Session {} reserved with coordinator enclave {}",
+            reserve_data.keygen_session_id,
+            reserve_data.coordinator_enclave_id.as_u32()
+        );
+
+        // Phase 2: Initialize the session with encrypted data
+        info!(
+            "🔐 Phase 2: Encrypting data for coordinator enclave {} and initializing session...",
+            reserve_data.coordinator_enclave_id.as_u32()
+        );
+
+        // Now we know which enclave to encrypt for - use the coordinator's public key
+        let enclave_public_key_bytes =
+            hex::decode(&reserve_data.coordinator_public_key).map_err(|e| {
+                anyhow!(
+                    "Failed to decode coordinator enclave public key '{}': {}",
+                    reserve_data.coordinator_public_key,
+                    e
+                )
+            })?;
+        let enclave_public_key = Secp256k1PublicKey::from_slice(&enclave_public_key_bytes)
+            .map_err(|e| anyhow!("Invalid coordinator enclave public key: {e}"))?;
+
+        tracing::debug!(
+            "Client encrypting session secret with coordinator enclave {} public key: {}",
+            reserve_data.coordinator_enclave_id.as_u32(),
+            reserve_data.coordinator_public_key
+        );
+
+        // Encrypt the seed (not the hex-encoded session_secret) for the enclaves
+        let encrypted_session_secret_bytes =
+            SecureCrypto::ecies_encrypt(&enclave_public_key, &seed)
+                .map_err(|e| anyhow!("Failed to encrypt session seed: {e}"))?;
+        let encrypted_session_secret = hex::encode(&encrypted_session_secret_bytes);
+
+        // Encrypt the coordinator private key with the coordinator enclave public key
+        let encrypted_coordinator_key_bytes =
+            SecureCrypto::ecies_encrypt(&enclave_public_key, &coordinator_private_key_bytes)
+                .map_err(|e| anyhow!("Failed to encrypt coordinator private key: {e}"))?;
+        let encrypted_key = hex::encode(&encrypted_coordinator_key_bytes);
+
+        // Create and encrypt session data using typed struct
+        let session_data = KeygenSessionData::new(self.coordinator_public_key.serialize().to_vec());
+        let encrypted_session_data =
+            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
+                &session_data,
+                &session_secret,
+                "keygen_session",
+            )
+            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
+
+        // Create and encrypt enclave data using typed struct
+        let enclave_data = KeygenEnclaveData::new(encrypted_key.clone(), session_secret.clone());
+        let encrypted_enclave_data =
+            keymeld_sdk::validation::encrypt_structured_data_with_enclave_key(
+                &enclave_data,
+                &reserve_data.coordinator_public_key,
+            )
+            .map_err(|e| anyhow!("Failed to encrypt enclave data: {e}"))?;
+
+        let initialize_request = InitializeKeygenSessionRequest {
             coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
             coordinator_encrypted_private_key: encrypted_key,
-            coordinator_enclave_id,
-            expected_participants,
-            timeout_secs: 3600,
             session_public_key: session_public_key.serialize().to_vec(),
             encrypted_session_secret,
             encrypted_session_data,
             encrypted_enclave_data,
-            max_signing_sessions: Some(10),
-            taproot_tweak_config: TaprootTweak::UnspendableTaproot,
+            enclave_key_epoch: reserve_data.coordinator_key_epoch,
         };
 
-        let session_signature = self.generate_session_signature(&keygen_session_id)?;
-
-        let response = self
+        let initialize_response = self
             .client
-            .post(format!("{}/api/v1/keygen", self.config.gateway_url))
-            .header("X-Session-Signature", session_signature)
-            .json(&request)
+            .post(format!(
+                "{}/api/v1/keygen/{}/initialize",
+                self.config.gateway_url, keygen_session_id
+            ))
+            .json(&initialize_request)
             .send()
             .await?;
 
-        if !response.status().is_success() {
+        if !initialize_response.status().is_success() {
             return Err(anyhow!(
-                "Failed to create keygen session: {}",
-                response.text().await?
+                "Failed to initialize keygen session: {}",
+                initialize_response.text().await?
             ));
         }
 
-        let response_data: CreateKeygenSessionResponse = response.json().await?;
+        let initialize_data: InitializeKeygenSessionResponse = initialize_response.json().await?;
+
         info!(
-            "✅ Keygen session {} created on coordinator enclave {}",
-            response_data.keygen_session_id,
-            response_data.coordinator_enclave_id.as_u32()
+            "✅ Phase 2 complete: Session {} initialized and moved to CollectingParticipants",
+            initialize_data.keygen_session_id
         );
 
         // Store the coordinator enclave ID for later use during participant registration
         self.coordinator_enclave_ids.insert(
             keygen_session_id.clone(),
-            response_data.coordinator_enclave_id,
+            reserve_data.coordinator_enclave_id,
         );
+
+        // Poll for session status to ensure initialization is complete
+        info!("⏳ Waiting for session initialization to complete...");
+        self.wait_for_session_initialization(&keygen_session_id)
+            .await?;
+        info!("✅ Session initialization complete, proceeding with participant registration");
 
         Ok(keygen_session_id)
     }
 
+    /// Poll keygen session status until it's properly initialized (moved to CollectingParticipants)
+    async fn wait_for_session_initialization(&self, keygen_session_id: &SessionId) -> Result<()> {
+        const MAX_RETRIES: u32 = 20;
+        const RETRY_DELAY_MS: u64 = 250;
+
+        for attempt in 1..=MAX_RETRIES {
+            let session_signature = self.generate_session_signature(keygen_session_id)?;
+
+            let response = self
+                .client
+                .get(format!(
+                    "{}/api/v1/keygen/{}/status",
+                    self.config.gateway_url, keygen_session_id
+                ))
+                .header("X-Session-Signature", session_signature)
+                .send()
+                .await?;
+
+            let status_code = response.status();
+            if !status_code.is_success() {
+                if attempt < MAX_RETRIES {
+                    info!(
+                        "Session status check failed (attempt {}/{}), retrying in {}ms...",
+                        attempt, MAX_RETRIES, RETRY_DELAY_MS
+                    );
+                    tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    continue;
+                } else {
+                    let error_text = response.text().await?;
+                    return Err(anyhow!(
+                        "Failed to get keygen status after {} attempts: HTTP {} - {}",
+                        MAX_RETRIES,
+                        status_code,
+                        error_text
+                    ));
+                }
+            }
+
+            let status: KeygenSessionStatusResponse = response.json().await?;
+
+            match status.status {
+                KeygenStatusKind::CollectingParticipants => {
+                    info!(
+                        "✅ Session {} is now accepting participants (attempt {})",
+                        keygen_session_id, attempt
+                    );
+                    return Ok(());
+                }
+                KeygenStatusKind::Reserved => {
+                    if attempt < MAX_RETRIES {
+                        info!(
+                            "Session {} still reserved, waiting for initialization (attempt {}/{})",
+                            keygen_session_id, attempt, MAX_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    } else {
+                        return Err(anyhow!(
+                            "Session {} stuck in reserved state after {} attempts",
+                            keygen_session_id,
+                            MAX_RETRIES
+                        ));
+                    }
+                }
+                other_status => {
+                    return Err(anyhow!(
+                        "Session {} in unexpected state: {:?}",
+                        keygen_session_id,
+                        other_status
+                    ));
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "Timeout waiting for session {} initialization",
+            keygen_session_id
+        ))
+    }
+
+    /// Share session secret out of band between coordinator and other participants
     fn share_session_secret_out_of_band(&self, session_secret: &str) {
         info!("🔐 Session secret shared out-of-band with participants");
         info!("🔗 Secret: {}", &session_secret[..8]);
@@ -754,52 +1041,81 @@ impl KeyMeldE2ETest {
         // Wait for all enclaves to be healthy before proceeding
         self.wait_for_all_enclaves_healthy().await?;
 
-        // Get available slots to determine enclave assignments
-        let slots_response: GetAvailableSlotsResponse = self
-            .client
-            .get(format!(
-                "{}/api/v1/keygen/{}/slots",
-                self.config.gateway_url, keygen_session_id
-            ))
-            .send()
-            .await?
-            .json()
-            .await?;
+        // Get available slots to determine enclave assignments (with retry for race conditions)
+        const MAX_SLOTS_RETRIES: u32 = 5;
+        const SLOTS_RETRY_DELAY_MS: u64 = 200;
+
+        let slots_response = {
+            let mut last_error = None;
+            let mut slots = None;
+
+            for attempt in 1..=MAX_SLOTS_RETRIES {
+                let response = self
+                    .client
+                    .get(format!(
+                        "{}/api/v1/keygen/{}/slots",
+                        self.config.gateway_url, keygen_session_id
+                    ))
+                    .send()
+                    .await?;
+
+                let status_code = response.status();
+                if status_code.is_success() {
+                    slots = Some(response.json::<GetAvailableSlotsResponse>().await?);
+                    break;
+                }
+
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+
+                // Retry on race condition errors (session not yet initialized)
+                if Self::is_race_condition_error(&error_text) && attempt < MAX_SLOTS_RETRIES {
+                    warn!(
+                        "⚠️  Slots request race condition (attempt {}/{}): {}. Retrying in {}ms...",
+                        attempt, MAX_SLOTS_RETRIES, error_text, SLOTS_RETRY_DELAY_MS
+                    );
+                    tokio::time::sleep(Duration::from_millis(SLOTS_RETRY_DELAY_MS)).await;
+                    continue;
+                }
+
+                last_error = Some(format!("HTTP {} - {}", status_code, error_text));
+                break;
+            }
+
+            match slots {
+                Some(s) => s,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to get available slots after {} attempts: {}",
+                        MAX_SLOTS_RETRIES,
+                        last_error.unwrap_or_else(|| "Unknown error".to_string())
+                    ));
+                }
+            }
+        };
 
         info!(
             "Found {} available slots for keygen session",
             slots_response.available_slots.len()
         );
 
-        // Retry participant registration to handle service startup timing
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 5;
-        const RETRY_DELAY_MS: u64 = 2000;
-
-        loop {
-            match self
-                .try_register_all_participants(keygen_session_id, &slots_response)
-                .await
-            {
-                Ok(_) => {
-                    info!("Successfully registered all participants");
-                    break;
-                }
-                Err(e) if retry_count < MAX_RETRIES => {
-                    retry_count += 1;
-                    warn!(
-                        "Failed to register participants (attempt {}/{}): {}. Retrying in {}ms...",
-                        retry_count, MAX_RETRIES, e, RETRY_DELAY_MS
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to register participants after {} retries: {}",
-                        MAX_RETRIES, e
-                    );
-                    return Err(e);
-                }
+        // Try participant registration - individual methods now handle race condition retries
+        info!("🚀 Starting participant registration with race condition protection...");
+        match self
+            .try_register_all_participants(keygen_session_id, &slots_response)
+            .await
+        {
+            Ok(_) => {
+                info!("✅ Successfully registered all participants (race condition fix working)");
+            }
+            Err(e) => {
+                error!(
+                    "❌ Failed to register participants despite race condition fixes: {}",
+                    e
+                );
+                return Err(e);
             }
         }
 
@@ -872,18 +1188,61 @@ impl KeyMeldE2ETest {
         keygen_session_id: &SessionId,
         slots_response: &GetAvailableSlotsResponse,
     ) -> Result<()> {
-        self.register_keygen_coordinator(keygen_session_id, slots_response)
+        self.register_keygen_coordinator_with_retry(keygen_session_id, slots_response)
             .await?;
 
         let participants_len = self.participants.len();
         for i in 0..participants_len {
-            self.register_keygen_participant(keygen_session_id, i, slots_response)
+            self.register_keygen_participant_with_retry(keygen_session_id, i, slots_response)
                 .await?;
         }
 
         self.verify_keygen_participants_registered(keygen_session_id)
             .await?;
 
+        Ok(())
+    }
+
+    /// Check if an error indicates a session state race condition
+    fn is_race_condition_error(error_msg: &str) -> bool {
+        error_msg.contains("reserved but not yet initialized")
+            || error_msg.contains("session is reserved")
+            || error_msg.contains("not yet ready")
+            || error_msg.contains("still initializing")
+    }
+
+    async fn register_keygen_coordinator_with_retry(
+        &mut self,
+        keygen_session_id: &SessionId,
+        slots: &GetAvailableSlotsResponse,
+    ) -> Result<()> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_MS: u64 = 200;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self
+                .register_keygen_coordinator(keygen_session_id, slots)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if Self::is_race_condition_error(&error_msg) && attempt < MAX_RETRIES {
+                        warn!(
+                                "Race condition detected for coordinator: {}. Retrying in {}ms (attempt {}/{})",
+                                error_msg, RETRY_DELAY_MS, attempt, MAX_RETRIES
+                            );
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "Failed to register coordinator after {} retries: {}",
+                        MAX_RETRIES,
+                        e
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -938,20 +1297,18 @@ impl KeyMeldE2ETest {
             hex::encode(encrypted_data)
         };
 
-        // Create session data with public key and encrypt it
+        // Create session data with public key and encrypt it using typed struct
         let session_data = KeygenParticipantSessionData::new_with_public_key(
             self.coordinator_user_id.clone(),
             self.coordinator_public_key.serialize().to_vec(),
         );
-        let session_data_json = serde_json::to_string(&session_data)
-            .map_err(|e| anyhow!("Failed to serialize session data: {e}"))?;
-
-        // Encrypt session data with session secret
-        let encrypted_session_data = keymeld_core::api::validation::encrypt_session_data(
-            &session_data_json,
-            &session_secret,
-        )
-        .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
+        let encrypted_session_data =
+            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
+                &session_data,
+                &session_secret,
+                "keygen_participant_session",
+            )
+            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
 
         // Derive session-specific auth pubkey for authorization
         let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
@@ -968,6 +1325,7 @@ impl KeyMeldE2ETest {
             public_key: self.coordinator_public_key.serialize().to_vec(),
             encrypted_session_data,
             enclave_public_key: enclave_public_key_response.public_key.clone(),
+            enclave_key_epoch: enclave_public_key_response.key_epoch,
             require_signing_approval: true,
             auth_pubkey: auth_pubkey.serialize().to_vec(),
         };
@@ -986,13 +1344,56 @@ impl KeyMeldE2ETest {
             .await?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
             return Err(anyhow!(
-                "Failed to register coordinator: {}",
-                response.text().await?
+                "Failed to register coordinator (HTTP {}): {}",
+                status,
+                error_text
             ));
         }
 
         info!("✅ Coordinator registered successfully");
+        Ok(())
+    }
+
+    async fn register_keygen_participant_with_retry(
+        &mut self,
+        keygen_session_id: &SessionId,
+        participant_index: usize,
+        slots: &GetAvailableSlotsResponse,
+    ) -> Result<()> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_MS: u64 = 200;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self
+                .register_keygen_participant(keygen_session_id, participant_index, slots)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if Self::is_race_condition_error(&error_msg) && attempt < MAX_RETRIES {
+                        warn!(
+                                "Race condition detected for participant {}: {}. Retrying in {}ms (attempt {}/{})",
+                                self.participant_user_ids[participant_index], error_msg, RETRY_DELAY_MS, attempt, MAX_RETRIES
+                            );
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "Failed to register participant {} after {} retries: {}",
+                        self.participant_user_ids[participant_index],
+                        MAX_RETRIES,
+                        e
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1046,20 +1447,18 @@ impl KeyMeldE2ETest {
             hex::encode(encrypted_data)
         };
 
-        // Create session data with public key and encrypt it
+        // Create session data with public key and encrypt it using typed struct
         let session_data = KeygenParticipantSessionData::new_with_public_key(
             self.participant_user_ids[participant_index].clone(),
             participant.public_key.serialize().to_vec(),
         );
-        let session_data_json = serde_json::to_string(&session_data)
-            .map_err(|e| anyhow!("Failed to serialize session data: {e}"))?;
-
-        // Encrypt session data with session secret
-        let encrypted_session_data = keymeld_core::api::validation::encrypt_session_data(
-            &session_data_json,
-            &session_secret,
-        )
-        .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
+        let encrypted_session_data =
+            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
+                &session_data,
+                &session_secret,
+                "keygen_participant_session",
+            )
+            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
 
         // Derive session-specific auth pubkey for authorization
         let participant_private_key_bytes = participant.derived_private_key.secret_bytes();
@@ -1081,6 +1480,7 @@ impl KeyMeldE2ETest {
             public_key: participant.public_key.serialize().to_vec(),
             encrypted_session_data,
             enclave_public_key: enclave_public_key_response.public_key.clone(),
+            enclave_key_epoch: enclave_public_key_response.key_epoch,
             require_signing_approval,
             auth_pubkey: auth_pubkey.serialize().to_vec(),
         };
@@ -1099,10 +1499,16 @@ impl KeyMeldE2ETest {
             .await?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
             return Err(anyhow!(
-                "Failed to register participant {}: {}",
+                "Failed to register participant {} (HTTP {}): {}",
                 self.participant_user_ids[participant_index],
-                response.text().await?
+                status,
+                error_text
             ));
         }
 
@@ -1188,13 +1594,16 @@ impl KeyMeldE2ETest {
             match status.status {
                 KeygenStatusKind::Completed => {
                     if let Some(aggregate_key) = status.aggregate_public_key {
-                        return Ok(hex::encode(aggregate_key));
+                        return Ok(aggregate_key);
                     } else {
                         return Err(anyhow!("Keygen completed but no aggregate key found"));
                     }
                 }
                 KeygenStatusKind::Failed => {
                     return Err(anyhow!("Keygen session failed"));
+                }
+                KeygenStatusKind::Reserved => {
+                    info!("Keygen session is reserved but not yet initialized...");
                 }
                 KeygenStatusKind::CollectingParticipants => {
                     info!("Keygen still collecting participants...");
@@ -1226,7 +1635,7 @@ impl KeyMeldE2ETest {
 
         let encrypted_adaptor_configs = String::new();
 
-        let encrypted_message = keymeld_core::api::validation::encrypt_session_data(
+        let encrypted_message = keymeld_sdk::validation::encrypt_session_data(
             &hex::encode(&sighash[..]),
             &session_secret,
         )?;
@@ -1304,7 +1713,7 @@ impl KeyMeldE2ETest {
                             ))?;
 
                         let signature_bytes =
-                            keymeld_core::api::validation::decrypt_signature_with_secret(
+                            keymeld_sdk::validation::decrypt_signature_with_secret(
                                 &encrypted_sig,
                                 session_secret,
                             )?;
@@ -1318,25 +1727,16 @@ impl KeyMeldE2ETest {
                     return Err(anyhow!("Signing session failed"));
                 }
                 SigningStatusKind::CollectingParticipants => {
-                    info!("Signing still collecting participants...");
+                    info!("⏳ Signing still collecting participants...");
                 }
-                SigningStatusKind::SessionFull => {
-                    info!("Signing session full, waiting for processing...");
+                SigningStatusKind::InitializingSession => {
+                    info!("🔧 Initializing signing session and generating nonces...");
                 }
-                SigningStatusKind::GeneratingNonces => {
-                    info!("Generating nonces...");
-                }
-                SigningStatusKind::CollectingNonces => {
-                    info!("Collecting nonces...");
-                }
-                SigningStatusKind::GeneratingPartialSignatures => {
-                    info!("Generating partial signatures...");
-                }
-                SigningStatusKind::CollectingPartialSignatures => {
-                    info!("Collecting partial signatures...");
+                SigningStatusKind::DistributingNonces => {
+                    info!("📤 Distributing nonces and generating partial signatures...");
                 }
                 SigningStatusKind::FinalizingSignature => {
-                    info!("Finalizing signature...");
+                    info!("✍️  Finalizing signature...");
                 }
             }
 
@@ -1377,10 +1777,17 @@ impl KeyMeldE2ETest {
         info!("  - Transaction ID: {}", signed_tx.compute_txid());
         info!("✅ Transaction signed successfully");
 
-        let txid = self
-            .rpc_client
-            .send_raw_transaction(&signed_tx)
-            .map_err(|e| anyhow!("Failed to broadcast transaction: {e}"))?;
+        // Use batcher if enabled, otherwise direct RPC
+        let txid = if let Some(ref batcher) = self.rpc_batcher {
+            let raw_tx_hex = bitcoin::consensus::encode::serialize_hex(&signed_tx);
+            let txid_str = batcher.send_raw_transaction(&raw_tx_hex).await?;
+            Txid::from_str(&txid_str).map_err(|e| anyhow!("Invalid txid from batcher: {}", e))?
+        } else {
+            retry_bitcoin_rpc("send_raw_transaction", || {
+                self.rpc_client.send_raw_transaction(&signed_tx)
+            })
+            .await?
+        };
 
         info!("📡 Transaction broadcast successfully: {}", txid);
 
@@ -1536,6 +1943,31 @@ impl KeyMeldE2ETest {
         let private_key = self.derive_session_auth_key(session_secret)?;
         let secp = Secp256k1::new();
         Ok(PublicKey::from_secret_key(&secp, &private_key))
+    }
+
+    /// Helper method to decrypt and convert aggregate key to hex for display
+    pub fn decrypt_aggregate_key_for_display(
+        &self,
+        encrypted_aggregate_key: &str,
+        keygen_session_id: &SessionId,
+    ) -> Result<String> {
+        // Get the session secret for decryption
+        let session_secret_hex = self.session_secrets.get(keygen_session_id).ok_or_else(|| {
+            anyhow!(
+                "Session secret not found for keygen session: {}",
+                keygen_session_id
+            )
+        })?;
+        let session_secret = SessionSecret::from_hex(session_secret_hex)?;
+
+        // Decrypt the aggregate public key
+        let encrypted_data = EncryptedData::from_hex(encrypted_aggregate_key)
+            .map_err(|e| anyhow!("Failed to decode encrypted aggregate key: {}", e))?;
+        let key_bytes = session_secret
+            .decrypt(&encrypted_data, "aggregate_public_key")
+            .map_err(|e| anyhow!("Failed to decrypt aggregate key: {}", e))?;
+
+        Ok(hex::encode(key_bytes))
     }
 
     /// Generate ECDSA signature for user approval using session-specific auth key

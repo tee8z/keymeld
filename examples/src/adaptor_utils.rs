@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
-use keymeld_core::musig::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
+use keymeld_sdk::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
 use musig2::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use musig2::{AdaptorSignature, BinaryEncoding, LiftedSignature};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tracing::info;
 use uuid::Uuid;
 
@@ -126,15 +127,18 @@ pub fn create_test_adaptor_configs(
 
 pub fn adapt_signatures_and_get_valid_signature(
     configs: &[AdaptorConfig],
-    signatures: &[AdaptorSignatureResult],
+    signatures: &BTreeMap<Uuid, AdaptorSignatureResult>,
     secrets: &[AdaptorSecret],
     aggregate_pubkey: PublicKey,
     message_hash: &[u8],
 ) -> Result<Vec<u8>> {
     info!("🔓 Adapting adaptor signatures with revealed secrets...");
 
-    if let Some((i, (config, signature))) = configs.iter().zip(signatures.iter()).enumerate().next()
-    {
+    for (i, config) in configs.iter().enumerate() {
+        let Some(signature) = signatures.get(&config.adaptor_id) else {
+            continue;
+        };
+
         info!(
             "🔓 Adapting {:?} signature for config {}",
             config.adaptor_type, config.adaptor_id
@@ -204,7 +208,7 @@ pub fn adapt_signatures_and_get_valid_signature(
 
 pub fn validate_adaptor_signatures(
     configs: &[AdaptorConfig],
-    signatures: &[AdaptorSignatureResult],
+    signatures: &BTreeMap<Uuid, AdaptorSignatureResult>,
 ) -> Result<()> {
     info!("Validating adaptor signatures...");
 
@@ -216,14 +220,10 @@ pub fn validate_adaptor_signatures(
         ));
     }
 
-    for (config, signature) in configs.iter().zip(signatures.iter()) {
-        if config.adaptor_id != signature.adaptor_id {
-            return Err(anyhow!(
-                "Adaptor ID mismatch: expected {}, got {}",
-                config.adaptor_id,
-                signature.adaptor_id
-            ));
-        }
+    for config in configs.iter() {
+        let signature = signatures
+            .get(&config.adaptor_id)
+            .ok_or_else(|| anyhow!("Missing signature for adaptor ID {}", config.adaptor_id))?;
 
         if std::mem::discriminant(&config.adaptor_type)
             != std::mem::discriminant(&signature.adaptor_type)
@@ -309,36 +309,38 @@ pub fn validate_adaptor_signatures(
 /// Print a comprehensive success summary for adaptor signature tests
 pub fn print_success_summary(
     configs: &[AdaptorConfig],
-    signatures: &[AdaptorSignatureResult],
+    signatures: &BTreeMap<Uuid, AdaptorSignatureResult>,
     aggregate_key: &str,
 ) {
     println!("\n🎉 All Adaptor Signature Tests Completed Successfully!");
     println!("===============================================");
     println!("✅ Aggregate key: {aggregate_key}");
 
-    for (i, (_, signature)) in configs.iter().zip(signatures.iter()).enumerate() {
-        println!("📋 Adaptor Signature {} Details:", i + 1);
-        println!("   Type: {:?}", signature.adaptor_type);
-        println!("   ID: {}", signature.adaptor_id);
-        println!(
-            "   Points: {} adaptor points",
-            signature.adaptor_points.len()
-        );
-        if let Some(hints) = &signature.hints {
-            println!("   Hints: {} hints provided", hints.len());
+    for (i, config) in configs.iter().enumerate() {
+        if let Some(signature) = signatures.get(&config.adaptor_id) {
+            println!("📋 Adaptor Signature {} Details:", i + 1);
+            println!("   Type: {:?}", signature.adaptor_type);
+            println!("   ID: {}", signature.adaptor_id);
+            println!(
+                "   Points: {} adaptor points",
+                signature.adaptor_points.len()
+            );
+            if let Some(hints) = &signature.hints {
+                println!("   Hints: {} hints provided", hints.len());
+            }
+            println!(
+                "   Signature scalar: {}...",
+                &hex::encode(&signature.signature_scalar)[..16]
+            );
+            println!(
+                "   Nonce point: {}...",
+                &hex::encode(&signature.nonce_point)[..16]
+            );
+            println!(
+                "   Aggregate adaptor point: {}...",
+                &hex::encode(&signature.aggregate_adaptor_point)[..16]
+            );
+            println!();
         }
-        println!(
-            "   Signature scalar: {}...",
-            &hex::encode(&signature.signature_scalar)[..16]
-        );
-        println!(
-            "   Nonce point: {}...",
-            &hex::encode(&signature.nonce_point)[..16]
-        );
-        println!(
-            "   Aggregate adaptor point: {}...",
-            &hex::encode(&signature.aggregate_adaptor_point)[..16]
-        );
-        println!();
     }
 }

@@ -1,0 +1,26 @@
+# Litestream Configuration for KeyMeld - Production
+# Uses real AWS S3 for production database replication
+
+dbs:
+  - path: /var/lib/keymeld/keymeld.db
+    replicas:
+      # Production AWS S3
+      - type: s3
+        bucket: ${LITESTREAM_S3_BUCKET}
+        path: keymeld.db
+        region: ${AWS_REGION:-us-west-2}
+        # No endpoint = uses real AWS S3
+        # Sync interval - replicate every 10 seconds
+        sync-interval: 10s
+        # Retention - keep 7 days of snapshots
+        retention: 168h
+        # Snapshot interval - full backup every hour
+        snapshot-interval: 1h
+        # Validation interval - verify every 6 hours
+        validation-interval: 6h
+
+# Production uses IAM roles, no hardcoded credentials
+# access-key-id and secret-access-key are omitted
+
+# Metrics endpoint for monitoring
+addr: ":9090"

@@ -1,15 +1,15 @@
 use anyhow::{anyhow, Result};
-use keymeld_core::api::validation::encrypt_adaptor_configs_for_client;
-use keymeld_core::api::{CreateSigningSessionRequest, SigningSessionStatusResponse};
-use keymeld_core::musig::{AdaptorConfig, AdaptorSignatureResult};
-use keymeld_core::session::SigningStatusKind;
-use keymeld_core::SessionId;
 use keymeld_examples::adaptor_utils::{
     adapt_signatures_and_get_valid_signature, create_test_adaptor_configs, print_success_summary,
     validate_adaptor_signatures, AdaptorTestConfig,
 };
 use keymeld_examples::ExampleConfig;
 use keymeld_examples::KeyMeldE2ETest;
+use keymeld_sdk::{
+    validation::encrypt_adaptor_configs_for_client, CreateSigningSessionRequest, EncryptedData,
+    SessionSecret, SigningSessionStatusResponse, SigningStatusKind,
+};
+use keymeld_sdk::{AdaptorConfig, AdaptorSignatureResult, SessionId};
 use std::fs::read_to_string;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -111,9 +111,11 @@ async fn run_adaptor_signatures_test(
     let aggregate_key = test.wait_for_keygen_completion(&keygen_session_id).await?;
     info!("✅ Keygen complete: {}", aggregate_key);
 
-    let aggregate_utxo = test.fund_aggregate_key_address(&aggregate_key).await?;
+    let aggregate_utxo = test
+        .fund_aggregate_key_address(&aggregate_key, &keygen_session_id)
+        .await?;
     let psbt = test
-        .create_musig2_transaction(&aggregate_key, &aggregate_utxo)
+        .create_musig2_transaction(&aggregate_key, &keygen_session_id, &aggregate_utxo)
         .await?;
 
     info!("🔧 Starting Adaptor Signatures Test");
@@ -169,12 +171,21 @@ async fn run_adaptor_signatures_test(
         info!("🎭 Demonstrating complete adaptor signature flow...");
         info!("🔑 Step 1: Revealing adaptor secrets (in real scenarios, this happens through external events)");
 
+        // Decrypt the aggregate key using the session secret
+        let session_secret_hex = test
+            .session_secrets
+            .get(&keygen_session_id)
+            .ok_or_else(|| anyhow!("Session secret not found for keygen session"))?;
+        let session_secret = SessionSecret::from_hex(session_secret_hex)?;
+        let encrypted_data = EncryptedData::from_hex(&aggregate_key)
+            .map_err(|e| anyhow!("Failed to decode encrypted aggregate key: {e}"))?;
+        let key_bytes = session_secret
+            .decrypt(&encrypted_data, "aggregate_public_key")
+            .map_err(|e| anyhow!("Failed to decrypt aggregate key: {e}"))?;
+
         // Parse the aggregate key for verification
-        let aggregate_pubkey = musig2::secp256k1::PublicKey::from_slice(
-            &hex::decode(&aggregate_key)
-                .map_err(|e| anyhow::anyhow!("Invalid aggregate key hex: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("Invalid aggregate key: {e}"))?;
+        let aggregate_pubkey = musig2::secp256k1::PublicKey::from_slice(&key_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid aggregate key: {e}"))?;
 
         // Calculate the message hash for verification
         let message_hash = test.calculate_taproot_sighash(&psbt)?;
@@ -203,7 +214,13 @@ async fn run_adaptor_signatures_test(
         );
     }
 
-    print_success_summary(&adaptor_configs, &adaptor_signatures, &aggregate_key);
+    let decrypted_aggregate_key =
+        test.decrypt_aggregate_key_for_display(&aggregate_key, &keygen_session_id)?;
+    print_success_summary(
+        &adaptor_configs,
+        &adaptor_signatures,
+        &decrypted_aggregate_key,
+    );
 
     Ok(())
 }
@@ -240,10 +257,8 @@ async fn test_signing_session_with_adaptors(
     info!("✅ Verified zero-knowledge privacy: gateway cannot see adaptor IDs or business logic");
 
     // Encrypt the message with the session secret
-    let encrypted_message = keymeld_core::api::validation::encrypt_session_data(
-        &hex::encode(&sighash[..]),
-        &session_secret,
-    )?;
+    let encrypted_message =
+        keymeld_sdk::validation::encrypt_session_data(&hex::encode(&sighash[..]), &session_secret)?;
 
     let request = CreateSigningSessionRequest {
         signing_session_id: signing_session_id.clone(),
@@ -282,7 +297,10 @@ async fn wait_for_signing_with_adaptors(
     test: &mut KeyMeldE2ETest,
     signing_session_id: &SessionId,
     keygen_session_id: &SessionId,
-) -> Result<(Vec<u8>, Vec<AdaptorSignatureResult>)> {
+) -> Result<(
+    Vec<u8>,
+    std::collections::BTreeMap<uuid::Uuid, AdaptorSignatureResult>,
+)> {
     info!("⏳ Waiting for signing completion with adaptor processing...");
 
     loop {
@@ -320,7 +338,7 @@ async fn wait_for_signing_with_adaptors(
                         .get(keygen_session_id)
                         .ok_or(anyhow!("Session secret not found"))?;
 
-                    keymeld_core::api::validation::decrypt_signature_with_secret(
+                    keymeld_sdk::validation::decrypt_signature_with_secret(
                         &encrypted_sig,
                         session_secret,
                     )?
@@ -335,12 +353,12 @@ async fn wait_for_signing_with_adaptors(
                         .ok_or(anyhow!("Session secret not found"))?;
 
                     info!("🔓 Decrypting adaptor signatures on client side");
-                    keymeld_core::api::validation::decrypt_adaptor_signatures_with_secret(
+                    keymeld_sdk::validation::decrypt_adaptor_signatures_with_secret(
                         &status.adaptor_signatures,
                         session_secret,
                     )?
                 } else {
-                    Vec::new()
+                    std::collections::BTreeMap::new()
                 };
 
                 info!("✅ Regular MuSig2 signing completed");
@@ -356,25 +374,16 @@ async fn wait_for_signing_with_adaptors(
                 return Err(anyhow!("Signing session failed"));
             }
             SigningStatusKind::CollectingParticipants => {
-                info!("Signing still collecting participants...");
+                info!("⏳ Signing still collecting participants...");
             }
-            SigningStatusKind::SessionFull => {
-                info!("Signing session full, waiting for processing...");
+            SigningStatusKind::InitializingSession => {
+                info!("🔧 Initializing signing session and generating nonces...");
             }
-            SigningStatusKind::GeneratingNonces => {
-                info!("Generating nonces...");
-            }
-            SigningStatusKind::CollectingNonces => {
-                info!("Collecting nonces...");
-            }
-            SigningStatusKind::GeneratingPartialSignatures => {
-                info!("Generating partial signatures...");
-            }
-            SigningStatusKind::CollectingPartialSignatures => {
-                info!("Collecting partial signatures...");
+            SigningStatusKind::DistributingNonces => {
+                info!("📤 Distributing nonces and generating partial signatures...");
             }
             SigningStatusKind::FinalizingSignature => {
-                info!("Finalizing signature and processing adaptor signatures...");
+                info!("✍️  Finalizing signature and processing adaptor signatures...");
             }
         }
 

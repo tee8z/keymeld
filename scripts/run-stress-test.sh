@@ -7,6 +7,11 @@ MODE="$1"
 COUNT="$2"
 AMOUNT="${3:-50000}"
 
+# Increase file descriptor limit for high concurrency tests (100+ instances)
+if [[ "$COUNT" -ge 100 ]]; then
+    ulimit -n 65536 2>/dev/null || echo "⚠️  Could not increase file descriptor limit (may need sudo)"
+fi
+
 if [[ "$MODE" != "plain" && "$MODE" != "adaptor" ]]; then
     echo "❌ Error: mode must be 'plain' or 'adaptor'"
     exit 1
@@ -34,6 +39,21 @@ sleep 1
 
 echo "🏦 Setting up Bitcoin regtest..."
 ./scripts/setup-regtest.sh > /dev/null 2>&1
+
+# Start Bitcoin RPC proxy and batcher for high concurrency tests (100+ instances)
+if [[ "$COUNT" -ge 100 ]]; then
+    echo "🔀 Starting Bitcoin RPC proxy (HAProxy) for high concurrency..."
+    bitcoin-rpc-proxy stop > /dev/null 2>&1 || true
+    # Keep maxconn well below bitcoind's rpcworkqueue (512) to let HAProxy queue instead of getting 503s
+    BITCOIN_MAX_CONN=32 BITCOIN_QUEUE_TIMEOUT=120s bitcoin-rpc-proxy start
+    export BITCOIN_RPC_PORT=18550  # Use proxy port instead of direct bitcoind
+    echo "   Tests will use HAProxy on port 18550 (queuing requests to bitcoind:18443)"
+
+    echo "📦 Starting Bitcoin RPC batcher for batched funding/broadcast..."
+    ./scripts/bitcoin-rpc-batcher.sh stop > /dev/null 2>&1 || true
+    ./scripts/bitcoin-rpc-batcher.sh start
+    export USE_RPC_BATCHER=true
+fi
 
 echo "🔨 Building project..."
 cargo build > /dev/null 2>&1
