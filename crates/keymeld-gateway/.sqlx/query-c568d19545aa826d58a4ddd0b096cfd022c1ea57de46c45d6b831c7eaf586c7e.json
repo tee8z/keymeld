@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO enclave_master_keys (\n                        enclave_id, kms_encrypted_dek, encrypted_private_key, kms_key_id\n                    ) VALUES ($1, $2, $3, $4)\n                    ON CONFLICT(enclave_id) DO UPDATE SET\n                        kms_encrypted_dek = excluded.kms_encrypted_dek,\n                        encrypted_private_key = excluded.encrypted_private_key,\n                        kms_key_id = excluded.kms_key_id,\n                        key_epoch = key_epoch + 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c568d19545aa826d58a4ddd0b096cfd022c1ea57de46c45d6b831c7eaf586c7e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signing_sessions\n                     SET status = $1, status_name = 'collecting_participants', updated_at = $2\n                     WHERE signing_session_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "36bee8c1297a2eafc7ef6eeb9d599fdc4ad6aa6a25bf4d102c82e4b1ea0ca7b9"
+}

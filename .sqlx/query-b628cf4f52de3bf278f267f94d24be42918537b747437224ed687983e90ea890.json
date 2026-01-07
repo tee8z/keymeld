@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO signing_approvals (\n                        signing_session_id, user_id, approved_at, user_signature_validated, session_signature_validated\n                    ) VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "b628cf4f52de3bf278f267f94d24be42918537b747437224ed687983e90ea890"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT keygen_session_id as \"keygen_session_id: SessionId\" FROM signing_sessions WHERE signing_session_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "keygen_session_id: SessionId",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2add9223dbdf60d66656760914c86dbf8c5c593ef1c7b294f1ace530cae529b6"
+}

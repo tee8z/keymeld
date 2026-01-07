@@ -86,3 +86,33 @@ impl fmt::Display for SessionKind {
         }
     }
 }
+
+impl sqlx::Type<sqlx::Sqlite> for SessionKind {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <String as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Sqlite> for SessionKind {
+    fn encode_by_ref(
+        &self,
+        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        let value = match self {
+            SessionKind::Keygen => "keygen",
+            SessionKind::Signing => "signing",
+        };
+        <&str as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&value, args)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Sqlite> for SessionKind {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        match s.as_str() {
+            "keygen" => Ok(SessionKind::Keygen),
+            "signing" => Ok(SessionKind::Signing),
+            _ => Err(format!("Unknown session kind: {}", s).into()),
+        }
+    }
+}

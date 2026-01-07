@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE enclave_public_keys\n                     SET expires_at = $1\n                     WHERE enclave_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e8c711ed3462aea69b238f81aa6aba751e5fc93b311ff2da1f8daf6c8ec2507f"
+}

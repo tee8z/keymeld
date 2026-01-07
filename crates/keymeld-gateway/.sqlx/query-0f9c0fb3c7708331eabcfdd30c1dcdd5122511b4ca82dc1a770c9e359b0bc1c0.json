@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(signing_session_id) as count FROM signing_sessions WHERE status_name NOT IN ('completed', 'failed')",
+  "describe": {
+    "columns": [
+      {
+        "name": "count",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0f9c0fb3c7708331eabcfdd30c1dcdd5122511b4ca82dc1a770c9e359b0bc1c0"
+}

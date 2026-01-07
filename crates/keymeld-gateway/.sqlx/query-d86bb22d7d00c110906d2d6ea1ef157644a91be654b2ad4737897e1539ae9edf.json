@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE keygen_sessions SET\n                        status_name = $1,\n                        status = $2,\n                        session_encrypted_data = $3,\n                        enclave_encrypted_data = $4,\n                        session_public_key = $5,\n                        updated_at = $6\n                    WHERE keygen_session_id = $7",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "d86bb22d7d00c110906d2d6ea1ef157644a91be654b2ad4737897e1539ae9edf"
+}

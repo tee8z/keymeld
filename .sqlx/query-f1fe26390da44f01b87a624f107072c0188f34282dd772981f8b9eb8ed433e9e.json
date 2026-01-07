@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT DISTINCT ss.signing_session_id, ss.status\n            FROM signing_sessions ss\n            INNER JOIN signing_participants sp ON ss.signing_session_id = sp.signing_session_id\n            WHERE ss.status_name NOT IN ('completed', 'failed')\n              AND sp.assigned_enclave_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "signing_session_id",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "f1fe26390da44f01b87a624f107072c0188f34282dd772981f8b9eb8ed433e9e"
+}

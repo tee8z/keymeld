@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO signing_sessions (\n                        signing_session_id, keygen_session_id, status_name, created_at,\n                        expires_at, updated_at, retry_count, correlation_id, message_hash,\n                        expected_participants, status, session_encrypted_data, enclave_encrypted_data\n                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": []
+  },
+  "hash": "9ef7a8c94fbd49126ffb56289997c37bd57a35ae60d413b2211e778253add212"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM signing_sessions\n                     WHERE status_name IN ('completed', 'failed')\n                     AND (completed_at < $1 OR failed_at < $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "59d0db2786f5adf7ba2878bf4ce3bd5c5da37938776589ced005b1d3c4fb05ef"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT session_public_key FROM keygen_sessions WHERE keygen_session_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "session_public_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6d0fd85a67c7bc34a260c138a67230a388be34ee947f539c69e2dd3919b69eef"
+}
