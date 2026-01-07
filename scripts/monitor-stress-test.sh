@@ -23,13 +23,29 @@ if ! pgrep -f "stress-test.sh" > /dev/null 2>&1; then
 fi
 
 while true; do
-  wallets=$(ls data/bitcoin/regtest/wallets/ 2>/dev/null | grep stress_test | wc -l)
-  completed=$(ls /tmp/keymeld-stress-test/exit-*.code 2>/dev/null | wc -l)
-  demos=$(ps aux | grep keymeld_demo | grep -v grep | wc -l)
+  # Count wallets - check both wallet directories and loaded wallets via RPC
+  wallets_dir=$(ls data/bitcoin/regtest/wallets/ 2>/dev/null | grep -c stress_test 2>/dev/null || echo 0)
+  wallets_loaded=$(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 listwallets 2>/dev/null | grep -c stress_test 2>/dev/null || echo 0)
+  # Trim whitespace and ensure numeric
+  wallets_dir="${wallets_dir//[^0-9]/}"
+  wallets_loaded="${wallets_loaded//[^0-9]/}"
+  wallets_dir="${wallets_dir:-0}"
+  wallets_loaded="${wallets_loaded:-0}"
+  wallets=$((wallets_dir > wallets_loaded ? wallets_dir : wallets_loaded))
 
-  # Queue depths
-  funding_req=$(ls /tmp/keymeld-rpc-queue/funding/requests/*.req 2>/dev/null | wc -l)
-  confirm_req=$(ls /tmp/keymeld-rpc-queue/confirm/requests/*.req 2>/dev/null | wc -l)
+  completed=$(ls /tmp/keymeld-stress-test/exit-*.code 2>/dev/null | wc -l | tr -d ' \n')
+  demos=$(pgrep -c -x keymeld_demo 2>/dev/null || echo 0)
+  demos="${demos//[$'\n\r']/}"
+
+  # Detect total from config files created by stress test
+  total=$(ls /tmp/keymeld-stress-test/config-*.yaml 2>/dev/null | wc -l | tr -d ' \n')
+  if [[ "$total" -eq 0 ]]; then
+    total="?"
+  fi
+
+  # Queue depths (only used for high-concurrency tests with 100+ instances)
+  funding_q=$(ls /tmp/keymeld-rpc-queue/funding/requests/*.req 2>/dev/null | wc -l | tr -d ' \n')
+  confirm_q=$(ls /tmp/keymeld-rpc-queue/confirm/requests/*.req 2>/dev/null | wc -l | tr -d ' \n')
 
   # HAProxy stats
   haproxy_stats=$(curl -s "http://127.0.0.1:18480/;csv" 2>/dev/null | grep "bitcoin_rpc_backend,bitcoind" || echo "")
@@ -39,7 +55,7 @@ while true; do
     sessions="-"
   fi
 
-  echo "$(date +%H:%M:%S) | Wallets: $wallets | Demos: $demos | Done: $completed/1000 | Funding: $funding_req | Confirm: $confirm_req | Sessions: $sessions"
+  echo "$(date +%H:%M:%S) | Wallets: $wallets | Demos: $demos | Done: $completed/$total | FundQ: $funding_q | ConfirmQ: $confirm_q | HAProxy Sessions: $sessions"
 
   # Check if test finished
   if ! pgrep -f "stress-test.sh" > /dev/null 2>&1; then

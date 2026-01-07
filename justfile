@@ -194,8 +194,42 @@ stop: stop-vsock-proxies
     for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
         pgrep -x "$proc" 2>/dev/null | xargs -r kill 2>/dev/null || true
     done
-    pkill -x bitcoind || true
     pkill -x moto_server || true
+    # Stop bitcoind gracefully and wait for it to fully stop
+    # Find bitcoind PIDs safely (nix wraps it as .bitcoind-wrapped, so we can't use pkill -x)
+    # Use pgrep to find PIDs then kill individually to avoid matching parent shells
+    bitcoind_pids=$(pgrep -f "bitcoind.*-regtest" 2>/dev/null | while read pid; do
+        # Only include if it's actually a bitcoind process, not a shell containing the string
+        if [[ "$(cat /proc/$pid/comm 2>/dev/null)" == *bitcoind* ]]; then
+            echo "$pid"
+        fi
+    done)
+    if [[ -n "$bitcoind_pids" ]]; then
+        echo "   Stopping bitcoind..."
+        echo "$bitcoind_pids" | xargs -r kill 2>/dev/null || true
+        # Wait up to 10 seconds for graceful shutdown
+        for i in {1..20}; do
+            still_running=false
+            for pid in $bitcoind_pids; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    still_running=true
+                    break
+                fi
+            done
+            if ! $still_running; then
+                break
+            fi
+            sleep 0.5
+        done
+        # Force kill if still running
+        for pid in $bitcoind_pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "   Force killing bitcoind (pid $pid)..."
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+    fi
     echo "✅ All services stopped"
 
 # Restart all services
@@ -400,16 +434,6 @@ clean: stop
 
     # Recreate necessary directories
     mkdir -p data logs
-
-    # Clean up Bitcoin stress test wallets if Bitcoin is running
-    nix develop -c bash -c '
-        if pgrep -f bitcoind >/dev/null && bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 getblockchaininfo >/dev/null 2>&1; then
-            echo "🏦 Cleaning Bitcoin stress test wallets..."
-            for wallet in $(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 listwallets 2>/dev/null | grep stress_test || true); do
-                bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 unloadwallet "$(echo $wallet | tr -d '\'',\"'\'')" 2>/dev/null || true
-            done
-        fi
-    ' 2>/dev/null || true
 
     # Clean KMS data
     rm -rf ./data/kms-data

@@ -27,8 +27,24 @@ if ! pgrep -f bitcoind > /dev/null; then
     done
 fi
 
-bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 createwallet "keymeld_coordinator" >/dev/null 2>&1 || true
-bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 loadwallet "keymeld_coordinator" >/dev/null 2>&1 || true
+# Check if wallet already exists and is loaded
+LOADED_WALLETS=$(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 listwallets 2>/dev/null || echo "[]")
+if echo "$LOADED_WALLETS" | grep -q "keymeld_coordinator"; then
+    # Wallet already loaded - check if there are duplicates and unload extras
+    WALLET_COUNT=$(echo "$LOADED_WALLETS" | grep -c "keymeld_coordinator" || echo "0")
+    if [ "$WALLET_COUNT" -gt 1 ]; then
+        # Unload all and reload once
+        for i in $(seq 1 $WALLET_COUNT); do
+            bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 unloadwallet "keymeld_coordinator" 2>/dev/null || true
+        done
+        bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 loadwallet "keymeld_coordinator" 2>/dev/null || \
+            bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 createwallet "keymeld_coordinator" >/dev/null 2>&1 || true
+    fi
+else
+    # Create wallet if it doesn't exist, or load it
+    bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 createwallet "keymeld_coordinator" >/dev/null 2>&1 || \
+        bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 loadwallet "keymeld_coordinator" >/dev/null 2>&1 || true
+fi
 echo "Generating initial blocks..."
 addr=$(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcwallet=keymeld_coordinator getnewaddress)
 bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 generatetoaddress 101 $addr > /dev/null
