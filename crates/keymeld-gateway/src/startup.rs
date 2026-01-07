@@ -1,9 +1,11 @@
 use crate::{
-    config::Config,
+    config::{Config, GatewayLimits},
     coordinator::Coordinator,
     database::Database,
+    enclave::{EnclaveConfig, EnclaveManager},
     errors::ApiError,
     handlers::{self, AppState, NonceCache},
+    kms,
     metrics::Metrics,
     middleware::metrics_middleware,
 };
@@ -14,10 +16,14 @@ use axum::{
     routing::{get, post},
     serve, Router,
 };
-use keymeld_core::{
-    api::*,
-    enclave::{EnclaveConfig, EnclaveManager},
-    resilience::{GatewayLimits, RetryConfig, TimeoutConfig},
+use keymeld_core::managed_vsock::config::TimeoutConfig;
+use keymeld_sdk::{
+    ApiFeatures, ApiVersionResponse, AvailableUserSlot, CreateSigningSessionRequest,
+    CreateSigningSessionResponse, DatabaseStats, EnclaveAssignmentResponse, EnclaveHealthResponse,
+    EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse, HealthCheckResponse,
+    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeygenSessionStatusResponse,
+    ListEnclavesResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
+    ReserveKeygenSessionRequest, ReserveKeygenSessionResponse, SigningSessionStatusResponse,
 };
 
 use std::{
@@ -60,7 +66,8 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
     paths(
         handlers::health_check,
         handlers::list_enclaves,
-        handlers::create_keygen_session,
+        handlers::reserve_keygen_session,
+        handlers::initialize_keygen_session,
         handlers::register_keygen_participant,
         handlers::get_keygen_status,
         handlers::get_available_slots,
@@ -71,8 +78,10 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
     ),
     components(
         schemas(
-            CreateKeygenSessionRequest,
-            CreateKeygenSessionResponse,
+            ReserveKeygenSessionRequest,
+            ReserveKeygenSessionResponse,
+            InitializeKeygenSessionRequest,
+            InitializeKeygenSessionResponse,
             RegisterKeygenParticipantRequest,
             RegisterKeygenParticipantResponse,
             KeygenSessionStatusResponse,
@@ -81,9 +90,6 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             CreateSigningSessionRequest,
             CreateSigningSessionResponse,
             SigningSessionStatusResponse,
-            keymeld_core::musig::AdaptorConfig,
-            keymeld_core::musig::AdaptorType,
-            keymeld_core::musig::AdaptorSignatureResult,
             EnclaveAssignmentResponse,
             EnclaveHealthResponse,
             EnclavePublicKeyResponse,
@@ -93,9 +99,12 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             DatabaseStats,
             ApiFeatures,
             ErrorResponse,
-            keymeld_core::identifiers::SessionId,
-            keymeld_core::identifiers::UserId,
-            keymeld_core::identifiers::EnclaveId,
+            keymeld_sdk::EnclaveId,
+            keymeld_sdk::SessionId,
+            keymeld_sdk::UserId,
+            keymeld_sdk::TaprootTweak,
+            keymeld_sdk::KeygenStatusKind,
+            keymeld_sdk::SigningStatusKind,
         )
     ),
     tags(
@@ -161,7 +170,12 @@ impl Application {
             .await
             .context("Failed to initialize database")?;
 
-        let enclave_manager = Self::setup_enclave_manager(&config).await?;
+        // Initialize KMS client if enabled
+        let _kms_client = kms::init_kms_client(&config.kms)
+            .await
+            .context("Failed to initialize KMS client")?;
+
+        let enclave_manager = Self::setup_enclave_manager(&config, &db).await?;
         let metrics = Arc::new(Metrics);
         let app_state = AppState {
             db: db.clone(),
@@ -196,6 +210,7 @@ impl Application {
             Arc::new(db.clone()),
             enclave_manager.clone(),
             coordinator_config,
+            config.kms.clone(),
             metrics.clone(),
         );
         let (coordinator_handle, coordinator_shutdown) = coordinator.start_background_task();
@@ -261,7 +276,7 @@ impl Application {
         }
     }
 
-    async fn setup_enclave_manager(config: &Config) -> Result<Arc<EnclaveManager>> {
+    async fn setup_enclave_manager(config: &Config, db: &Database) -> Result<Arc<EnclaveManager>> {
         let enclave_configs: Vec<EnclaveConfig> = config
             .enclaves
             .enclaves
@@ -274,29 +289,42 @@ impl Application {
             .collect();
 
         let timeout_config = TimeoutConfig::from(&config.enclaves);
-        let retry_config = RetryConfig::from(&config.enclaves);
 
-        let mut enclave_manager = EnclaveManager::new_with_config(
-            enclave_configs,
-            timeout_config,
-            retry_config,
-            config.enclaves.max_connections_per_enclave.unwrap_or(50) as usize,
-        )?;
+        let enclave_manager = EnclaveManager::new_with_config(enclave_configs, timeout_config)?;
 
         info!(
             "Configured enclave manager with {} total enclaves",
             config.enclaves.enclaves.len()
         );
 
-        info!("Configuring all enclaves...");
-        match enclave_manager.configure_all().await {
-            Ok(()) => {
-                info!("Successfully configured all enclaves");
+        info!("Configuring all enclaves with KMS...");
+        let mut success_count = 0;
+        let mut failure_count = 0;
+
+        for enclave_id in enclave_manager.get_all_enclave_ids() {
+            if let Some(client) = enclave_manager.get_enclave_client(&enclave_id) {
+                match kms::configure_enclave_with_kms(enclave_id, client, db, &config.kms).await {
+                    Ok(()) => {
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        failure_count += 1;
+                        warn!("Failed to configure enclave {} with KMS: {}", enclave_id, e);
+                    }
+                }
             }
-            Err(e) => {
-                warn!("Failed to configure some enclaves: {}", e);
-                info!("Gateway will continue startup but some enclaves may not function correctly");
-            }
+        }
+
+        if failure_count > 0 {
+            warn!(
+                "Configured {}/{} enclaves successfully ({} failed)",
+                success_count,
+                success_count + failure_count,
+                failure_count
+            );
+            info!("Gateway will continue startup but some enclaves may not function correctly");
+        } else {
+            info!("Configured all {} enclaves with KMS", success_count);
         }
 
         info!("Initializing enclave public keys...");
@@ -304,10 +332,7 @@ impl Application {
 
         match enclave_manager.initialize_enclave_public_keys().await {
             Ok(initialized_count) => {
-                info!(
-                    "Successfully initialized {} enclave public keys",
-                    initialized_count
-                );
+                info!("Initialized {} enclave public keys", initialized_count);
             }
             Err(e) => {
                 warn!("Failed to initialize some enclave public keys: {}", e);
@@ -320,7 +345,11 @@ impl Application {
 
     fn build_router(state: AppState, config: &Config) -> Router {
         let api_routes = Router::new()
-            .route("/keygen", post(handlers::create_keygen_session))
+            .route("/keygen/reserve", post(handlers::reserve_keygen_session))
+            .route(
+                "/keygen/{session_id}/initialize",
+                post(handlers::initialize_keygen_session),
+            )
             .route(
                 "/keygen/{keygen_session_id}/participants",
                 post(handlers::register_keygen_participant),
@@ -430,7 +459,7 @@ mod tests {
     use super::*;
     use crate::config::{
         CoordinatorConfig, DatabaseConfig, DevelopmentConfig, EnclaveConfig, EnclaveInfo,
-        Environment, SecurityConfig, ServerConfig,
+        Environment, KmsConfig, SecurityConfig, ServerConfig,
     };
     use keymeld_core::logging::LoggingConfig;
     use tempfile::TempDir;
@@ -446,8 +475,6 @@ mod tests {
                 port: 0,
                 enable_cors: true,
                 enable_compression: true,
-                request_timeout_secs: Some(10),
-                max_request_size_bytes: Some(1024 * 1024),
             },
             database: DatabaseConfig {
                 path: db_path.to_string_lossy().to_string(),
@@ -469,9 +496,9 @@ mod tests {
                         port: 8001,
                     },
                 ],
-                max_users_per_enclave: Some(50),
-                max_connections_per_enclave: Some(25),
-                enclave_timeout_secs: Some(30),
+                connection_load_threshold: Some(100),
+                max_channel_size: Some(1000),
+                pool_acquire_timeout_secs: None,
                 vsock_timeout_secs: None,
                 nonce_generation_timeout_secs: None,
                 session_init_timeout_secs: None,
@@ -489,6 +516,7 @@ mod tests {
             logging: LoggingConfig::default(),
             security: SecurityConfig::default(),
             development: Some(DevelopmentConfig::default()),
+            kms: KmsConfig::default(),
         };
 
         (config, temp_dir)
@@ -506,7 +534,11 @@ mod tests {
     async fn test_enclave_manager_setup() {
         let (config, _temp_dir) = create_test_config();
 
-        let enclave_manager = Application::setup_enclave_manager(&config)
+        let db = Database::new(&config.database)
+            .await
+            .expect("Failed to create database");
+
+        let enclave_manager = Application::setup_enclave_manager(&config, &db)
             .await
             .expect("Failed to setup enclave manager");
 
@@ -523,7 +555,11 @@ mod tests {
         assert_eq!(openapi.info.version, "1.0.0");
 
         assert!(openapi.paths.paths.contains_key("/health"));
-        assert!(openapi.paths.paths.contains_key("/keygen"));
+        assert!(openapi.paths.paths.contains_key("/keygen/reserve"));
+        assert!(openapi
+            .paths
+            .paths
+            .contains_key("/keygen/{session_id}/initialize"));
         assert!(openapi.paths.paths.contains_key("/signing"));
         assert!(openapi.paths.paths.contains_key("/version"));
 
@@ -532,11 +568,19 @@ mod tests {
             .as_ref()
             .expect("OpenAPI should have components")
             .schemas;
-        assert!(schemas.contains_key("CreateKeygenSessionRequest"));
-        assert!(schemas.contains_key("CreateKeygenSessionResponse"));
+        assert!(schemas.contains_key("ReserveKeygenSessionRequest"));
+        assert!(schemas.contains_key("ReserveKeygenSessionResponse"));
+        assert!(schemas.contains_key("InitializeKeygenSessionRequest"));
+        assert!(schemas.contains_key("InitializeKeygenSessionResponse"));
         assert!(schemas.contains_key("CreateSigningSessionRequest"));
         assert!(schemas.contains_key("CreateSigningSessionResponse"));
         assert!(schemas.contains_key("RegisterKeygenParticipantRequest"));
+        assert!(schemas.contains_key("RegisterKeygenParticipantResponse"));
+        assert!(schemas.contains_key("KeygenSessionStatusResponse"));
+        assert!(schemas.contains_key("SigningSessionStatusResponse"));
+        assert!(schemas.contains_key("EnclavePublicKeyResponse"));
         assert!(schemas.contains_key("HealthCheckResponse"));
+        assert!(schemas.contains_key("ApiVersionResponse"));
+        assert!(schemas.contains_key("ErrorResponse"));
     }
 }

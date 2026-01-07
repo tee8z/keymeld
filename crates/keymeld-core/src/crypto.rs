@@ -369,145 +369,19 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_signature_data(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
-        let ciphertext = encrypted_data_json
-            .get("ciphertext")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing ciphertext field".to_string(),
-            ))?;
-
-        let nonce = encrypted_data_json
-            .get("nonce")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
-
-        let context = encrypted_data_json
-            .get("context")
-            .and_then(|v| v.as_str())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing context field".to_string(),
-            ))?;
-
-        if context != "signature" {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid context for signature decryption".to_string(),
-            ));
-        }
-
-        let ciphertext_bytes: Vec<u8> = ciphertext
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        let nonce_bytes: Vec<u8> = nonce
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        if nonce_bytes.len() != 12 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid nonce length".to_string(),
-            ));
-        }
-
-        let secret_bytes = hex::decode(session_secret).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
-        })?;
-
-        if secret_bytes.len() != 32 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid session secret length".to_string(),
-            ));
-        }
-
-        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
-        let mut derived_key = [0u8; 32];
-        hk.expand(context.as_bytes(), &mut derived_key)
-            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
-
-        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce_ref = Nonce::from_slice(&nonce_bytes);
-
-        let decrypted = cipher
-            .decrypt(nonce_ref, ciphertext_bytes.as_ref())
-            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
-
-        Ok(decrypted)
+        let secret = SessionSecret::from_hex(session_secret)?;
+        secret.decrypt(encrypted, "signature")
     }
 
     pub fn decrypt_message_data(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
-        let ciphertext = encrypted_data_json
-            .get("ciphertext")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing ciphertext field".to_string(),
-            ))?;
-
-        let nonce = encrypted_data_json
-            .get("nonce")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError("Missing nonce field".to_string()))?;
-
-        let context = encrypted_data_json
-            .get("context")
-            .and_then(|v| v.as_str())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing context field".to_string(),
-            ))?;
-
-        if context != "message" {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid context for message decryption".to_string(),
-            ));
-        }
-
-        let ciphertext_bytes: Vec<u8> = ciphertext
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        let nonce_bytes: Vec<u8> = nonce
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        if nonce_bytes.len() != 12 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid nonce length".to_string(),
-            ));
-        }
-
-        let secret_bytes = hex::decode(session_secret).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
-        })?;
-
-        if secret_bytes.len() != 32 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid session secret length".to_string(),
-            ));
-        }
-
-        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
-        let mut derived_key = [0u8; 32];
-        hk.expand(context.as_bytes(), &mut derived_key)
-            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
-
-        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce_ref = Nonce::from_slice(&nonce_bytes);
-
-        let decrypted = cipher
-            .decrypt(nonce_ref, ciphertext_bytes.as_ref())
-            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
-
-        Ok(decrypted)
+        let secret = SessionSecret::from_hex(session_secret)?;
+        secret.decrypt(encrypted, "message")
     }
 
     pub fn hash_message(message: &str) -> Vec<u8> {
@@ -566,10 +440,11 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_adaptor_configs(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
-        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_configs")
+        let secret = SessionSecret::from_hex(session_secret)?;
+        secret.decrypt(encrypted, "adaptor_configs")
     }
 
     pub fn encrypt_adaptor_signatures(
@@ -580,10 +455,11 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_adaptor_signatures(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
     ) -> Result<Vec<u8>, KeyMeldError> {
-        Self::decrypt_with_context(encrypted_data_json, session_secret, "adaptor_signatures")
+        let secret = SessionSecret::from_hex(session_secret)?;
+        secret.decrypt(encrypted, "adaptor_signatures")
     }
 
     fn encrypt_with_context(
@@ -629,11 +505,11 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_session_data(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
     ) -> Result<String, KeyMeldError> {
-        let decrypted_bytes =
-            Self::decrypt_with_context(encrypted_data_json, session_secret, "session_data")?;
+        let secret = SessionSecret::from_hex(session_secret)?;
+        let decrypted_bytes = secret.decrypt(encrypted, "session_data")?;
         String::from_utf8(decrypted_bytes).map_err(|e| {
             KeyMeldError::CryptoError(format!(
                 "Failed to convert decrypted session data to string: {e}"
@@ -652,17 +528,12 @@ impl SecureCrypto {
     }
 
     pub fn decrypt_structured_data_with_session_key<T: serde::de::DeserializeOwned>(
-        encrypted_data_json: &JsonValue,
+        encrypted: &EncryptedData,
         session_secret: &str,
         context: &str,
     ) -> Result<T, KeyMeldError> {
-        let decrypted_bytes =
-            Self::decrypt_with_context(encrypted_data_json, session_secret, context)?;
-        let json_str = String::from_utf8(decrypted_bytes).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to convert decrypted bytes to string: {e}"))
-        })?;
-        serde_json::from_str(&json_str)
-            .map_err(|e| KeyMeldError::CryptoError(format!("Failed to deserialize data: {e}")))
+        let secret = SessionSecret::from_hex(session_secret)?;
+        secret.decrypt_value(encrypted, context)
     }
 
     pub fn encrypt_structured_data_with_enclave_key<T: serde::Serialize>(
@@ -684,80 +555,6 @@ impl SecureCrypto {
         })?;
         serde_json::from_str(&json_str)
             .map_err(|e| KeyMeldError::CryptoError(format!("Failed to deserialize data: {e}")))
-    }
-
-    fn decrypt_with_context(
-        encrypted_data_json: &JsonValue,
-        session_secret: &str,
-        expected_context: &str,
-    ) -> Result<Vec<u8>, KeyMeldError> {
-        let ciphertext = encrypted_data_json
-            .get("ciphertext")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing or invalid ciphertext".to_string(),
-            ))?;
-
-        let nonce = encrypted_data_json
-            .get("nonce")
-            .and_then(|v| v.as_array())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing or invalid nonce".to_string(),
-            ))?;
-
-        let actual_context = encrypted_data_json
-            .get("context")
-            .and_then(|v| v.as_str())
-            .ok_or(KeyMeldError::CryptoError(
-                "Missing or invalid context".to_string(),
-            ))?;
-
-        if actual_context != expected_context {
-            return Err(KeyMeldError::CryptoError(format!(
-                "Invalid context for decryption: expected {expected_context}, got {actual_context}"
-            )));
-        }
-
-        let ciphertext_bytes: Vec<u8> = ciphertext
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        let nonce_bytes: Vec<u8> = nonce
-            .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as u8)
-            .collect();
-
-        if nonce_bytes.len() != 12 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid nonce length".to_string(),
-            ));
-        }
-
-        let secret_bytes = hex::decode(session_secret).map_err(|e| {
-            KeyMeldError::CryptoError(format!("Failed to decode hex session secret: {e}"))
-        })?;
-
-        if secret_bytes.len() != 32 {
-            return Err(KeyMeldError::CryptoError(
-                "Invalid session secret length".to_string(),
-            ));
-        }
-
-        let hk = Hkdf::<Sha256>::new(None, &secret_bytes);
-        let mut derived_key = [0u8; 32];
-        hk.expand(expected_context.as_bytes(), &mut derived_key)
-            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
-
-        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce_ref = Nonce::from_slice(&nonce_bytes);
-
-        let decrypted = cipher
-            .decrypt(nonce_ref, ciphertext_bytes.as_ref())
-            .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
-
-        Ok(decrypted)
     }
 
     pub fn generate_session_seed() -> Result<Vec<u8>, KeyMeldError> {
@@ -1256,34 +1053,130 @@ pub struct EncryptedData {
 }
 
 impl EncryptedData {
-    pub fn to_hex_json(&self) -> Result<String, KeyMeldError> {
-        let json_str = serde_json::to_string(self).map_err(|e| {
-            KeyMeldError::SerializationError(format!("Failed to serialize encrypted data: {e}"))
-        })?;
-        Ok(hex::encode(json_str.as_bytes()))
+    /// Encode to hex: [context_len: 1 byte][context bytes][nonce: 12 bytes][ciphertext]
+    pub fn to_hex(&self) -> Result<String, KeyMeldError> {
+        let context_bytes = self.context.as_bytes();
+        if context_bytes.len() > 255 {
+            return Err(KeyMeldError::ValidationError(
+                "Context string too long (max 255 bytes)".to_string(),
+            ));
+        }
+        if self.nonce.len() != 12 {
+            return Err(KeyMeldError::ValidationError(format!(
+                "Invalid nonce length: expected 12 bytes, got {}",
+                self.nonce.len()
+            )));
+        }
+
+        let mut bytes = Vec::new();
+        bytes.push(context_bytes.len() as u8);
+        bytes.extend_from_slice(context_bytes);
+        bytes.extend_from_slice(&self.nonce);
+        bytes.extend_from_slice(&self.ciphertext);
+
+        Ok(hex::encode(bytes))
     }
 
-    pub fn from_hex_json(encoded: &str) -> Result<Self, KeyMeldError> {
-        let json_bytes = hex::decode(encoded).map_err(KeyMeldError::HexDecodeError)?;
+    /// Decode from hex: [context_len: 1 byte][context bytes][nonce: 12 bytes][ciphertext]
+    pub fn from_hex(encoded: &str) -> Result<Self, KeyMeldError> {
+        let bytes = hex::decode(encoded).map_err(KeyMeldError::HexDecodeError)?;
 
-        let json_str = String::from_utf8(json_bytes).map_err(|e| {
-            KeyMeldError::SerializationError(format!("Failed to decode JSON string: {e}"))
-        })?;
+        if bytes.is_empty() {
+            return Err(KeyMeldError::ValidationError(
+                "Encrypted data cannot be empty".to_string(),
+            ));
+        }
 
-        serde_json::from_str(&json_str).map_err(|e| {
-            KeyMeldError::SerializationError(format!("Failed to deserialize encrypted data: {e}"))
+        let context_len = bytes[0] as usize;
+        if bytes.len() < 1 + context_len + 12 {
+            return Err(KeyMeldError::ValidationError(format!(
+                "Encrypted data too short: expected at least {} bytes, got {}",
+                1 + context_len + 12,
+                bytes.len()
+            )));
+        }
+
+        let context = String::from_utf8(bytes[1..1 + context_len].to_vec())
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid UTF-8 in context: {e}")))?;
+
+        let nonce = bytes[1 + context_len..1 + context_len + 12].to_vec();
+        let ciphertext = bytes[1 + context_len + 12..].to_vec();
+
+        Ok(Self {
+            ciphertext,
+            nonce,
+            context,
         })
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, KeyMeldError> {
-        serde_json::to_vec(self).map_err(|e| {
-            KeyMeldError::SerializationError(format!("Failed to serialize to bytes: {e}"))
-        })
+        let context_bytes = self.context.as_bytes();
+        if context_bytes.len() > 255 {
+            return Err(KeyMeldError::ValidationError(
+                "Context string too long (max 255 bytes)".to_string(),
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        bytes.push(context_bytes.len() as u8);
+        bytes.extend_from_slice(context_bytes);
+        bytes.extend_from_slice(&self.nonce);
+        bytes.extend_from_slice(&self.ciphertext);
+        Ok(bytes)
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, KeyMeldError> {
-        serde_json::from_slice(data).map_err(|e| {
-            KeyMeldError::SerializationError(format!("Failed to deserialize from bytes: {e}"))
+        if data.is_empty() {
+            return Err(KeyMeldError::ValidationError(
+                "Encrypted data cannot be empty".to_string(),
+            ));
+        }
+
+        let context_len = data[0] as usize;
+        if data.len() < 1 + context_len + 12 {
+            return Err(KeyMeldError::ValidationError(format!(
+                "Encrypted data too short: expected at least {} bytes, got {}",
+                1 + context_len + 12,
+                data.len()
+            )));
+        }
+
+        let context = String::from_utf8(data[1..1 + context_len].to_vec())
+            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid UTF-8 in context: {e}")))?;
+
+        let nonce = data[1 + context_len..1 + context_len + 12].to_vec();
+        let ciphertext = data[1 + context_len + 12..].to_vec();
+
+        Ok(Self {
+            ciphertext,
+            nonce,
+            context,
+        })
+    }
+}
+
+impl SessionSecret {
+    /// Encrypts a serializable value with a specific context
+    pub fn encrypt_value<T: serde::Serialize>(
+        &self,
+        value: &T,
+        context: &str,
+    ) -> Result<EncryptedData, KeyMeldError> {
+        let serialized = serde_json::to_vec(value).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to serialize value: {e}"))
+        })?;
+        self.encrypt(&serialized, context)
+    }
+
+    /// Decrypts and deserializes a value with context validation
+    pub fn decrypt_value<T: serde::de::DeserializeOwned>(
+        &self,
+        encrypted: &EncryptedData,
+        expected_context: &str,
+    ) -> Result<T, KeyMeldError> {
+        let decrypted = self.decrypt(encrypted, expected_context)?;
+        serde_json::from_slice(&decrypted).map_err(|e| {
+            KeyMeldError::SerializationError(format!("Failed to deserialize value: {e}"))
         })
     }
 }
@@ -1376,8 +1269,8 @@ mod session_secret_tests {
         let message = "test message";
         let encrypted = secret.encrypt_message(message).unwrap();
 
-        let json = encrypted.to_hex_json().unwrap();
-        let deserialized = EncryptedData::from_hex_json(&json).unwrap();
+        let hex = encrypted.to_hex().unwrap();
+        let deserialized = EncryptedData::from_hex(&hex).unwrap();
 
         assert_eq!(encrypted.ciphertext, deserialized.ciphertext);
         assert_eq!(encrypted.nonce, deserialized.nonce);

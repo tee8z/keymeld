@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use keymeld_core::resilience::{RetryConfig, TimeoutConfig};
+use keymeld_core::managed_vsock::config::{RetryConfig, TimeoutConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -33,6 +35,7 @@ pub struct Config {
     pub environment: Environment,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    pub kms: KmsConfig,
     pub enclaves: EnclaveConfig,
     pub coordinator: CoordinatorConfig,
     pub logging: LoggingConfig,
@@ -47,8 +50,6 @@ pub struct ServerConfig {
     pub port: u16,
     pub enable_cors: bool,
     pub enable_compression: bool,
-    pub request_timeout_secs: Option<u64>,
-    pub max_request_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,24 +61,88 @@ pub struct DatabaseConfig {
     pub enable_wal_mode: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KmsConfig {
+    pub enabled: bool,
+    pub endpoint_url: Option<String>,
+    pub key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayLimits {
+    /// Default maximum number of signing sessions per keygen session
+    pub default_max_signing_sessions: u32,
+    /// Maximum request body size in bytes
+    pub max_request_size_bytes: usize,
+    /// Request timeout in seconds
+    pub request_timeout_secs: u64,
+}
+
+impl Default for GatewayLimits {
+    fn default() -> Self {
+        Self {
+            default_max_signing_sessions: 100,
+            max_request_size_bytes: 1024 * 1024, // 1MB
+            request_timeout_secs: 120,           // 2 minutes for crypto operations
+        }
+    }
+}
+
+impl GatewayLimits {
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_secs(self.request_timeout_secs)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.default_max_signing_sessions == 0 {
+            return Err("Default max signing sessions must be greater than 0".to_string());
+        }
+        if self.max_request_size_bytes == 0 {
+            return Err("Max request size must be greater than 0".to_string());
+        }
+        if self.request_timeout_secs == 0 {
+            return Err("Request timeout must be greater than 0".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl KmsConfig {
+    pub fn is_local_kms(&self) -> bool {
+        self.endpoint_url
+            .as_ref()
+            .map(|url| url.contains("localhost") || url.contains("127.0.0.1"))
+            .unwrap_or(false)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.enabled && self.key_id.is_empty() {
+            anyhow::bail!("KMS key_id is required when KMS is enabled");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclaveConfig {
     pub enclaves: Vec<EnclaveInfo>,
-    pub max_users_per_enclave: Option<u32>,
-    pub max_connections_per_enclave: Option<u32>,
-    pub enclave_timeout_secs: Option<u64>,
     pub vsock_timeout_secs: Option<u64>,
     pub nonce_generation_timeout_secs: Option<u64>,
     pub session_init_timeout_secs: Option<u64>,
     pub signing_timeout_secs: Option<u64>,
     pub network_write_timeout_secs: Option<u64>,
     pub network_read_timeout_secs: Option<u64>,
+    pub pool_acquire_timeout_secs: Option<u64>,
     pub max_message_size_bytes: Option<usize>,
     pub max_retry_attempts: Option<u32>,
     pub initial_retry_delay_ms: Option<u64>,
     pub max_retry_delay_ms: Option<u64>,
     pub retry_backoff_multiplier: Option<f64>,
     pub connection_retry_delay_ms: Option<u64>,
+    pub max_channel_size: Option<usize>,
+    /// Maximum concurrent requests per VSock connection before creating a new one.
+    /// See config/development.yaml for detailed tuning guidance.
+    pub connection_load_threshold: Option<u32>,
 }
 
 impl From<&EnclaveConfig> for TimeoutConfig {
@@ -102,12 +167,19 @@ impl From<&EnclaveConfig> for TimeoutConfig {
             network_read_timeout_secs: config
                 .network_read_timeout_secs
                 .unwrap_or(defaults.network_read_timeout_secs),
+            pool_acquire_timeout_secs: config
+                .pool_acquire_timeout_secs
+                .unwrap_or(defaults.pool_acquire_timeout_secs),
             connection_retry_delay_ms: config
                 .connection_retry_delay_ms
                 .unwrap_or(defaults.connection_retry_delay_ms),
             max_message_size_bytes: config
                 .max_message_size_bytes
                 .unwrap_or(defaults.max_message_size_bytes),
+            max_channel_size: config.max_channel_size.unwrap_or(defaults.max_channel_size),
+            connection_load_threshold: config
+                .connection_load_threshold
+                .unwrap_or(defaults.connection_load_threshold),
         }
     }
 }
@@ -144,19 +216,35 @@ pub struct CoordinatorConfig {
     pub processing_timeout_mins: Option<u64>,
     pub delete_sessions_older_than_secs: Option<u64>,
     pub metric_record_interval_secs: Option<u64>,
+    // New fields for improved monitoring and processing
+    pub max_concurrent_sessions: Option<u32>,
+    pub db_operation_timeout_secs: Option<u64>,
+    pub health_check_interval_secs: Option<u64>,
+    pub circuit_breaker_failure_threshold: Option<u32>,
+    pub circuit_breaker_reset_timeout_secs: Option<u64>,
+    pub individual_session_timeout_secs: Option<u64>,
+    pub stuck_session_detection_threshold_secs: Option<u64>,
 }
 
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
-            processing_interval_ms: Some(100),
+            processing_interval_ms: Some(100), // Fast processing with proper message size limits
             cleanup_interval_secs: Some(300),
-            batch_size: Some(50),
+            batch_size: Some(20), // Moderate batches - message size was the real issue
             max_retries: Some(3),
             processing_timeout_mins: Some(5),
             // 86400 = 24 * 60 * 60; 24 hours
             delete_sessions_older_than_secs: Some(86400),
             metric_record_interval_secs: Some(30),
+            // New defaults for improved monitoring and processing
+            max_concurrent_sessions: Some(20),
+            db_operation_timeout_secs: Some(15),
+            health_check_interval_secs: Some(10),
+            circuit_breaker_failure_threshold: Some(10),
+            circuit_breaker_reset_timeout_secs: Some(60),
+            individual_session_timeout_secs: Some(60),
+            stuck_session_detection_threshold_secs: Some(300),
         }
     }
 }
@@ -168,7 +256,6 @@ pub struct SecurityConfig {
     pub enable_attestation: bool,
     pub strict_validation: bool,
     pub allow_insecure_connections: bool,
-    pub max_session_duration_secs: u64,
     pub require_tls: bool,
 }
 
@@ -178,7 +265,6 @@ impl Default for SecurityConfig {
             enable_attestation: true,
             strict_validation: true,
             allow_insecure_connections: false,
-            max_session_duration_secs: 3600, // 1 hour
             require_tls: true,
         }
     }
@@ -359,6 +445,9 @@ impl Config {
             anyhow::bail!("Must have at least one user enclave");
         }
 
+        // Validate KMS configuration
+        self.kms.validate()?;
+
         match self.environment {
             Environment::Production => {
                 if !self.security.enable_attestation {
@@ -503,6 +592,7 @@ impl Default for Config {
             environment: Environment::Development,
             server: ServerConfig::default(),
             database: DatabaseConfig::default(),
+            kms: KmsConfig::default(),
             enclaves: EnclaveConfig::default(),
             coordinator: CoordinatorConfig::default(),
             logging: LoggingConfig::gateway_default(),
@@ -519,8 +609,6 @@ impl Default for ServerConfig {
             port: 8080,
             enable_cors: true,
             enable_compression: true,
-            request_timeout_secs: Some(30),
-            max_request_size_bytes: Some(1024 * 1024), // 1MB
         }
     }
 }
@@ -529,7 +617,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             path: "./data/keymeld.db".to_string(),
-            max_connections: 10,
+            max_connections: 50, // Increased for better concurrency handling
             connection_timeout_secs: 30,
             idle_timeout_secs: Some(300), // 5 minutes
             enable_wal_mode: Some(true),
@@ -557,21 +645,22 @@ impl Default for EnclaveConfig {
                     port: 8000,
                 },
             ],
-            max_users_per_enclave: Some(100),
-            max_connections_per_enclave: Some(50),
-            enclave_timeout_secs: Some(30),
+
             vsock_timeout_secs: Some(30),
             nonce_generation_timeout_secs: Some(10),
             session_init_timeout_secs: Some(15),
             signing_timeout_secs: Some(20),
             network_write_timeout_secs: Some(5),
             network_read_timeout_secs: Some(300),
+            pool_acquire_timeout_secs: Some(30),
             max_message_size_bytes: Some(1024 * 1024),
             max_retry_attempts: Some(3),
             initial_retry_delay_ms: Some(100),
             max_retry_delay_ms: Some(5000),
             retry_backoff_multiplier: Some(2.0),
             connection_retry_delay_ms: Some(100),
+            max_channel_size: Some(1000),
+            connection_load_threshold: Some(50),
         }
     }
 }
@@ -597,6 +686,10 @@ enable_compression = true
 path = "./test.db"
 max_connections = 5
 connection_timeout_secs = 60
+
+[kms]
+enabled = true
+key_id = "test-key-id"
 
 [enclaves]
 kms_key_arn = "arn:aws:kms:us-west-2:123456789012:key/test-key-id"

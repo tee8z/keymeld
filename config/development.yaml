@@ -2,7 +2,7 @@
 # ================================
 # This configuration is optimized for local development with VSock simulation.
 #
-# IMPORTANT: VSock CID Addressing in Development
+# VSock CID Addressing in Development
 # ==============================================
 # In local development, we simulate AWS Nitro Enclave VSock communication, but there are
 # important limitations regarding Context IDs (CIDs) that differ from production:
@@ -32,22 +32,23 @@
 # If you encounter "No such device" errors when connecting to VSock CIDs 3+,
 # this is the cause - change all CIDs to 2 for local development.
 
-environment: development
+environment: development # Runtime environment (development/production) - affects validation and security settings
 server:
-  host: "0.0.0.0"
-  port: 8080
-  enable_cors: true
-  enable_compression: true
-  request_timeout_secs: 30
-  max_request_size_bytes: 10485760
+  host: "0.0.0.0" # Server bind address - 0.0.0.0 listens on all interfaces
+  port: 8080 # HTTP server port
+  enable_cors: true # Enable Cross-Origin Resource Sharing for web clients
+  enable_compression: true # Enable HTTP response compression (gzip)
+kms:
+  enabled: true # Enable AWS KMS integration for key management
+  endpoint_url: "http://127.0.0.1:4566" # KMS endpoint URL (LocalStack for development)
+  key_id: "alias/keymeld-enclave-master-key" # KMS key identifier for enclave encryption
 database:
-  path: "./data/keymeld.db"
-  max_connections: 20
-  connection_timeout_secs: 30
-  idle_timeout_secs: 60
-  enable_wal_mode: true
+  path: "./data/keymeld.db" # SQLite database file path
+  max_connections: 50 # Maximum concurrent database connections in pool (increased for stress testing)
+  connection_timeout_secs: 30 # Timeout for acquiring database connections
+  idle_timeout_secs: 60 # Timeout for idle connections before closing
+  enable_wal_mode: true # Enable Write-Ahead Logging for better concurrency
 enclaves:
-  kms_key_arn: "arn:aws:kms:us-west-2:123456789012:key/dev-mock-key"
   # VSock Enclave Configuration for Development
   # ===========================================
   # Note: All enclaves use CID 2 (host CID) in development simulation.
@@ -68,29 +69,91 @@ enclaves:
     - id: 2
       cid: 2 # Host CID - required for local development
       port: 5002
-  max_users_per_enclave: 50
-  max_connections_per_enclave: 20 # Pool size: number of pooled VSock connections per enclave
-  enclave_timeout_secs: 600
-  vsock_timeout_secs: 600
-coordinator:
-  processing_interval_ms: 500
-  batch_size: 100
-  max_retries: 5
-  processing_timeout_mins: 1
-logging:
-  level: "debug"
-  format: "pretty"
-  enable_json: false
-  enable_file_output: false
-  file_path: null
-security:
-  enable_attestation: false
-  strict_validation: false
-  allow_insecure_connections: true
-  max_session_duration_secs: 86400
-  require_tls: false
 
+  max_channel_size: 1000 # Internal message buffer size per connection - controls backpressure when requests queue up faster than they can be processed (recommended: 1000 to allow ~1000 concurrent operations per connection
+
+  # ============================================================================
+  # CONNECTION LOAD THRESHOLD - Key Performance Tuning Parameter
+  # ============================================================================
+  # Maximum concurrent requests per VSock connection before creating a new one.
+  # This controls the trade-off between connection count and per-connection load.
+  #
+  # How it works:
+  # - When a connection has fewer than this many active requests, it's reused
+  # - When all connections exceed this threshold, a new connection is created
+  # - Higher values = fewer connections, more multiplexing per connection
+  # - Lower values = more connections, less load per connection
+  #
+  # Tuning guide:
+  # - 10-20: Low concurrency (<50 parallel sessions), more connections
+  # - 50: Balanced default, good for most workloads
+  # - 100: High concurrency (500+ parallel sessions), fewer connections
+  #
+  # Symptoms that suggest increasing this value:
+  # - "Too many open files" errors under load
+  # - "Broken pipe" errors when many sessions run in parallel
+  # - High file descriptor usage reported in logs
+  #
+  # Symptoms that suggest decreasing this value:
+  # - Individual requests timing out under moderate load
+  # - High latency variance between requests
+  # ============================================================================
+  connection_load_threshold: 50
+
+  vsock_timeout_secs: 600 # Timeout for VSock operations and request/response cycles
+  nonce_generation_timeout_secs: 180 # Timeout for cryptographic nonce generation
+  session_init_timeout_secs: 1800 # Timeout for session initialization (key generation setup)
+  signing_timeout_secs: 600 # Timeout for cryptographic signing operations
+  network_write_timeout_secs: 5 # Timeout for individual network write operations
+  network_read_timeout_secs: 300 # Timeout for reading crypto operation responses
+  pool_acquire_timeout_secs: 10 # Timeout for acquiring connections from pool (wait for permit if at limit)
+  connection_retry_delay_ms: 100 # Delay between connection retry attempts
+  max_message_size_bytes: 16777216 # Maximum message size (16MB) for VSock communication
+coordinator:
+  # ============================================================================
+  # COORDINATOR TUNING - processing_interval_ms and batch_size
+  # ============================================================================
+  # These two parameters work together to control coordinator throughput:
+  #
+  #   Max throughput = batch_size / (processing_interval_ms / 1000) sessions/sec
+  #
+  # How it works:
+  # - Every "tick" (processing_interval_ms), the coordinator wakes up
+  # - It grabs up to batch_size pending sessions and processes them
+  # - Sessions already in progress are skipped (no double-processing)
+  #
+  # Examples:
+  #   - 100ms interval, batch 100 = 1000 sessions/sec max
+  #   - 50ms interval, batch 200  = 4000 sessions/sec max
+  #   - 100ms interval, batch 500 = 5000 sessions/sec max
+  #
+  # For stress tests with 1000+ parallel sessions, increase both values.
+  # ============================================================================
+
+  # How often the coordinator wakes up to process pending sessions (milliseconds).
+  # Lower values = more responsive but higher CPU usage.
+  # Recommended: 50-100ms for most workloads, 25-50ms for low-latency needs.
+  processing_interval_ms: 100
+
+  # Number of sessions to process in each coordinator batch cycle.
+  # Larger batches = higher throughput, smaller batches = lower latency.
+  # Recommended: 50-100 for normal use, 200-500 for stress tests.
+  batch_size: 100
+
+  max_retries: 5 # Maximum retry attempts for failed session processing
+  processing_timeout_mins: 1 # Timeout for processing individual sessions
+logging:
+  level: "debug" # Log level (trace, debug, info, warn, error)
+  format: "pretty" # Log format (pretty for development, json for production)
+  enable_json: false # Output logs in JSON format
+  enable_file_output: false # Write logs to file in addition to stdout
+  file_path: null # Log file path (if enable_file_output is true)
+security:
+  enable_attestation: false # Enable enclave attestation verification (disabled for development)
+  strict_validation: false # Enable strict security validation (disabled for development)
+  allow_insecure_connections: true # Allow non-TLS connections (development only)
+  require_tls: false # Require TLS/HTTPS connections (disabled for development)
 development:
-  enable_test_endpoints: true
-  disable_enclave_verification: true
-  extended_logging: true
+  enable_test_endpoints: true # Enable additional test/debug API endpoints
+  disable_enclave_verification: true # Disable enclave signature verification for testing
+  extended_logging: true # Enable additional debug logging for development

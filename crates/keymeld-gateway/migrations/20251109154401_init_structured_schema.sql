@@ -22,8 +22,8 @@ CREATE TABLE keygen_sessions (
     aggregate_pubkey_hash BLOB,
     status TEXT NOT NULL,
     error_message TEXT,
-    session_encrypted_data TEXT NOT NULL DEFAULT '{}',
-    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}',
+    session_encrypted_data TEXT,
+    enclave_encrypted_data TEXT,
     session_public_key BLOB
 );
 
@@ -36,8 +36,8 @@ CREATE TABLE keygen_participants (
     registered_at INTEGER NOT NULL,
     require_signing_approval BOOLEAN NOT NULL DEFAULT FALSE,
     auth_pubkey BLOB NOT NULL,
-    session_encrypted_data TEXT NOT NULL DEFAULT '{}',
-    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}',
+    session_encrypted_data TEXT,
+    enclave_encrypted_data TEXT,
     FOREIGN KEY (keygen_session_id) REFERENCES keygen_sessions (keygen_session_id) ON DELETE CASCADE,
     UNIQUE(keygen_session_id, user_id)
 );
@@ -66,8 +66,8 @@ CREATE TABLE signing_sessions (
     expected_participants TEXT NOT NULL,
     status TEXT NOT NULL,
     error_message TEXT,
-    session_encrypted_data TEXT NOT NULL DEFAULT '{}',
-    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}',
+    session_encrypted_data TEXT,
+    enclave_encrypted_data TEXT,
     FOREIGN KEY (keygen_session_id) REFERENCES keygen_sessions (keygen_session_id)
 );
 
@@ -78,8 +78,8 @@ CREATE TABLE signing_participants (
     assigned_enclave_id INTEGER NOT NULL,
     enclave_key_epoch INTEGER NOT NULL,
     registered_at INTEGER NOT NULL,
-    session_encrypted_data TEXT NOT NULL DEFAULT '{}',
-    enclave_encrypted_data TEXT NOT NULL DEFAULT '{}',
+    session_encrypted_data TEXT,
+    enclave_encrypted_data TEXT,
     FOREIGN KEY (signing_session_id) REFERENCES signing_sessions (signing_session_id) ON DELETE CASCADE,
     UNIQUE(signing_session_id, user_id)
 );
@@ -111,6 +111,7 @@ CREATE TABLE enclave_public_keys (
 
 -- Indexes
 CREATE INDEX idx_keygen_sessions_status_expires ON keygen_sessions(status_name, expires_at, updated_at);
+CREATE INDEX idx_keygen_sessions_reserved ON keygen_sessions(status_name, created_at) WHERE status_name = 'reserved';
 CREATE INDEX idx_keygen_sessions_public_key ON keygen_sessions(session_public_key) WHERE session_public_key IS NOT NULL;
 CREATE INDEX idx_keygen_participants_session ON keygen_participants(keygen_session_id);
 
@@ -127,6 +128,21 @@ CREATE INDEX idx_signing_approvals_session_user ON signing_approvals(signing_ses
 
 CREATE INDEX idx_enclave_public_keys_expires_at ON enclave_public_keys(expires_at);
 CREATE INDEX idx_enclave_public_keys_enclave_id ON enclave_public_keys(enclave_id);
+
+-- Enclave Persistent Keys
+-- Stores each enclave's secp256k1 private key, encrypted with a KMS-derived DEK
+-- Flow: KMS generates DEK → Enclave uses DEK to encrypt private_key → Store encrypted private_key
+-- On restart: KMS decrypts DEK → Enclave uses DEK to decrypt private_key → Derive public_key
+CREATE TABLE enclave_master_keys (
+    enclave_id INTEGER PRIMARY KEY,
+    kms_encrypted_dek BLOB NOT NULL,
+    encrypted_private_key BLOB NOT NULL,
+    kms_key_id TEXT NOT NULL,
+    key_epoch INTEGER DEFAULT 1
+);
+
+CREATE INDEX idx_enclave_master_keys_kms_key
+    ON enclave_master_keys(kms_key_id);
 
 -- Structured Encrypted Data Documentation:
 -- All session_encrypted_data and enclave_encrypted_data columns contain JSON objects
