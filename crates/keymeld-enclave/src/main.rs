@@ -1,5 +1,5 @@
 use anyhow::Result;
-use keymeld_core::resilience::TimeoutConfig;
+use keymeld_core::managed_vsock::config::TimeoutConfig;
 use keymeld_enclave::run_until_stopped;
 
 #[tokio::main]

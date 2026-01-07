@@ -1,6 +1,6 @@
 pub mod nsm;
 
-use keymeld_core::enclave::{AttestationError, DataDecodingError, EnclaveError, InternalError};
+use keymeld_core::protocol::{AttestationError, DataDecodingError, EnclaveError, InternalError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tracing::warn;
@@ -31,6 +31,7 @@ impl Default for AttestationConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct AttestationManager {
     config: AttestationConfig,
     nsm_client: Option<NsmClient>,

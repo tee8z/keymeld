@@ -9,21 +9,43 @@ pub struct TimeoutConfig {
     pub signing_timeout_secs: u64,
     pub network_write_timeout_secs: u64,
     pub network_read_timeout_secs: u64,
+    pub pool_acquire_timeout_secs: u64,
     pub connection_retry_delay_ms: u64,
     pub max_message_size_bytes: usize,
+    pub max_channel_size: usize,
+    /// Maximum concurrent requests per VSock connection before creating a new one.
+    ///
+    /// This is a key performance tuning parameter:
+    /// - Lower values (10-20): More connections, lower per-connection load, higher FD usage
+    /// - Higher values (50-100): Fewer connections, higher per-connection load, lower FD usage
+    ///
+    /// For high-concurrency scenarios (100+ parallel signing sessions), use 50-100.
+    /// For low-concurrency scenarios (<50 parallel sessions), use 10-20.
+    ///
+    /// If you see "Too many open files" or "Broken pipe" errors under load,
+    /// increase this value to reduce the total number of connections.
+    #[serde(default = "default_connection_load_threshold")]
+    pub connection_load_threshold: u32,
+}
+
+fn default_connection_load_threshold() -> u32 {
+    50
 }
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
-            vsock_timeout_secs: 300, // 5 minutes for crypto operations (increased for AddParticipant with large encrypted data)
-            nonce_generation_timeout_secs: 180, // 3 minutes
-            session_init_timeout_secs: 1800, // 30 minutes
-            signing_timeout_secs: 600, // 10 minutes
-            network_write_timeout_secs: 5, // 5 seconds for individual network writes
+            vsock_timeout_secs: 300,                  // 5 minutes for crypto operations
+            nonce_generation_timeout_secs: 180,       // 3 minutes
+            session_init_timeout_secs: 1800,          // 30 minutes
+            signing_timeout_secs: 600,                // 10 minutes
+            network_write_timeout_secs: 5,            // 5 seconds for individual network writes
             network_read_timeout_secs: 300, // 5 minutes for reading crypto operation responses
+            pool_acquire_timeout_secs: 30,  // 30 seconds for acquiring connections from pool
             connection_retry_delay_ms: 100, // 100ms delay between connection retries
-            max_message_size_bytes: 1024 * 1024, // 1MB maximum message size
+            max_message_size_bytes: 16 * 1024 * 1024, // 16MB - optimal for MuSig2 + adaptor signatures (up to ~200 participants)
+            max_channel_size: 1000,                   // Maximum channel buffer size
+            connection_load_threshold: default_connection_load_threshold(),
         }
     }
 }
@@ -53,6 +75,10 @@ impl TimeoutConfig {
         Duration::from_secs(self.network_read_timeout_secs)
     }
 
+    pub fn pool_acquire_timeout(&self) -> Duration {
+        Duration::from_secs(self.pool_acquire_timeout_secs)
+    }
+
     pub fn connection_retry_delay(&self) -> Duration {
         Duration::from_millis(self.connection_retry_delay_ms)
     }
@@ -76,11 +102,17 @@ impl TimeoutConfig {
         if self.network_read_timeout_secs == 0 {
             return Err("Network read timeout must be greater than 0".to_string());
         }
+        if self.pool_acquire_timeout_secs == 0 {
+            return Err("Pool acquire timeout must be greater than 0".to_string());
+        }
         if self.max_message_size_bytes == 0 {
             return Err("Max message size must be greater than 0".to_string());
         }
         if self.connection_retry_delay_ms == 0 {
             return Err("Connection retry delay must be greater than 0".to_string());
+        }
+        if self.max_channel_size == 0 {
+            return Err("Max channel size must be greater than 0".to_string());
         }
         Ok(())
     }
@@ -146,45 +178,6 @@ impl RetryConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayLimits {
-    /// Default maximum number of signing sessions per keygen session
-    pub default_max_signing_sessions: u32,
-    /// Maximum request body size in bytes
-    pub max_request_size_bytes: usize,
-    /// Request timeout in seconds
-    pub request_timeout_secs: u64,
-}
-
-impl Default for GatewayLimits {
-    fn default() -> Self {
-        Self {
-            default_max_signing_sessions: 100,
-            max_request_size_bytes: 1024 * 1024, // 1MB
-            request_timeout_secs: 120,           // 2 minutes for crypto operations
-        }
-    }
-}
-
-impl GatewayLimits {
-    pub fn request_timeout(&self) -> Duration {
-        Duration::from_secs(self.request_timeout_secs)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.default_max_signing_sessions == 0 {
-            return Err("Default max signing sessions must be greater than 0".to_string());
-        }
-        if self.max_request_size_bytes == 0 {
-            return Err("Max request size must be greater than 0".to_string());
-        }
-        if self.request_timeout_secs == 0 {
-            return Err("Request timeout must be greater than 0".to_string());
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,8 +190,11 @@ mod tests {
         assert_eq!(config.session_init_timeout_secs, 1800);
         assert_eq!(config.network_write_timeout_secs, 5);
         assert_eq!(config.network_read_timeout_secs, 300);
+        assert_eq!(config.pool_acquire_timeout_secs, 30);
         assert_eq!(config.connection_retry_delay_ms, 100);
-        assert_eq!(config.max_message_size_bytes, 1024 * 1024);
+        assert_eq!(config.max_message_size_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.max_channel_size, 1000);
+        assert_eq!(config.connection_load_threshold, 50);
         assert!(config.validate().is_ok());
     }
 
@@ -227,6 +223,12 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+
+        let config = TimeoutConfig {
+            max_channel_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -238,6 +240,7 @@ mod tests {
         assert_eq!(config.signing_timeout(), Duration::from_secs(600));
         assert_eq!(config.network_write_timeout(), Duration::from_secs(5));
         assert_eq!(config.network_read_timeout(), Duration::from_secs(300));
+        assert_eq!(config.pool_acquire_timeout(), Duration::from_secs(30));
         assert_eq!(config.connection_retry_delay(), Duration::from_millis(100));
     }
 
@@ -269,13 +272,5 @@ mod tests {
 
         let high_attempt_delay = config.delay_for_attempt(10);
         assert_eq!(high_attempt_delay, Duration::from_millis(5000));
-    }
-
-    #[test]
-    fn test_gateway_limits_defaults() {
-        let limits = GatewayLimits::default();
-        assert_eq!(limits.default_max_signing_sessions, 100);
-        assert_eq!(limits.max_request_size_bytes, 1024 * 1024);
-        assert!(limits.validate().is_ok());
     }
 }

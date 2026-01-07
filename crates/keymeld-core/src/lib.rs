@@ -1,34 +1,25 @@
-use crate::enclave::EnclaveManager;
 pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
 pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
-use musig::MusigError;
 pub use musig2::{
     secp256k1::PublicKey, AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext,
     PartialSignature, PubNonce, SecNonce, SecondRound,
 };
 use serde::{Deserialize, Serialize};
-pub use session::{
-    KeygenCollectingParticipants, KeygenCompleted, KeygenFailed, KeygenSessionStatus,
-    KeygenStatusKind, ParticipantData, SigningCollectingParticipants, SigningSessionFull,
-    SigningSessionStatus, SigningStatusKind,
-};
-use std::{collections::BTreeMap, string::String, string::ToString, vec::Vec};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, string::String, vec::Vec};
 use thiserror::Error;
 pub use tracing::{debug, error, info, warn};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub type AggregatePublicKey = Vec<u8>;
+// Encrypted aggregate public key as hex-encoded binary format
+pub type AggregatePublicKey = String;
 
-pub mod api;
 pub mod crypto;
-pub mod enclave;
-pub mod encrypted_data;
 pub mod identifiers;
 pub mod logging;
-pub mod musig;
-
-pub mod resilience;
-pub mod session;
+pub mod managed_vsock;
+pub mod protocol;
+pub mod validation;
 
 #[derive(Error, Debug)]
 pub enum KeyMeldError {
@@ -60,18 +51,8 @@ pub enum KeyMeldError {
     InvalidState(String),
     #[error("Validation error: {0}")]
     ValidationError(String),
-}
-
-impl From<MusigError> for KeyMeldError {
-    fn from(error: MusigError) -> Self {
-        KeyMeldError::MuSigError(error.to_string())
-    }
-}
-#[async_trait::async_trait]
-pub trait Advanceable<T>: Send {
-    async fn process(self, enclave_manager: &EnclaveManager) -> Result<T, KeyMeldError>
-    where
-        Self: 'async_trait;
+    #[error("Enclave not ready: {0}")]
+    EnclaveNotReady(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,4 +93,10 @@ pub struct HealthStatus {
     pub enclave_count: u32,
     pub active_enclaves: Vec<EnclaveId>,
     pub version: String,
+}
+
+pub fn hash_message(message: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(message);
+    hasher.finalize().to_vec()
 }

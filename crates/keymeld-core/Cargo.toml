@@ -7,57 +7,42 @@ description = "Core library for MuSig2 signature generation in AWS Nitro Enclave
 license = "MIT"
 
 [dependencies]
-musig2 = { version = "0.3.1", features = ["secp256k1", "rand", "serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode = "1.3.3"
-thiserror = "2.0.16"
-anyhow = "1.0.95"
-async-trait = "0.1.83"
-tokio = { version = "1.47.1", features = ["rt", "macros", "sync", "io-util", "net"] }
-tokio-vsock = "0.5.0"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
-chacha20poly1305 = "0.10.1"
-argon2 = "0.5.3"
-rand = { version = "0.9", default-features = false, features = ["std_rng"] }
-zeroize = { version = "1.8.1", features = ["derive"] }
-sha2 = { version = "0.10", default-features = false }
-hmac = "0.12.1"
-subtle = "2.5.0"
-hkdf = "0.12.4"
-aes-gcm = "0.10.3"
+musig2 = { workspace = true }
 secp256k1 = { workspace = true }
-serde_cbor = "0.11.2"
-hex = "0.4.3"
-aws-config = { version = "1.8.7", optional = true }
-aws-sdk-kms = { version = "1.83.0", optional = true }
-reqwest = { version = "0.12.9", features = ["json", "rustls-tls"], optional = true }
-uuid = { version = "1.11", features = ["v4", "serde"] }
-concurrent-map = "5.0.37"
-dashmap = "6.1.0"
-parking_lot = "0.12"
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "uuid"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_cbor = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "io-util", "net"] }
+tokio-vsock = { workspace = true }
 futures = "0.3.31"
-time = { version = "0.3.44", features = ["serde", "macros", "formatting"] }
-deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
-utoipa = { version = "5.4.0", features = [
-  "axum_extras",
-  "time",
-  "uuid",
-  "macros",
-  "non_strict_integers",
-  "preserve_order",
-  "preserve_path_order",
-] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { workspace = true }
+hex = { workspace = true }
+subtle = "2.5.0"
+uuid = { workspace = true }
+time = { workspace = true }
+dashmap = { workspace = true }
+utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
+sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = ["full"] }
-mockito = "1.6.1"
-tempfile = "3.15.0"
+tokio = { workspace = true }
+mockito = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 default = ["gateway"]
-gateway = ["aws-config", "aws-sdk-kms", "reqwest"]
+gateway = ["sqlite", "openapi"]
 enclave = []
-sqlx = ["dep:sqlx"]
+openapi = ["utoipa"]
+sqlite = ["sqlx"]

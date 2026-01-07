@@ -125,12 +125,9 @@ pub fn init_logging(config: &LoggingConfig) {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             component = component,
             level = config.level,
-            format = config.format.as_deref().unwrap_or("default"),
-            json = config.enable_json.unwrap_or(false),
-            ansi_disabled = config.disable_ansi.unwrap_or(false),
             "Logging initialized"
         );
     });

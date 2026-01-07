@@ -1,10 +1,9 @@
 use keymeld_core::{
-    enclave::{
+    identifiers::{SessionId, UserId},
+    protocol::{
         AttestationError, CryptoError, EnclaveError, InternalError, NonceError, PrivateKeyError,
         SessionError, SigningError, ValidationError,
     },
-    identifiers::UserId,
-    SessionId,
 };
 use thiserror::Error;
 
@@ -56,7 +55,7 @@ pub enum OperationError {
     DuplicateParticipant(UserId),
 }
 
-impl From<OperationError> for keymeld_core::enclave::EnclaveError {
+impl From<OperationError> for keymeld_core::protocol::EnclaveError {
     fn from(err: OperationError) -> Self {
         match err {
             OperationError::InvalidState(msg) => {

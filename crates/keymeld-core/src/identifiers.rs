@@ -8,10 +8,11 @@ use alloc::string::ToString;
 use std::string::ToString;
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
 use uuid::Uuid;
 
-use concurrent_map::Minimum;
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
 
 #[cfg(feature = "enclave")]
 use alloc::{fmt, string::String, vec::Vec};
@@ -20,19 +21,9 @@ use alloc::{fmt, string::String, vec::Vec};
 use std::{fmt, string::String, vec::Vec};
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    ToSchema,
-    Default,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct EnclaveId(u32);
 
 impl EnclaveId {
@@ -57,7 +48,8 @@ impl fmt::Display for EnclaveId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(transparent)]
 pub struct UserId(#[serde(with = "uuid_serde")] Uuid);
 
@@ -166,7 +158,8 @@ impl sqlx::Decode<'_, sqlx::Sqlite> for UserId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(transparent)]
 pub struct SessionId(#[serde(with = "uuid_serde")] Uuid);
 
@@ -247,11 +240,7 @@ impl sqlx::Decode<'_, sqlx::Sqlite> for SessionId {
     }
 }
 
-impl Minimum for SessionId {
-    const MIN: Self = SessionId(Uuid::nil());
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CorrelationId(#[serde(with = "uuid_serde")] Uuid);
 

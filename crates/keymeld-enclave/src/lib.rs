@@ -6,9 +6,12 @@ use keymeld_core::{
 use tracing::info;
 
 pub mod attestation;
+pub mod musig;
 pub mod operations;
 pub mod operator;
+pub mod queue;
 pub mod server;
+pub mod state_dispatch;
 
 pub use operator::EnclaveOperator;
 pub use server::run_until_stopped;
@@ -28,21 +31,29 @@ pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator>
 mod tests {
     use super::*;
 
+    fn init_test() {
+        let _ = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+    }
+
     #[test]
     fn test_enclave_operator_creation() {
+        init_test();
         let enclave_id = EnclaveId::new(1);
         let state = create_enclave_operator(enclave_id).unwrap();
         assert_eq!(state.enclave_id, enclave_id);
-        assert!(!state.get_public_key().is_empty());
+        // Public key is empty until Configure command is called with KMS
+        assert!(state.get_public_key().is_empty());
     }
 
     #[tokio::test]
     async fn test_enclave_status() {
+        init_test();
         let enclave_id = EnclaveId::new(1);
         let state = create_enclave_operator(enclave_id).unwrap();
 
         assert_eq!(state.enclave_id, enclave_id);
-        assert!(!state.get_public_key().is_empty());
+        // Public key is empty until Configure command is called with KMS
+        assert!(state.get_public_key().is_empty());
         assert_eq!(state.sessions.len(), 0);
     }
 

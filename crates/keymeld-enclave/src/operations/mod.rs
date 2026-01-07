@@ -1,9 +1,20 @@
-use keymeld_core::enclave::{EnclaveCommand, EnclaveError};
-
 pub mod context;
+pub mod context_aware_session;
+pub mod enclave_context;
+pub mod keygen_data;
+pub mod session_context;
 pub mod states;
 
-pub use context::EnclaveContext;
+// New exports for the refactored architecture
+pub use context::EnclaveSharedContext;
+pub use context_aware_session::ContextAwareSession;
+pub use keygen_data::{create_signing_musig_from_keygen, KeygenSessionData};
+pub use session_context::{
+    decrypt_coordinator_data_from_enclave, decrypt_session_secret_from_enclave,
+    KeygenSessionContext, SessionContext, SigningSessionContext,
+};
+
+// Re-export states
 pub use states::{
     keygen::DistributingSecrets,
     signing::{
@@ -13,10 +24,6 @@ pub use states::{
     KeygenCompleted, KeygenFailed, KeygenInitialized, OperatorStatus, SessionKind,
     SigningCompleted, SigningFailed, SigningInitialized,
 };
-
-pub trait EnclaveAdvanceable<T> {
-    fn process(self, ctx: &mut EnclaveContext, cmd: &EnclaveCommand) -> Result<T, EnclaveError>;
-}
 
 #[derive(Debug, Clone)]
 pub struct InitConfig {
@@ -28,61 +35,4 @@ pub struct InitConfig {
     pub participants: Vec<keymeld_core::identifiers::UserId>,
     pub expected_participants: Vec<keymeld_core::identifiers::UserId>,
     pub expected_participant_count: usize,
-    pub aggregate_public_key: Vec<u8>,
-    pub is_coordinator: bool,
-    pub coordinator_private_key: Option<Vec<u8>>,
-    pub created_at: std::time::SystemTime,
-}
-
-impl InitConfig {
-    pub fn new_keygen(
-        session_id: keymeld_core::SessionId,
-        session_secret: Option<keymeld_core::SessionSecret>,
-        expected_participants: Vec<keymeld_core::identifiers::UserId>,
-        is_coordinator: bool,
-        coordinator_private_key: Option<Vec<u8>>,
-        aggregate_public_key: Vec<u8>,
-    ) -> Self {
-        Self {
-            session_id,
-            session_secret,
-            message: Vec::new(), // Keygen sessions don't have messages
-            message_hash: Vec::new(),
-            participant_keys: std::collections::BTreeMap::new(),
-            participants: Vec::new(),
-            expected_participants: expected_participants.clone(),
-            expected_participant_count: expected_participants.len(),
-            aggregate_public_key,
-            is_coordinator,
-            coordinator_private_key,
-            created_at: std::time::SystemTime::now(),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_signing(
-        session_id: keymeld_core::SessionId,
-        session_secret: Option<keymeld_core::SessionSecret>,
-        message: Vec<u8>,
-        message_hash: Vec<u8>,
-        expected_participants: Vec<keymeld_core::identifiers::UserId>,
-        is_coordinator: bool,
-        coordinator_private_key: Option<Vec<u8>>,
-        aggregate_public_key: Vec<u8>,
-    ) -> Self {
-        Self {
-            session_id,
-            session_secret,
-            message,
-            message_hash,
-            participant_keys: std::collections::BTreeMap::new(),
-            participants: Vec::new(),
-            expected_participants: expected_participants.clone(),
-            expected_participant_count: expected_participants.len(),
-            aggregate_public_key,
-            is_coordinator,
-            coordinator_private_key,
-            created_at: std::time::SystemTime::now(),
-        }
-    }
 }
