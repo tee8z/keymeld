@@ -176,7 +176,8 @@ jobs:
         run: |
           # Use nix develop to get 'just' command
           # Set IN_NIX_SHELL to signal recipes to skip their internal nix develop wrapper
-          nix develop -c just clean || true
+          # SKIP_BUILD=1 prevents clean.sh from deleting pre-built binaries
+          SKIP_BUILD=1 nix develop -c just clean || true
           IN_NIX_SHELL=1 SKIP_BUILD=1 nix develop -c ${{ matrix.test.command }}
 
       - name: Upload e2e logs on failure

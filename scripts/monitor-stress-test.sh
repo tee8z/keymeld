@@ -7,6 +7,10 @@
 
 set -uo pipefail
 
+# Get the repo root directory (parent of scripts/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 INTERVAL="${1:-5}"
 
 echo "Monitoring stress test (refresh every ${INTERVAL}s)... Press Ctrl+C to stop"
@@ -24,7 +28,7 @@ fi
 
 while true; do
   # Count wallets - check both wallet directories and loaded wallets via RPC
-  wallets_dir=$(ls data/bitcoin/regtest/wallets/ 2>/dev/null | grep -c stress_test 2>/dev/null || echo 0)
+  wallets_dir=$(ls -d "$REPO_ROOT/data/bitcoin/regtest/wallets/stress_test_"* 2>/dev/null | wc -l | tr -d ' ' || echo 0)
   wallets_loaded=$(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 listwallets 2>/dev/null | grep -c stress_test 2>/dev/null || echo 0)
   # Trim whitespace and ensure numeric
   wallets_dir="${wallets_dir//[^0-9]/}"
