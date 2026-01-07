@@ -49,10 +49,12 @@ TESTS_FAILED=0
 cleanup() {
     echo ""
     echo "🧹 Cleaning up services..."
-    pkill -f keymeld-gateway || true
-    pkill -f keymeld-enclave || true
-    pkill -f moto_server || true
-    pkill -f bitcoind || true
+    # Use pgrep -x to match exact process names, avoiding parent shell matches
+    for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
+        pgrep -x "$proc" 2>/dev/null | xargs -r kill 2>/dev/null || true
+    done
+    pkill -x moto_server || true
+    pkill -x bitcoind || true
 }
 trap cleanup EXIT
 
@@ -75,10 +77,14 @@ mkdir -p data logs
 echo "🔌 Starting VSock proxies..."
 QUIET=true ./scripts/vsock-setup.sh start >/dev/null 2>&1 || true
 
-# Build the project
-echo "🔨 Building KeyMeld..."
-cargo build --quiet 2>&1 || { echo "❌ Build failed"; exit 1; }
-echo "✅ Build complete"
+# Build the project (skip if SKIP_BUILD is set and binaries exist)
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld-gateway" ] && [ -f "target/debug/keymeld-enclave" ]; then
+    echo "✅ Using pre-built binaries"
+else
+    echo "🔨 Building KeyMeld..."
+    cargo build --quiet 2>&1 || { echo "❌ Build failed"; exit 1; }
+    echo "✅ Build complete"
+fi
 
 # Start Moto (KMS mock)
 echo "🔐 Starting Moto (KMS mock)..."
@@ -295,7 +301,12 @@ fi
 log_step "Bitcoin regtest environment ready"
 
 log_info "Running MuSig2 demo to test signing with KMS-backed keys..."
-if cargo run --bin keymeld_demo -- plain \
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
+    DEMO_CMD="./target/debug/keymeld_demo"
+else
+    DEMO_CMD="cargo run --bin keymeld_demo --"
+fi
+if $DEMO_CMD plain \
     --config config/example-nix.yaml \
     --amount $TEST_AMOUNT \
     --destination $TEST_DEST >/tmp/keymeld_test_signing.log 2>&1; then
@@ -315,10 +326,10 @@ echo "📋 Test 3: Enclave Restart and Recovery"
 echo "----------------------------------------------"
 
 log_info "Stopping all enclaves..."
-pkill -f keymeld-enclave || true
+pgrep -x keymeld-enclave 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 2
 
-if pgrep -f keymeld-enclave >/dev/null; then
+if pgrep -x keymeld-enclave >/dev/null 2>&1; then
     log_step_error "Failed to stop enclaves"
     exit 1
 else
@@ -369,7 +380,7 @@ log_info "Waiting for gateway to refresh all enclave public key caches..."
 sleep 3
 
 log_info "Running MuSig2 demo after restart to verify keys still work..."
-if cargo run --bin keymeld_demo -- plain \
+if $DEMO_CMD plain \
     --config config/example-nix.yaml \
     --amount $TEST_AMOUNT \
     --destination $TEST_DEST >/tmp/keymeld_test_signing_after_restart.log 2>&1; then
@@ -399,7 +410,12 @@ SESSION_DATA_FILE="/tmp/keymeld_session_test_data.json"
 
 # Step 1: Create keygen sessions (plain and adaptor)
 log_info "Creating keygen sessions for restoration test..."
-if cargo run --bin keymeld_session_test -- keygen \
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_session_test" ]; then
+    SESSION_CMD="./target/debug/keymeld_session_test"
+else
+    SESSION_CMD="cargo run --bin keymeld_session_test --"
+fi
+if $SESSION_CMD keygen \
     --config config/example-nix.yaml \
     --output "$SESSION_DATA_FILE" \
     --amount $TEST_AMOUNT >/tmp/keymeld_session_keygen.log 2>&1; then
@@ -430,10 +446,10 @@ log_info "Completed keygen sessions before restart: $sessions_before"
 
 # Step 2: Restart enclaves to trigger session restoration
 log_info "Stopping all enclaves for session restoration test..."
-pkill -f keymeld-enclave || true
+pgrep -x keymeld-enclave 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 2
 
-if pgrep -f keymeld-enclave >/dev/null; then
+if pgrep -x keymeld-enclave >/dev/null 2>&1; then
     log_step_error "Failed to stop enclaves"
     exit 1
 else
@@ -494,13 +510,13 @@ fi
 # Step 3: Create NEW signing sessions and complete full MuSig2 signing
 log_info "Creating signing sessions with restored keygen and completing full signing..."
 log_info "This will create PSBTs, get approvals, complete MuSig2 signing, and broadcast transactions"
-if cargo run --bin keymeld_session_test -- sign \
+if $SESSION_CMD sign \
     --config config/example-nix.yaml \
     --input "$SESSION_DATA_FILE" >/tmp/keymeld_session_sign.log 2>&1; then
     log_step "Full signing completed with restored sessions"
-    # Extract and display the broadcast transaction IDs
-    plain_txid=$(grep -o "PLAIN.*Transaction broadcast successfully: [a-f0-9]*" /tmp/keymeld_session_sign.log | grep -o "[a-f0-9]\{64\}" | head -1)
-    adaptor_txid=$(grep -o "ADAPTOR.*Transaction broadcast successfully: [a-f0-9]*" /tmp/keymeld_session_sign.log | grep -o "[a-f0-9]\{64\}" | head -1)
+    # Extract and display the broadcast transaction IDs (use || true to avoid failing on no match)
+    plain_txid=$(grep -o "PLAIN.*Transaction broadcast successfully: [a-f0-9]*" /tmp/keymeld_session_sign.log 2>/dev/null | grep -o "[a-f0-9]\{64\}" | head -1 || true)
+    adaptor_txid=$(grep -o "ADAPTOR.*Transaction broadcast successfully: [a-f0-9]*" /tmp/keymeld_session_sign.log 2>/dev/null | grep -o "[a-f0-9]\{64\}" | head -1 || true)
     if [ -n "$plain_txid" ]; then
         log_step "Plain session tx broadcast: $plain_txid"
     fi

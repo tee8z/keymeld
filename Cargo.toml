@@ -7,6 +7,9 @@ members = [
     "examples"]
 resolver = "2"
 
+[workspace.lints.clippy]
+uninlined_format_args = "allow"
+
 [workspace.metadata.crane]
 name = "keymeld"
 

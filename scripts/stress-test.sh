@@ -17,10 +17,14 @@ pkill -9 -f keymeld_demo 2>/dev/null || true
 ./scripts/fund-wallets.sh "$COUNT" 0.00055 50 10
 
 echo ""
-echo "🔨 Building binary..."
-cargo build --bin keymeld_demo >/dev/null 2>&1
 DEMO_BIN="$(pwd)/target/debug/keymeld_demo"
-echo "✅ Binary ready"
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "$DEMO_BIN" ]; then
+    echo "✅ Using pre-built binary"
+else
+    echo "🔨 Building binary..."
+    cargo build --bin keymeld_demo >/dev/null 2>&1
+    echo "✅ Binary ready"
+fi
 
 # Export CMAKE_LIBRARY_PATH so subshells can find libraries
 export LD_LIBRARY_PATH="${CMAKE_LIBRARY_PATH:-}"

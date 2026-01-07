@@ -12,5 +12,10 @@ if [[ "$MODE" != "plain" && "$MODE" != "adaptor" ]]; then
 fi
 
 echo "🎮 Running KeyMeld ${MODE} demo..."
-LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
-    cargo run --bin keymeld_demo -- ${MODE} --config config/example-nix.yaml --amount ${AMOUNT} --destination ${DEST}
+if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
+    LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
+        ./target/debug/keymeld_demo ${MODE} --config config/example-nix.yaml --amount ${AMOUNT} --destination ${DEST}
+else
+    LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
+        cargo run --bin keymeld_demo -- ${MODE} --config config/example-nix.yaml --amount ${AMOUNT} --destination ${DEST}
+fi

@@ -44,3 +44,6 @@ clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

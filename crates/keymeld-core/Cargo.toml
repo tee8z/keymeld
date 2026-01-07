@@ -46,3 +46,6 @@ gateway = ["sqlite", "openapi"]
 enclave = []
 openapi = ["utoipa"]
 sqlite = ["sqlx"]
+
+[lints]
+workspace = true

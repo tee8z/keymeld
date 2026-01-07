@@ -28,10 +28,13 @@ target
 sqlx-data.json
 
 # Configuration files with secrets
-config.toml
+/config.toml
 config.yaml
 .env
 .env.local
+
+# Allow .cargo/config.toml
+!.cargo/config.toml
 
 # Key storage
 keys/*
