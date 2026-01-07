@@ -951,7 +951,10 @@ impl Coordinator {
 
                 match epoch_check_result {
                     Ok(true) => {
-                        warn!("Enclave {} restart detected during health check - marking as unhealthy until epoch stabilizes", enclave_id);
+                        warn!(
+                            "Enclave {} restart detected during health check - restoring sessions",
+                            enclave_id
+                        );
                         // Force immediate cache refresh by invalidating current cache
                         if let Err(e) = self.db.invalidate_enclave_cache(enclave_id.as_u32()).await
                         {
@@ -960,6 +963,35 @@ impl Coordinator {
                                 enclave_id, e
                             );
                         }
+
+                        // Restore sessions for this enclave after restart detection
+                        // This is critical - without restoration, completed keygen sessions
+                        // will be lost and signing will fail with "Session not found"
+                        info!(
+                            "Restoring sessions for restarted enclave {} (via health check)",
+                            enclave_id
+                        );
+                        match self
+                            .enclave_manager
+                            .restore_sessions_for_enclave(&enclave_id, &self.db)
+                            .await
+                        {
+                            Ok(stats) => {
+                                if stats.keygen_restored > 0 || stats.signing_reset > 0 {
+                                    info!(
+                                        "Restored sessions for enclave {} (health check): {} keygen, {} signing reset",
+                                        enclave_id, stats.keygen_restored, stats.signing_reset
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to restore sessions for enclave {} (health check): {}",
+                                    enclave_id, e
+                                );
+                            }
+                        }
+
                         // Mark as unhealthy until the epoch stabilizes
                         (false, None, None, None, None, None)
                     }
