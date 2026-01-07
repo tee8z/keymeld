@@ -38,10 +38,43 @@ if (( $(echo "$balance < $required" | bc -l) )); then
     echo "   ⚠️  Coordinator wallet balance ($balance BTC) insufficient for funding."
     echo "   ⚠️  Required: $required BTC. Generating initial funds..."
 
+    # Check current block height to determine if halvings have depleted block rewards
+    # Regtest halves every 150 blocks, so after ~3000 blocks the reward is negligible
+    block_height=$($BTC_CLI getblockcount 2>/dev/null || echo "0")
+    halvings=$((block_height / 150))
+
+    if [[ $halvings -ge 20 ]]; then
+        echo "   ❌ ERROR: Block reward has halved $halvings times (height: $block_height)"
+        echo "   ❌ Current block reward is too small to fund wallets."
+        echo "   ❌ Please run 'just clean' to reset the regtest chain, then retry."
+        exit 1
+    fi
+
     # Generate some coins for the coordinator
+    # Need 101 blocks for first coinbase to mature (100 confirmations required)
     addr=$($BTC_CLI -rpcwallet=keymeld_coordinator getnewaddress)
     $BTC_CLI generatetoaddress 101 $addr >/dev/null
-    echo "   ✓ Generated initial funds for coordinator wallet"
+
+    # Wait for wallet to update balance (can take a moment after block generation)
+    sleep 1
+
+    # Verify balance is now sufficient
+    new_balance=$($BTC_CLI -rpcwallet=keymeld_coordinator getbalance 2>/dev/null || echo "0")
+    if (( $(echo "$new_balance < $required" | bc -l) )); then
+        echo "   ⚠️  Balance still insufficient ($new_balance BTC), generating more blocks..."
+        $BTC_CLI generatetoaddress 50 $addr >/dev/null
+        sleep 1
+        new_balance=$($BTC_CLI -rpcwallet=keymeld_coordinator getbalance 2>/dev/null || echo "0")
+    fi
+
+    # Final check - if still not enough, the chain needs reset
+    if (( $(echo "$new_balance < $required" | bc -l) )); then
+        echo "   ❌ ERROR: Could not generate sufficient funds ($new_balance BTC < $required BTC)"
+        echo "   ❌ Block rewards may be depleted. Run 'just clean' to reset the regtest chain."
+        exit 1
+    fi
+
+    echo "   ✓ Generated initial funds for coordinator wallet (balance: $new_balance BTC)"
 fi
 
 CREATION_PARALLELISM="${4:-10}"
