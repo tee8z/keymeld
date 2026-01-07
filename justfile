@@ -66,20 +66,32 @@ quickstart:
     set -euo pipefail
     echo "🚀 Starting KeyMeld quickstart..."
     QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
+
+    # Clean first (respects SKIP_BUILD to preserve pre-built binaries)
+    ./scripts/clean.sh
+
+    # Build unless SKIP_BUILD is set and binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ]; then
+        echo "Building binaries..."
+        if [ -n "${IN_NIX_SHELL:-}" ]; then
+            cargo build
+        else
+            nix develop -c cargo build
+        fi
+    else
+        echo "Using pre-built binaries (SKIP_BUILD=1)"
+    fi
+
     # If already in nix shell, run directly; otherwise wrap with nix develop
     if [ -n "${IN_NIX_SHELL:-}" ]; then
-        ./scripts/clean.sh && \
         QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
-        ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
         ./scripts/start-services.sh && \
         ./scripts/run-demo.sh plain 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80
     else
         nix develop -c bash -c '\
-            ./scripts/clean.sh && \
             QUIET=true ./scripts/vsock-setup.sh start && \
             ./scripts/setup-regtest.sh && \
-            ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
             ./scripts/start-services.sh && \
             ./scripts/run-demo.sh plain 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
         '
@@ -92,20 +104,32 @@ quickstart-adaptors:
     echo "🚀 Starting KeyMeld adaptor signatures quickstart..."
     echo "🔧 Setting up VSock (CI-friendly, no password prompts)..."
     QUIET=true ./scripts/setup-vsock-sudoers.sh || echo "⚠️  VSock setup failed, continuing with fallback mode..."
+
+    # Clean first (respects SKIP_BUILD to preserve pre-built binaries)
+    ./scripts/clean.sh
+
+    # Build unless SKIP_BUILD is set and binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ]; then
+        echo "Building binaries..."
+        if [ -n "${IN_NIX_SHELL:-}" ]; then
+            cargo build
+        else
+            nix develop -c cargo build
+        fi
+    else
+        echo "Using pre-built binaries (SKIP_BUILD=1)"
+    fi
+
     # If already in nix shell, run directly; otherwise wrap with nix develop
     if [ -n "${IN_NIX_SHELL:-}" ]; then
-        ./scripts/clean.sh && \
         QUIET=true ./scripts/vsock-setup.sh start && \
         ./scripts/setup-regtest.sh && \
-        ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
         ./scripts/start-services.sh && \
         ./scripts/run-demo.sh adaptor 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80
     else
         nix develop -c bash -c '\
-            ./scripts/clean.sh && \
             QUIET=true ./scripts/vsock-setup.sh start && \
             ./scripts/setup-regtest.sh && \
-            ([ -n "${SKIP_BUILD:-}" ] && [ -f target/debug/keymeld-gateway ] || cargo build) && \
             ./scripts/start-services.sh && \
             ./scripts/run-demo.sh adaptor 50000 bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80 \
         '
