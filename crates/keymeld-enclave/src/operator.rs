@@ -873,6 +873,7 @@ impl EnclaveOperator {
                     signing_session_id: cmd.signing_session_id.clone(),
                     keygen_session_id: cmd.keygen_session_id.clone(),
                     nonces,
+                    batch_nonces: vec![], // Single message mode
                 })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(
@@ -1009,7 +1010,10 @@ impl EnclaveOperator {
                     state.session_id()
                 );
 
-                Ok(PartialSignatureResponse { partial_signatures })
+                Ok(PartialSignatureResponse {
+                    partial_signatures,
+                    batch_partial_signatures: vec![], // Single message mode
+                })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(
                 "Partial signature not available in current signing state".to_string(),
@@ -1070,9 +1074,10 @@ impl EnclaveOperator {
                 Ok(FinalSignatureResponse {
                     signing_session_id: signing_session_id.clone(),
                     keygen_session_id: keygen_session_id.clone(),
-                    encrypted_final_signature,
                     participant_count,
+                    encrypted_final_signature,
                     encrypted_adaptor_signatures,
+                    batch_results: vec![], // Single message mode
                 })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(

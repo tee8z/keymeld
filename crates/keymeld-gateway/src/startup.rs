@@ -130,6 +130,10 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             SingleSigningStatus,
             SingleSigningStatusResponse,
             keymeld_sdk::KeyId,
+            // Batch signing types
+            keymeld_sdk::SigningBatchItem,
+            keymeld_sdk::BatchItemResult,
+            keymeld_sdk::BatchItemApproval,
         )
     ),
     tags(

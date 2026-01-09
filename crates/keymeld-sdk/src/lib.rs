@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
@@ -113,12 +114,19 @@ pub struct KeygenSessionStatusResponse {
 pub struct CreateSigningSessionRequest {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
+    pub timeout_secs: u64,
+
+    // Single message fields (backward compat, used if batch_items is empty)
+    #[serde(default)]
     pub message_hash: Vec<u8>,
     pub encrypted_message: Option<String>,
-    pub timeout_secs: u64,
     /// Optional adaptor signature configs. Empty string for regular signatures.
     #[serde(default)]
     pub encrypted_adaptor_configs: String,
+
+    // Batch of messages (takes precedence if non-empty)
+    #[serde(default)]
+    pub batch_items: Vec<SigningBatchItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,14 +149,20 @@ pub struct SigningSessionStatusResponse {
     pub status: SigningStatusKind,
     pub participants_registered: usize,
     pub expected_participants: usize,
-    pub final_signature: Option<String>,
     pub expires_at: u64,
     #[serde(default)]
     pub participants_requiring_approval: Vec<UserId>,
     #[serde(default)]
     pub approved_participants: Vec<UserId>,
+
+    // Single signature fields (backward compat / single-item batch)
+    pub final_signature: Option<String>,
     #[serde(default)]
     pub adaptor_signatures: String,
+
+    // Batch results (populated for batch sessions)
+    #[serde(default)]
+    pub batch_results: Vec<BatchItemResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +444,51 @@ pub struct SingleSigningStatusResponse {
     pub error_message: Option<String>,
 }
 
+// ============================================================================
+// Batch Signing API Types
+// ============================================================================
+
+/// A single item in a batch signing request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SigningBatchItem {
+    /// Unique identifier for this batch item (for correlation)
+    pub batch_item_id: Uuid,
+    /// The 32-byte message hash to sign
+    pub message_hash: Vec<u8>,
+    /// Optional encrypted message (for privacy)
+    pub encrypted_message: Option<String>,
+    /// Optional adaptor configuration for this specific message
+    /// Empty string or None for regular signature
+    pub encrypted_adaptor_configs: Option<String>,
+}
+
+/// Result for a single batch item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct BatchItemResult {
+    pub batch_item_id: Uuid,
+    /// The final signature (if successful)
+    pub signature: Option<String>,
+    /// Adaptor signature results (if adaptor configs provided)
+    pub adaptor_signatures: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
+/// Per-item approval for batch signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct BatchItemApproval {
+    pub batch_item_id: Uuid,
+    /// Sign(auth_privkey, batch_item_id || message_hash || timestamp)
+    pub signature: Vec<u8>,
+    pub timestamp: u64,
+}
+
 pub fn validate_reserve_keygen_session_request(
     request: &ReserveKeygenSessionRequest,
 ) -> Result<(), keymeld_core::KeyMeldError> {
@@ -490,16 +549,78 @@ pub fn validate_register_keygen_participant_request(
 pub fn validate_create_signing_session_request(
     request: &CreateSigningSessionRequest,
 ) -> Result<(), keymeld_core::KeyMeldError> {
-    validation::Validator::validate_vec_length(
-        &request.message_hash,
-        Some(32),
-        Some(32),
-        "Message hash",
-    )?;
-    if let Some(encrypted_message) = &request.encrypted_message {
-        validation::Validator::validate_non_empty_string(encrypted_message, "Encrypted message")?;
-    }
     validation::Validator::validate_timeout_range(Some(request.timeout_secs))?;
+
+    // If batch_items is non-empty, validate batch mode
+    if !request.batch_items.is_empty() {
+        validate_batch_signing_request(&request.batch_items)?;
+    } else {
+        // Single message mode (backward compat)
+        validation::Validator::validate_vec_length(
+            &request.message_hash,
+            Some(32),
+            Some(32),
+            "Message hash",
+        )?;
+        if let Some(encrypted_message) = &request.encrypted_message {
+            validation::Validator::validate_non_empty_string(
+                encrypted_message,
+                "Encrypted message",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Maximum number of items allowed in a batch signing request
+pub const MAX_BATCH_SIZE: usize = 100;
+
+pub fn validate_batch_signing_request(
+    batch_items: &[SigningBatchItem],
+) -> Result<(), keymeld_core::KeyMeldError> {
+    use std::collections::HashSet;
+
+    // Validate batch size
+    if batch_items.is_empty() {
+        return Err(keymeld_core::KeyMeldError::ValidationError(
+            "Batch items cannot be empty".to_string(),
+        ));
+    }
+    if batch_items.len() > MAX_BATCH_SIZE {
+        return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+            "Batch size {} exceeds maximum of {}",
+            batch_items.len(),
+            MAX_BATCH_SIZE
+        )));
+    }
+
+    // Validate unique batch item IDs
+    let mut seen_ids = HashSet::new();
+    for item in batch_items {
+        if !seen_ids.insert(item.batch_item_id) {
+            return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+                "Duplicate batch_item_id: {}",
+                item.batch_item_id
+            )));
+        }
+
+        // Validate each item's message hash
+        validation::Validator::validate_vec_length(
+            &item.message_hash,
+            Some(32),
+            Some(32),
+            &format!("Message hash for batch item {}", item.batch_item_id),
+        )?;
+
+        // Validate encrypted message if present
+        if let Some(encrypted_message) = &item.encrypted_message {
+            validation::Validator::validate_non_empty_string(
+                encrypted_message,
+                &format!("Encrypted message for batch item {}", item.batch_item_id),
+            )?;
+        }
+    }
 
     Ok(())
 }

@@ -263,10 +263,11 @@ async fn test_signing_session_with_adaptors(
     let request = CreateSigningSessionRequest {
         signing_session_id: signing_session_id.clone(),
         keygen_session_id: keygen_session_id.clone(),
+        timeout_secs: 1800,
         message_hash: sighash.to_vec(),
         encrypted_message: Some(encrypted_message),
-        timeout_secs: 1800,
         encrypted_adaptor_configs,
+        batch_items: vec![], // Single message mode
     };
 
     let session_signature = test.generate_session_signature(keygen_session_id)?;

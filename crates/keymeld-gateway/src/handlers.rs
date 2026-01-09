@@ -1016,11 +1016,12 @@ pub async fn get_signing_status(
         status,
         participants_registered: participant_count,
         expected_participants,
-        final_signature,
         expires_at,
         participants_requiring_approval,
         approved_participants,
+        final_signature,
         adaptor_signatures,
+        batch_results: vec![], // Single message mode for now
     };
 
     Ok(Json(response))
@@ -1904,10 +1905,11 @@ mod tests {
         let request = CreateSigningSessionRequest {
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
+            timeout_secs: 3600,
             message_hash: vec![0u8; 32],
             encrypted_message: Some("test_message".to_string()),
-            timeout_secs: 3600,
             encrypted_adaptor_configs: mock_encrypted_hex.clone(),
+            batch_items: vec![],
         };
 
         let request_json = serde_json::to_string(&request).expect("Should serialize request");
@@ -1922,10 +1924,11 @@ mod tests {
         let request = CreateSigningSessionRequest {
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
+            timeout_secs: 3600,
             message_hash: vec![0u8; 32],
             encrypted_message: None,
-            timeout_secs: 3600,
             encrypted_adaptor_configs: String::new(),
+            batch_items: vec![],
         };
 
         assert!(request.encrypted_adaptor_configs.is_empty());

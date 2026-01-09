@@ -745,10 +745,50 @@ pub struct SigningApproval {
     /// The auth public key to verify the signature against
     /// Included so the enclave can verify independently without trusting stored state
     pub auth_pubkey: Vec<u8>,
-    /// Signature of (message_hash || signing_session_id || timestamp) with auth_privkey
-    pub signature: Vec<u8>,
+    /// Session-level signature (optional if per_item_approvals provided)
+    /// Signature of (signing_session_id || timestamp) with auth_privkey
+    #[serde(default)]
+    pub signature: Option<Vec<u8>>,
     /// Timestamp used in the signature
     pub timestamp: u64,
+    /// Per-item approvals (optional, takes precedence if provided)
+    #[serde(default)]
+    pub per_item_approvals: Vec<BatchItemApproval>,
+}
+
+/// Per-item approval for batch signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemApproval {
+    pub batch_item_id: Uuid,
+    /// Sign(auth_privkey, batch_item_id || message_hash || timestamp)
+    pub signature: Vec<u8>,
+    pub timestamp: u64,
+}
+
+// ============================================================================
+// Batch Signing Types
+// ============================================================================
+
+/// A single item in a batch signing session (enclave-level)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveBatchItem {
+    pub batch_item_id: Uuid,
+    /// Encrypted message for this batch item
+    pub encrypted_message: String,
+    /// Optional adaptor configuration for this specific message
+    pub encrypted_adaptor_configs: Option<String>,
+}
+
+/// Result for a single batch item from the enclave
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveBatchResult {
+    pub batch_item_id: Uuid,
+    /// Encrypted final signature (if successful)
+    pub encrypted_final_signature: Option<String>,
+    /// Encrypted adaptor signatures (if adaptor configs provided)
+    pub encrypted_adaptor_signatures: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -757,15 +797,23 @@ pub struct InitSigningSessionCommand {
     pub signing_session_id: SessionId,
     /// List of user IDs to initialize on this enclave
     pub user_ids: Vec<UserId>,
-    pub encrypted_message: String,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
     pub expected_participant_count: usize,
-    pub encrypted_adaptor_configs: Option<String>,
     /// Approval signatures from users who require signing approval
     /// Enclave verifies these against stored auth_pubkey before proceeding
     #[serde(default)]
     pub approval_signatures: Vec<SigningApproval>,
+
+    // Single message fields (backward compat, used if batch_items is empty)
+    #[serde(default)]
+    pub encrypted_message: String,
+    #[serde(default)]
+    pub encrypted_adaptor_configs: Option<String>,
+
+    // Batch of messages (takes precedence if non-empty)
+    #[serde(default)]
+    pub batch_items: Vec<EnclaveBatchItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -773,7 +821,13 @@ pub struct DistributeNoncesCommand {
     pub signing_session_id: SessionId,
     /// Vec of (user_id, encrypted_nonce_data_hex)
     /// Each nonce is encrypted with session secret using binary hex format (EncryptedData::to_hex)
+    /// For single-message sessions (backward compat)
+    #[serde(default)]
     pub nonces: Vec<(UserId, String)>,
+    /// Batch nonces: Vec of (user_id, BTreeMap<batch_item_id, encrypted_nonce_data_hex>)
+    /// For batch sessions
+    #[serde(default)]
+    pub batch_nonces: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -781,7 +835,13 @@ pub struct FinalizeSignatureCommand {
     pub signing_session_id: SessionId,
     /// Vec of (user_id, encrypted_signature_data_hex)
     /// Each signature is encrypted with session secret using binary hex format (EncryptedData::to_hex)
+    /// For single-message sessions (backward compat)
+    #[serde(default)]
     pub partial_signatures: Vec<(UserId, String)>,
+    /// Batch partial signatures: Vec of (user_id, BTreeMap<batch_item_id, encrypted_signature_data_hex>)
+    /// For batch sessions
+    #[serde(default)]
+    pub batch_partial_signatures: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 /// Participant data for keygen registration including auth info for signing approval
@@ -969,7 +1029,13 @@ pub struct NoncesResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     /// Vec of (user_id, encrypted_nonce_data_hex) for all users initialized on this enclave
+    /// For single-message sessions (backward compat)
+    #[serde(default)]
     pub nonces: Vec<(UserId, String)>,
+    /// Batch nonces: Vec of (user_id, BTreeMap<batch_item_id, encrypted_nonce_data_hex>)
+    /// For batch sessions
+    #[serde(default)]
+    pub batch_nonces: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -988,18 +1054,32 @@ pub enum NonceData {
 pub struct PartialSignatureResponse {
     /// Vec of (user_id, encrypted_signature_data_hex)
     /// Each signature is encrypted with session secret using binary hex format (EncryptedData::to_hex)
+    /// For single-message sessions (backward compat)
+    #[serde(default)]
     pub partial_signatures: Vec<(UserId, String)>,
+    /// Batch partial signatures: Vec of (user_id, BTreeMap<batch_item_id, encrypted_signature_data_hex>)
+    /// For batch sessions
+    #[serde(default)]
+    pub batch_partial_signatures: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalSignatureResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    /// Encrypted final signature as hex-encoded binary format (EncryptedData::to_hex)
-    pub encrypted_final_signature: String,
     pub participant_count: usize,
+
+    // Single signature fields (backward compat)
+    /// Encrypted final signature as hex-encoded binary format (EncryptedData::to_hex)
+    #[serde(default)]
+    pub encrypted_final_signature: String,
     /// Encrypted adaptor signatures as hex-encoded binary format (EncryptedData::to_hex)
+    #[serde(default)]
     pub encrypted_adaptor_signatures: Option<String>,
+
+    // Batch results (populated for batch sessions)
+    #[serde(default)]
+    pub batch_results: Vec<EnclaveBatchResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1228,15 +1228,18 @@ impl EnclaveManager {
                     keygen_session_id: params.keygen_session_id.clone(),
                     signing_session_id: params.signing_session_id.clone(),
                     user_ids: user_ids.clone(),
-                    encrypted_message: params.encrypted_message.clone(),
                     encrypted_taproot_tweak: params.encrypted_taproot_tweak.clone(),
                     expected_participant_count: params.participants.len(),
+                    approval_signatures: vec![], // TODO: Pass approval signatures from request
+                    // Single message fields (backward compat)
+                    encrypted_message: params.encrypted_message.clone(),
                     encrypted_adaptor_configs: if params.encrypted_adaptor_configs.is_empty() {
                         None
                     } else {
                         Some(params.encrypted_adaptor_configs.clone())
                     },
-                    approval_signatures: vec![], // TODO: Pass approval signatures from request
+                    // Batch items (empty for now - single message mode)
+                    batch_items: vec![],
                 };
 
                 let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1314,6 +1317,7 @@ impl EnclaveManager {
                 let distribute_cmd = DistributeNoncesCommand {
                     signing_session_id: signing_session_id.clone(),
                     nonces: nonces_vec.clone(),
+                    batch_nonces: vec![], // Single message mode
                 };
 
                 let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1392,6 +1396,7 @@ impl EnclaveManager {
         let finalize_cmd = FinalizeSignatureCommand {
             signing_session_id: signing_session_id.clone(),
             partial_signatures: partial_signatures_vec,
+            batch_partial_signatures: vec![], // Single message mode
         };
 
         let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
