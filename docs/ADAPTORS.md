@@ -57,10 +57,15 @@ POST /api/v1/signing
 {
   "signing_session_id": "uuid-v7",
   "keygen_session_id": "uuid-v7",
-  "message_hash": [1,2,3,...],
-  "encrypted_message": "hex-encoded-message",
   "timeout_secs": 1800,
-  "encrypted_adaptor_configs": "hex-encoded-encrypted-json"
+  "batch_items": [
+    {
+      "batch_item_id": "uuid-v7",
+      "message_hash": [32 bytes],
+      "encrypted_message": "hex-encoded",
+      "encrypted_adaptor_configs": "hex-encoded-encrypted-json"
+    }
+  ]
 }
 ```
 
@@ -69,11 +74,17 @@ Client encrypts adaptor configs using session secret before sending.
 ### Status Response
 
 ```json
-GET /api/v1/signing/{id}/status
+GET /api/v1/signing/{id}/status/{user_id}
 {
-  "status": "Completed",
-  "final_signature": "hex-encoded-encrypted-signature",
-  "adaptor_signatures": "hex-encoded-encrypted-adaptor-results"
+  "status": "completed",
+  "batch_results": [
+    {
+      "batch_item_id": "uuid-v7",
+      "signature": "hex-encrypted",
+      "adaptor_signatures": [...],
+      "error": null
+    }
+  ]
 }
 ```
 
