@@ -39,6 +39,7 @@ use utoipa::OpenApi;
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
+    decompression::RequestDecompressionLayer,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -456,7 +457,10 @@ impl Application {
             .with_state(state);
 
         if config.server.enable_compression {
+            // Response compression (gzip responses when client sends Accept-Encoding: gzip)
             app = app.layer(CompressionLayer::new());
+            // Request decompression (decompress requests with Content-Encoding: gzip)
+            app = app.layer(RequestDecompressionLayer::new().gzip(true));
         }
 
         if config.server.enable_cors {
