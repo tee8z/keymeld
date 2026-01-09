@@ -148,8 +148,16 @@ impl Initialized {
                 )))
             })?;
 
-            // Parse the signature
-            let signature = Signature::from_compact(&approval.signature).map_err(|e| {
+            // Parse the signature (session-level approval)
+            // Note: For batch signing with per-item approvals, this would be None
+            // and we'd verify per_item_approvals instead. For now, require session-level.
+            let signature_bytes = approval.signature.as_ref().ok_or_else(|| {
+                EnclaveError::Validation(ValidationError::Other(format!(
+                    "Missing session-level approval signature for user {}",
+                    user_id
+                )))
+            })?;
+            let signature = Signature::from_compact(signature_bytes).map_err(|e| {
                 EnclaveError::Validation(ValidationError::Other(format!(
                     "Invalid approval signature format for user {}: {}",
                     user_id, e
