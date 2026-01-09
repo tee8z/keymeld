@@ -47,6 +47,7 @@ KeyMeld's approach involves several security trade-offs compared to purely local
 - **Corporate treasury management**: Multi-signature spending from company funds
 - **Insurance payouts**: Multi-party approval for claim settlements
 - **Escrow services**: Trustless multi-party transaction coordination
+- **Bitcoin trust funds**: Trustees managing bitcoin held in trust with multi-party approval requirements
 
 ### Prerequisites
 
@@ -108,6 +109,7 @@ just gateway-aws    # [Production] Start gateway
 - **Session Coordinator**: Automatic advancement through MuSig2 states
 - **Database**: SQLite storage for encrypted session data
 - **Session-Specific Auth**: HKDF-derived authentication keys for scalable, privacy-preserving authorization
+- **Single-Signer Support**: Import and manage individual keys for non-MuSig signing
 
 ## 2-Phase MuSig2 Workflow
 
@@ -251,6 +253,174 @@ just demo-adaptors-and        # "And" logic adaptor only
 just demo-adaptors-or         # "Or" logic adaptor only
 just demo-adaptors-only       # Skip regular signing, adaptor only
 ```
+
+## Single-Signer Mode
+
+KeyMeld supports **single-signer key management** alongside MuSig2, allowing users to import their own private keys and sign transactions without multi-party coordination.
+
+### Use Cases
+- **Personal wallet signing**: Sign transactions with your own imported key
+- **Key backup**: Store keys securely in enclaves with hardware-level isolation
+- **Hybrid workflows**: Combine single-signer and MuSig2 operations
+- **Key migration**: Import existing keys to benefit from enclave security
+
+### Single-Signer Workflow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as Gateway
+    participant E as Enclave
+
+    Note over U,E: KEY IMPORT FLOW
+    U->>G: POST /keys/reserve<br/>user_id
+    G-->>U: key_id, enclave_id, enclave_public_key
+
+    Note over U: Generate auth keypair<br/>ECIES encrypt private key to enclave
+    U->>G: POST /keys/import + X-User-Signature<br/>key_id, encrypted_private_key, auth_pubkey
+    G-->>U: import queued
+
+    loop Poll for completion
+        U->>G: GET /keys/{user_id}/{key_id}/status<br/>+ X-User-Signature
+        G-->>U: status (pending/completed)
+    end
+
+    Note over U,E: SIGNING FLOW
+    U->>G: POST /sign/single + X-User-Signature<br/>key_id, encrypted_message
+    G-->>U: signing_session_id
+
+    loop Poll for signature
+        U->>G: GET /sign/single/{session_id}/status/{user_id}<br/>+ X-User-Signature
+        G-->>U: status, encrypted_signature (when complete)
+    end
+```
+
+### Single-Signer API Endpoints
+
+**Key Management:**
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/keys/reserve` | None | Reserve key slot, get assigned enclave |
+| `POST /api/v1/keys/import` | X-User-Signature | Import encrypted private key (signature validates auth_pubkey ownership) |
+| `GET /api/v1/keys/{user_id}?key_id=...` | X-User-Signature | List all keys for user (authenticate with any owned key) |
+| `GET /api/v1/keys/{user_id}/{key_id}/status` | X-User-Signature | Check key import status |
+| `DELETE /api/v1/keys/{user_id}/{key_id}` | X-User-Signature | Delete a key |
+| `POST /api/v1/keys/{user_id}/keygen/{session_id}` | Session | Store key from completed keygen |
+
+**Single-Signer Signing:**
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/sign/single` | X-User-Signature | Create single-signer signing session |
+| `GET /api/v1/sign/single/{session_id}/status/{user_id}` | X-User-Signature | Check signing status |
+
+### X-User-Signature Authentication
+
+Format: `nonce_hex:signature_hex`
+
+The signature is ECDSA over `SHA256(scope_id || user_id || nonce)` using the auth private key:
+- `scope_id`: The key_id being accessed (e.g., `"01234567-89ab-cdef-..."`)
+- `user_id`: Your user ID
+- `nonce`: Random 16+ bytes (prevents replay attacks)
+
+```python
+# Example signature generation
+import hashlib
+from secp256k1 import PrivateKey
+
+nonce = os.urandom(16)
+message = hashlib.sha256(key_id.encode() + user_id.encode() + nonce).digest()
+signature = auth_private_key.ecdsa_sign(message)
+header = f"{nonce.hex()}:{signature.hex()}"
+```
+
+### Key Import Example
+
+```bash
+# 1. Reserve a key slot (no auth required)
+curl -X POST http://localhost:8080/api/v1/keys/reserve \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "your-user-id"}'
+
+# Response: {"key_id": "...", "enclave_id": 1, "enclave_public_key": "02..."}
+
+# 2. Generate an auth keypair and encrypt your private key to the enclave using ECIES
+# (done client-side using the enclave_public_key)
+
+# 3. Import the encrypted key (signature proves you own the auth keypair)
+curl -X POST http://localhost:8080/api/v1/keys/import \
+  -H "Content-Type: application/json" \
+  -H "X-User-Signature: ${NONCE}:${SIGNATURE}" \
+  -d '{
+    "key_id": "your-key-id",
+    "user_id": "your-user-id",
+    "encrypted_private_key": "hex-ecies-encrypted-key",
+    "auth_pubkey": [33-byte-compressed-auth-pubkey],
+    "enclave_public_key": "02..."
+  }'
+
+# 4. Poll for import completion
+curl http://localhost:8080/api/v1/keys/your-user-id/your-key-id/status \
+  -H "X-User-Signature: ${NONCE}:${SIGNATURE}"
+```
+
+### Single-Signer Signing Example
+
+```bash
+# 1. Create signing session
+curl -X POST http://localhost:8080/api/v1/sign/single \
+  -H "Content-Type: application/json" \
+  -H "X-User-Signature: ${NONCE}:${SIGNATURE}" \
+  -d '{
+    "user_id": "your-user-id",
+    "key_id": "your-key-id",
+    "encrypted_message": "hex-encrypted-message",
+    "signature_type": "schnorr_bip340",
+    "encrypted_session_secret": "hex-ecies-encrypted",
+    "approval_signature": "hex-signature",
+    "approval_timestamp": 1234567890
+  }'
+
+# 2. Poll for signature
+curl http://localhost:8080/api/v1/sign/single/session-id/status/your-user-id \
+  -H "X-User-Signature: ${NONCE}:${SIGNATURE}"
+
+# Response when complete:
+# {"status": "Completed", "encrypted_signature": "hex-encrypted-signature"}
+```
+
+### Signature Types
+
+- **`ecdsa`**: Standard ECDSA signature (for P2WPKH, P2PKH transactions)
+- **`schnorr`**: BIP-340 Schnorr signature (for P2TR Taproot transactions)
+
+### Storing Keys from Keygen
+
+After completing a MuSig2 keygen session, participants can store their key material for later single-signer use:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/keys/your-user-id/keygen/completed-keygen-session-id \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Signature: ${NONCE}:${SIGNATURE}" \
+  -d '{
+    "key_id": "new-key-id-for-stored-key"
+  }'
+```
+
+This allows participants to use their keygen-derived keys for independent signing operations.
+
+### Demo
+
+```bash
+# Run single-signer end-to-end test
+just demo-single-signer
+```
+
+The demo performs:
+1. Key slot reservation
+2. Private key import (ECIES encrypted)
+3. P2WPKH transaction signing (ECDSA)
+4. P2TR transaction signing (Schnorr)
+5. Key deletion
 
 ## API
 
@@ -704,6 +874,13 @@ graph TD
 - **Client-Side Encryption**: All adaptor data encrypted before transmission using session secrets
 - **Automatic Processing**: Adaptor signatures generated automatically after regular MuSig2 completion
 - **Smart Contract Ready**: Enables atomic swaps, conditional payments, and advanced contract patterns
+
+### Single-Signer Key Management
+- **Key Import**: Import existing private keys encrypted to specific enclaves
+- **Key Storage from Keygen**: Store keys generated during MuSig2 keygen for later single-signer use
+- **ECDSA & Schnorr Signing**: Sign messages with imported keys using ECDSA or Schnorr signatures
+- **Approval Validation**: Optional approval signature requirement for single-signer operations
+- **Key Lifecycle**: Full key management with list, status check, and delete operations
 
 ### ECIES Encryption
 - All private keys encrypted to specific enclaves using ECIES

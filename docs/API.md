@@ -20,6 +20,24 @@
 | `POST /api/v1/signing/{signing_session_id}/approve/{user_id}` | X-User-Signature | Approve signing (if required) |
 | `GET /api/v1/signing/{signing_session_id}/status/{user_id}` | X-User-Signature | Check signing progress |
 
+### Single-Signer Key Management
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/keys/reserve` | None | Reserve key slot, get assigned enclave |
+| `POST /api/v1/keys/import` | X-User-Signature | Import encrypted private key (validates auth_pubkey ownership) |
+| `GET /api/v1/keys/{user_id}?key_id=...` | X-User-Signature | List all keys for user |
+| `GET /api/v1/keys/{user_id}/{key_id}/status` | X-User-Signature | Check key import/store status |
+| `DELETE /api/v1/keys/{user_id}/{key_id}` | X-User-Signature | Delete a key |
+| `POST /api/v1/keys/{user_id}/keygen/{session_id}` | X-Session-Signature | Store key from completed keygen |
+
+### Single-Signer Signing
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/sign/single` | X-User-Signature | Create single-signer signing session |
+| `GET /api/v1/sign/single/{session_id}/status/{user_id}` | X-User-Signature | Check signing status |
+
 ### Utility
 
 | Endpoint | Auth | Description |
@@ -122,19 +140,146 @@ X-User-Signature: nonce:signature
 
 Response includes `final_signature` when complete.
 
+## Single-Signer Workflow
+
+### 1. Reserve Key Slot
+
+```
+POST /api/v1/keys/reserve
+
+{
+  "user_id": "uuid-v7"
+}
+```
+
+Response:
+```json
+{
+  "key_id": "uuid-v7",
+  "enclave_id": 1,
+  "enclave_public_key": "02abc123...",
+  "enclave_key_epoch": 1
+}
+```
+
+### 2. Import Key
+
+Generate an auth keypair and encrypt your private key to the enclave using ECIES.
+The X-User-Signature proves you own the auth keypair before it's stored.
+
+```
+POST /api/v1/keys/import
+X-User-Signature: nonce:signature
+
+{
+  "key_id": "uuid-v7",
+  "user_id": "uuid-v7",
+  "encrypted_private_key": "hex-ecies-encrypted",
+  "auth_pubkey": [33 bytes compressed auth pubkey],
+  "enclave_public_key": "02abc123..."
+}
+```
+
+### 3. Check Key Status
+
+```
+GET /api/v1/keys/{user_id}/{key_id}/status
+X-User-Signature: nonce:signature
+```
+
+Response:
+```json
+{
+  "key_id": "uuid-v7",
+  "user_id": "uuid-v7",
+  "status": "completed",
+  "error_message": null
+}
+```
+
+Statuses: `pending`, `processing`, `completed`, `failed`
+
+### 4. List User Keys
+
+```
+GET /api/v1/keys/{user_id}?key_id={key_id_for_auth}
+X-User-Signature: nonce:signature
+```
+
+### 5. Create Single Signing Session
+
+```
+POST /api/v1/sign/single
+X-User-Signature: nonce:signature
+
+{
+  "user_id": "uuid-v7",
+  "key_id": "uuid-v7",
+  "encrypted_message": "hex-session-encrypted",
+  "signature_type": "schnorr_bip340",
+  "encrypted_session_secret": "hex-ecies-encrypted",
+  "approval_signature": "hex-ecdsa-sig",
+  "approval_timestamp": 1234567890
+}
+```
+
+Signature types: `ecdsa`, `schnorr`
+
+### 6. Check Signing Status
+
+```
+GET /api/v1/sign/single/{session_id}/status/{user_id}
+X-User-Signature: nonce:signature
+```
+
+Response when complete:
+```json
+{
+  "signing_session_id": "uuid-v7",
+  "user_id": "uuid-v7",
+  "key_id": "uuid-v7",
+  "status": "completed",
+  "encrypted_signature": "hex-session-encrypted",
+  "signature_type": "schnorr_bip340"
+}
+```
+
+Statuses: `pending`, `processing`, `completed`, `failed`
+
+### 7. Store Key from Keygen
+
+Store a key from a completed MuSig2 keygen session for later single-signer use:
+
+```
+POST /api/v1/keys/{user_id}/keygen/{keygen_session_id}
+X-Session-Signature: nonce:signature
+
+{
+  "key_id": "uuid-v7"
+}
+```
+
+### 8. Delete Key
+
+```
+DELETE /api/v1/keys/{user_id}/{key_id}
+X-User-Signature: nonce:signature
+```
+
 ## Authentication
 
 ### X-Session-Signature
 
 Format: `nonce:signature`
 - `nonce`: Random 16-byte hex value
-- `signature`: ECDSA over `SHA256(session_id:nonce)` using session-derived key
+- `signature`: ECDSA over `SHA256(session_id || nonce)` using session-derived key
 
 ### X-User-Signature
 
 Format: `nonce:signature`
-- `nonce`: Random 16-byte hex value
-- `signature`: ECDSA over `signing_session_id:user_id:nonce` using session auth key
+- `nonce`: Random 16-byte hex value  
+- `signature`: ECDSA over `SHA256(scope_id || user_id || nonce)` using auth private key
+- `scope_id`: The key_id being accessed (for key operations) or signing_session_id (for signing status)
 
 Auth key derived via: `HKDF-SHA256(master_private_key, "keymeld-session-auth-v1:keygen_session_id")`
 
