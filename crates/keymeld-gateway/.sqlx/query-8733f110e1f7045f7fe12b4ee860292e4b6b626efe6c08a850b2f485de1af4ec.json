@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO reserved_key_slots (\n                        key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at\n                    ) VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "8733f110e1f7045f7fe12b4ee860292e4b6b626efe6c08a850b2f485de1af4ec"
+}

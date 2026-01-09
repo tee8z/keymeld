@@ -1,4 +1,7 @@
-use crate::attestation::AttestationManager;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use aws_sdk_kms::Client as KmsClient;
 use dashmap::DashMap;
 use keymeld_core::{
@@ -8,7 +11,10 @@ use keymeld_core::{
     protocol::{CryptoError, EnclaveError},
     EncryptedData,
 };
+use rand::Rng;
 use std::collections::HashMap;
+
+use crate::attestation::AttestationManager;
 
 /// Shared enclave context - read-only data accessible by all sessions
 #[derive(Debug)]
@@ -201,15 +207,9 @@ impl EnclaveSharedContext {
         dek: &[u8; 32],
         private_key: &[u8],
     ) -> Result<Vec<u8>, EnclaveError> {
-        use aes_gcm::{
-            aead::{Aead, KeyInit},
-            Aes256Gcm, Nonce,
-        };
-
         let cipher = Aes256Gcm::new(dek.into());
 
         let mut nonce_bytes = [0u8; 12];
-        use rand::Rng;
         rand::rng().fill(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -230,11 +230,6 @@ impl EnclaveSharedContext {
         dek: &[u8; 32],
         encrypted_data: &[u8],
     ) -> Result<Vec<u8>, EnclaveError> {
-        use aes_gcm::{
-            aead::{Aead, KeyInit},
-            Aes256Gcm, Nonce,
-        };
-
         if encrypted_data.len() < 12 {
             return Err(EnclaveError::Crypto(CryptoError::Other(
                 "Encrypted data too short to contain nonce".to_string(),

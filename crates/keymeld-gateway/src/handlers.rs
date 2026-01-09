@@ -1,6 +1,7 @@
 use crate::{
+    auth::{validate_user_key_signature, SingleSigningAuth, UserKeyAuth},
     config::GatewayLimits,
-    database::Database,
+    database::{CreateSingleSigningParams, Database},
     enclave::EnclaveManager,
     errors::{ApiError, ApiResult},
     headers::{SessionSignature, UserSignature},
@@ -9,7 +10,7 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Json, Response},
 };
@@ -24,19 +25,25 @@ use keymeld_sdk::{
     validate_create_signing_session_request, validate_initialize_keygen_session_request,
     validate_register_keygen_participant_request, validate_reserve_keygen_session_request,
     ApiFeatures, ApiVersionResponse, AvailableUserSlot, CreateSigningSessionRequest,
-    CreateSigningSessionResponse, DatabaseStats, EnclaveHealthResponse, EnclavePublicKeyResponse,
-    ErrorResponse, GetAvailableSlotsResponse, HealthCheckResponse, InitializeKeygenSessionRequest,
-    InitializeKeygenSessionResponse, KeygenSessionStatusResponse, ListEnclavesResponse,
-    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
-    ReserveKeygenSessionRequest, ReserveKeygenSessionResponse, SigningSessionStatusResponse,
+    CreateSigningSessionResponse, DatabaseStats, DeleteUserKeyResponse, EnclaveHealthResponse,
+    EnclaveId, EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse,
+    HealthCheckResponse, ImportUserKeyRequest, ImportUserKeyResponse,
+    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeyId,
+    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse,
+    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse, ReserveKeySlotRequest,
+    ReserveKeySlotResponse, ReserveKeygenSessionRequest, ReserveKeygenSessionResponse,
+    SignSingleRequest, SignSingleResponse, SigningSessionStatusResponse, SingleSigningStatus,
+    SingleSigningStatusResponse, StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
 };
 use log::error;
+use moka::sync::Cache;
 use prometheus::Encoder;
 use secp256k1::PublicKey;
+use serde::Deserialize;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, info, warn};
 
@@ -46,14 +53,14 @@ pub struct AppState {
     pub enclave_manager: Arc<EnclaveManager>,
     pub metrics: Arc<Metrics>,
     pub gateway_limits: GatewayLimits,
-    pub nonce_cache: Arc<Mutex<NonceCache>>,
+    pub nonce_cache: NonceCache,
 }
 
-/// Simple in-memory nonce cache for replay protection
+/// TTL-based nonce cache for replay protection.
+#[derive(Clone)]
 pub struct NonceCache {
-    used_nonces: HashSet<String>,
-    cleanup_interval: Duration,
-    last_cleanup: Instant,
+    cache: Cache<String, ()>,
+    time_window: Duration,
 }
 
 impl Default for NonceCache {
@@ -64,36 +71,45 @@ impl Default for NonceCache {
 
 impl NonceCache {
     pub fn new() -> Self {
-        Self {
-            used_nonces: HashSet::new(),
-            cleanup_interval: Duration::from_secs(300), // Clean every 5 minutes
-            last_cleanup: Instant::now(),
-        }
+        Self::with_config(Duration::from_secs(600), Duration::from_secs(300), 100_000)
     }
 
-    /// Check if nonce is already used and mark it as used if not
-    pub fn check_and_insert(&mut self, nonce_key: &str) -> bool {
-        // Perform cleanup if needed
-        if self.last_cleanup.elapsed() >= self.cleanup_interval {
-            self.cleanup_old_nonces();
-            self.last_cleanup = Instant::now();
-        }
-
-        // Check if nonce is already used
-        if self.used_nonces.contains(nonce_key) {
-            false // Nonce already used
-        } else {
-            self.used_nonces.insert(nonce_key.to_string());
-            true // Nonce is new
-        }
+    pub fn with_config(ttl: Duration, time_window: Duration, max_capacity: u64) -> Self {
+        let cache = Cache::builder()
+            .time_to_live(ttl)
+            .max_capacity(max_capacity)
+            .build();
+        Self { cache, time_window }
     }
 
-    /// Simple cleanup - for production, implement TTL-based cleanup
-    fn cleanup_old_nonces(&mut self) {
-        // For now, just limit size to prevent unbounded growth
-        if self.used_nonces.len() > 10000 {
-            self.used_nonces.clear();
+    pub fn check_and_insert_with_timestamp(
+        &self,
+        nonce_key: &str,
+        timestamp_secs: u64,
+    ) -> Result<(), &'static str> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "System time error")?
+            .as_secs();
+
+        if timestamp_secs.abs_diff(now) > self.time_window.as_secs() {
+            return Err("Timestamp outside acceptable window");
         }
+
+        if self.cache.contains_key(nonce_key) {
+            return Err("Nonce already used");
+        }
+
+        self.cache.insert(nonce_key.to_string(), ());
+        Ok(())
+    }
+
+    pub fn check_and_insert(&self, nonce_key: &str) -> bool {
+        if self.cache.contains_key(nonce_key) {
+            return false;
+        }
+        self.cache.insert(nonce_key.to_string(), ());
+        true
     }
 }
 
@@ -215,8 +231,8 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
                 .as_secs();
-            if current_time > health_info.startup_time {
-                current_time.saturating_sub(health_info.startup_time)
+            if current_time as i64 > health_info.startup_time {
+                current_time.saturating_sub(health_info.startup_time as u64)
             } else {
                 0
             }
@@ -225,14 +241,14 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
         };
 
         let health_response = EnclaveHealthResponse {
-            enclave_id: keymeld_core::identifiers::EnclaveId::from(health_info.enclave_id),
+            enclave_id: EnclaveId::from(health_info.enclave_id as u32),
             healthy: health_info.is_healthy,
             public_key: health_info.public_key,
             attestation_document: health_info.attestation_document,
-            active_sessions: health_info.active_sessions,
+            active_sessions: health_info.active_sessions as u32,
             uptime_seconds,
-            key_epoch: health_info.key_epoch,
-            key_generation_time: health_info.key_generation_time,
+            key_epoch: health_info.key_epoch as u64,
+            key_generation_time: health_info.key_generation_time as u64,
             last_health_check: health_info.cached_at as u64,
         };
         enclaves.push(health_response);
@@ -506,7 +522,7 @@ pub async fn register_keygen_participant(
         .get_enclave_health(assigned_enclave.as_u32())
         .await?
     {
-        Some(health_info) => (health_info.public_key, health_info.key_epoch),
+        Some(health_info) => (health_info.public_key, health_info.key_epoch as u64),
         None => {
             return Err(ApiError::EnclaveCommunication(format!(
                 "Assigned enclave {} is not healthy",
@@ -862,7 +878,7 @@ pub async fn approve_signing_session(
     Ok(StatusCode::OK)
 }
 
-/// Validate session signature using database-stored public key (new seed-based method)
+/// Validate session signature using database-stored public key
 async fn validate_session_signature(
     db: &Database,
     session_id: &SessionId,
@@ -908,11 +924,8 @@ async fn validate_user_signature_with_session_auth(
 
     // Check nonce for replay protection (scoped to signing session)
     let nonce_key = format!("{}:{}", signing_session_id, nonce_hex);
-    {
-        let mut nonce_cache = state.nonce_cache.lock().unwrap();
-        if !nonce_cache.check_and_insert(&nonce_key) {
-            return Err(ApiError::bad_request("Nonce already used"));
-        }
+    if !state.nonce_cache.check_and_insert(&nonce_key) {
+        return Err(ApiError::bad_request("Nonce already used"));
     }
 
     // Verify the signature using the session auth pubkey
@@ -1066,7 +1079,7 @@ pub async fn get_enclave_public_key(
         pcr_measurements,
         timestamp: health_info.cached_at as u64,
         healthy: health_info.is_healthy,
-        key_epoch: health_info.key_epoch,
+        key_epoch: health_info.key_epoch as u64,
     };
 
     Ok(Json(response))
@@ -1185,6 +1198,667 @@ pub async fn get_available_slots(
         available_slots,
         total_slots: expected_participants.len(),
         claimed_slots: registered_participants.len(),
+    };
+
+    Ok(Json(response))
+}
+
+// ============================================================================
+// User Key Management Handlers (Stubbed)
+// ============================================================================
+
+/// Reserve a key slot for importing a user key
+#[utoipa::path(
+    post,
+    path = "/keys/reserve",
+    tag = "user_keys",
+    summary = "Reserve a key slot",
+    description = "Reserve a key slot and get assigned enclave info for key import",
+    request_body = ReserveKeySlotRequest,
+    responses(
+        (status = 200, description = "Key slot reserved", body = ReserveKeySlotResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn reserve_key_slot(
+    State(state): State<AppState>,
+    Json(request): Json<ReserveKeySlotRequest>,
+) -> ApiResult<Json<ReserveKeySlotResponse>> {
+    info!("Reserving key slot for user: {}", request.user_id);
+
+    // Get all healthy enclaves and pick one (round-robin or random)
+    let enclave_ids = state.enclave_manager.get_all_enclave_ids();
+    if enclave_ids.is_empty() {
+        return Err(ApiError::enclave_communication("No enclaves available"));
+    }
+
+    // Simple selection: use first available healthy enclave
+    // TODO: Could implement load balancing based on key count per enclave
+    let enclave_id = enclave_ids[0];
+
+    // Get enclave public key and epoch from database (cached health info)
+    let health_info = state
+        .db
+        .get_enclave_health(enclave_id.as_u32())
+        .await?
+        .ok_or_else(|| {
+            ApiError::enclave_communication(format!("Enclave {} not healthy", enclave_id.as_u32()))
+        })?;
+
+    // Generate a new key_id
+    let key_id = KeyId::new_v7();
+
+    // Calculate expiration (e.g., 10 minutes from now)
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
+        .as_secs() as i64
+        + 600; // 10 minutes
+
+    // Reserve the slot in database
+    state
+        .db
+        .reserve_key_slot(
+            &key_id,
+            &request.user_id,
+            enclave_id,
+            health_info.key_epoch as u64,
+            expires_at,
+        )
+        .await?;
+
+    info!(
+        "Reserved key slot {} for user {} on enclave {}",
+        key_id,
+        request.user_id,
+        enclave_id.as_u32()
+    );
+
+    let response = ReserveKeySlotResponse {
+        key_id,
+        user_id: request.user_id,
+        enclave_id,
+        enclave_public_key: health_info.public_key,
+        enclave_key_epoch: health_info.key_epoch as u64,
+    };
+
+    Ok(Json(response))
+}
+
+/// Import a user key (async - poll status endpoint for completion)
+#[utoipa::path(
+    post,
+    path = "/keys/import",
+    tag = "user_keys",
+    summary = "Import a user key",
+    description = "Import a private key encrypted to the assigned enclave. The import is processed asynchronously - poll /keys/{user_id}/{key_id}/status to check completion. Requires X-User-Signature header signed with the private key corresponding to auth_pubkey.",
+    request_body = ImportUserKeyRequest,
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Key import started", body = ImportUserKeyResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn import_user_key(
+    State(state): State<AppState>,
+    TypedHeader(user_signature): TypedHeader<UserSignature>,
+    Json(request): Json<ImportUserKeyRequest>,
+) -> ApiResult<Json<ImportUserKeyResponse>> {
+    info!(
+        "Starting key import {} for user {}",
+        request.key_id, request.user_id
+    );
+
+    // Validate that the signature was made with the private key corresponding to auth_pubkey
+    // This proves the caller owns the key pair before we store the auth_pubkey
+    crate::auth::validate_signature_with_pubkey(
+        &state.nonce_cache,
+        &request.auth_pubkey,
+        &request.key_id.as_string(),
+        &request.user_id.as_string(),
+        user_signature.value(),
+    )?;
+
+    // Validate the reserved key slot exists and matches
+    let reserved_slot = state
+        .db
+        .get_reserved_key_slot(&request.key_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "No reserved key slot found for key_id {}. Reserve a slot first.",
+                request.key_id
+            ))
+        })?;
+
+    // Validate the user matches
+    if reserved_slot.user_id != request.user_id {
+        return Err(ApiError::bad_request(format!(
+            "Key slot {} was reserved for user {}, not {}",
+            request.key_id, reserved_slot.user_id, request.user_id
+        )));
+    }
+
+    let enclave_id = reserved_slot.enclave_id;
+
+    // Get current enclave public key to validate the client used the correct one
+    let health_info = state
+        .db
+        .get_enclave_health(enclave_id.as_u32())
+        .await?
+        .ok_or_else(|| {
+            ApiError::enclave_communication(format!("Enclave {} not healthy", enclave_id.as_u32()))
+        })?;
+
+    // Validate the enclave public key matches (ensures client encrypted to correct enclave)
+    if request.enclave_public_key != health_info.public_key {
+        return Err(ApiError::bad_request(format!(
+            "Encrypted private key uses wrong enclave public key. Expected: {}..., got: {}...",
+            &health_info.public_key[..16.min(health_info.public_key.len())],
+            &request.enclave_public_key[..16.min(request.enclave_public_key.len())]
+        )));
+    }
+
+    // Validate the enclave epoch hasn't changed since reservation
+    if health_info.key_epoch != reserved_slot.enclave_key_epoch {
+        return Err(ApiError::bad_request(format!(
+            "Enclave {} epoch changed from {} to {} since reservation. The enclave may have restarted. Please reserve a new slot.",
+            enclave_id.as_u32(), reserved_slot.enclave_key_epoch, health_info.key_epoch
+        )));
+    }
+
+    // Decode the encrypted private key to validate it's valid hex
+    let encrypted_private_key_bytes = hex::decode(&request.encrypted_private_key)
+        .map_err(|e| ApiError::bad_request(format!("Invalid encrypted_private_key hex: {}", e)))?;
+
+    // Calculate expiration (10 minutes from now)
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
+        .as_secs() as i64
+        + 600;
+
+    // Atomically move from reserved_key_slots to pending_key_imports
+    // This ensures we don't have orphaned records if the operation fails
+    // The coordinator will process the pending import and send ImportKeyCommand to the enclave
+    state
+        .db
+        .move_reserved_to_pending_import(
+            &request.key_id,
+            &encrypted_private_key_bytes,
+            &request.auth_pubkey,
+            expires_at,
+        )
+        .await?;
+
+    info!(
+        "Key import {} for user {} queued for processing on enclave {}",
+        request.key_id,
+        request.user_id,
+        enclave_id.as_u32()
+    );
+
+    let response = ImportUserKeyResponse {
+        key_id: request.key_id,
+        user_id: request.user_id,
+        enclave_id,
+    };
+
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListUserKeysQuery {
+    pub key_id: String,
+}
+
+/// List keys for a user
+#[utoipa::path(
+    get,
+    path = "/keys/{user_id}",
+    tag = "user_keys",
+    summary = "List user keys",
+    description = "List all keys stored for a user. Requires X-User-Signature header signed with one of the user's keys (specified in key_id query param).",
+    params(
+        ("user_id" = String, Path, description = "User ID"),
+        ("key_id" = String, Query, description = "Key ID to authenticate with")
+    ),
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Key list", body = ListUserKeysResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 404, description = "Key not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn list_user_keys(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<ListUserKeysQuery>,
+    TypedHeader(user_signature): TypedHeader<UserSignature>,
+) -> ApiResult<Json<ListUserKeysResponse>> {
+    let user_id = UserId::parse(&user_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user_id: {e}")))?;
+    let key_id = KeyId::parse(&query.key_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid key_id: {e}")))?;
+
+    // Validate signature with the provided key
+    validate_user_key_signature(
+        &state.db,
+        &state.nonce_cache,
+        &user_id,
+        &key_id,
+        user_signature.value(),
+    )
+    .await?;
+
+    debug!("Listing keys for user: {}", user_id);
+
+    let key_rows = state.db.list_user_keys(&user_id).await?;
+
+    let keys: Vec<keymeld_core::protocol::UserKeyInfo> = key_rows
+        .into_iter()
+        .map(|row| keymeld_core::protocol::UserKeyInfo {
+            user_id: row.user_id,
+            key_id: row.key_id,
+            created_at: row.created_at as u64,
+            origin_keygen_session_id: row.origin_keygen_session_id,
+        })
+        .collect();
+
+    let response = ListUserKeysResponse { user_id, keys };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/keys/{user_id}/{key_id}",
+    tag = "user_keys",
+    summary = "Delete a user key",
+    description = "Delete a stored key. Requires X-User-Signature header.",
+    params(
+        ("user_id" = String, Path, description = "User ID"),
+        ("key_id" = String, Path, description = "Key ID")
+    ),
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Key deleted", body = DeleteUserKeyResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 404, description = "Key not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn delete_user_key(
+    State(state): State<AppState>,
+    UserKeyAuth((user_id, key_id)): UserKeyAuth,
+) -> ApiResult<Json<DeleteUserKeyResponse>> {
+    info!("Deleting key {} for user {}", key_id, user_id);
+
+    // Delete from database only - do NOT call enclave directly
+    // The enclave's in-memory copy will be orphaned but cannot be used:
+    // - Signing requires looking up the key in the database first
+    // - On enclave restart, only keys in the database are restored
+    let deleted = state.db.delete_user_key(&user_id, &key_id).await?;
+
+    if deleted {
+        info!("Deleted key {} for user {}", key_id, user_id);
+    } else {
+        warn!("Key {} for user {} was already deleted", key_id, user_id);
+    }
+
+    let response = DeleteUserKeyResponse {
+        key_id,
+        user_id,
+        deleted,
+    };
+
+    Ok(Json(response))
+}
+
+/// Get key operation status (for polling import/store progress)
+#[utoipa::path(
+    get,
+    path = "/keys/{user_id}/{key_id}/status",
+    tag = "user_keys",
+    summary = "Get key operation status",
+    description = "Get the status of a key import or store operation. Use this to poll for completion after calling /keys/import or /keys/{user_id}/keygen/{session_id}. Requires X-User-Signature header.",
+    params(
+        ("user_id" = String, Path, description = "User ID"),
+        ("key_id" = String, Path, description = "Key ID")
+    ),
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Key status", body = keymeld_sdk::KeyStatusResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 404, description = "Key not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn get_key_status(
+    State(state): State<AppState>,
+    UserKeyAuth((user_id, key_id)): UserKeyAuth,
+) -> ApiResult<Json<keymeld_sdk::KeyStatusResponse>> {
+    debug!("Getting key status for user {} key {}", user_id, key_id);
+
+    let status = state
+        .db
+        .get_key_operation_status(&user_id, &key_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::not_found(format!("Key {} not found for user {}", key_id, user_id))
+        })?;
+
+    let response = keymeld_sdk::KeyStatusResponse {
+        key_id: status.key_id,
+        user_id: status.user_id,
+        status: status.status,
+        error_message: status.error_message,
+        created_at: status.created_at as u64,
+    };
+
+    Ok(Json(response))
+}
+
+/// Store a key from a completed keygen session (async - poll status endpoint)
+#[utoipa::path(
+    post,
+    path = "/keys/{user_id}/keygen/{keygen_session_id}",
+    tag = "user_keys",
+    summary = "Store key from keygen",
+    description = "Persist a key from a completed keygen session. The store is processed asynchronously - poll /keys/{user_id}/{key_id}/status to check completion.",
+    params(
+        ("user_id" = String, Path, description = "User ID"),
+        ("keygen_session_id" = String, Path, description = "Keygen session ID")
+    ),
+    request_body = StoreKeyFromKeygenRequest,
+    responses(
+        (status = 200, description = "Key store started", body = StoreKeyFromKeygenResponse),
+        (status = 404, description = "Session not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn store_key_from_keygen(
+    State(state): State<AppState>,
+    Path((user_id, keygen_session_id)): Path<(String, String)>,
+    Json(request): Json<StoreKeyFromKeygenRequest>,
+) -> ApiResult<Json<StoreKeyFromKeygenResponse>> {
+    let user_id = UserId::parse(&user_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user_id: {e}")))?;
+    let keygen_session_id = SessionId::parse(&keygen_session_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid keygen_session_id: {e}")))?;
+
+    info!(
+        "Starting key store {} from keygen session {} for user {}",
+        request.key_id, keygen_session_id, user_id
+    );
+
+    // Validate keygen session exists and is completed
+    let keygen_session = state
+        .db
+        .get_keygen_session_by_id(&keygen_session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Keygen session not found"))?;
+
+    // Verify session is completed
+    if !matches!(keygen_session, KeygenSessionStatus::Completed(_)) {
+        return Err(ApiError::bad_request(
+            "Keygen session must be completed to store key",
+        ));
+    }
+
+    // Verify the user was a participant in the keygen session
+    let participant = state
+        .db
+        .get_keygen_participant(&keygen_session_id, &user_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "User {} was not a participant in keygen session {}",
+                user_id, keygen_session_id
+            ))
+        })?;
+
+    // Get the enclave that has this user's key (their assigned enclave from keygen)
+    let user_enclave_id = participant.enclave_id;
+
+    // Verify the enclave is healthy before queuing
+    let _health_info = state
+        .db
+        .get_enclave_health(user_enclave_id.as_u32())
+        .await?
+        .ok_or_else(|| {
+            ApiError::enclave_communication(format!(
+                "Enclave {} not healthy",
+                user_enclave_id.as_u32()
+            ))
+        })?;
+
+    // Calculate expiration (10 minutes from now)
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
+        .as_secs() as i64
+        + 600;
+
+    // Write to pending_key_stores table for async processing by coordinator
+    // The coordinator will send the StoreKeyFromKeygenCommand to the enclave
+    state
+        .db
+        .create_pending_key_store(
+            &request.key_id,
+            &user_id,
+            &keygen_session_id,
+            user_enclave_id,
+            expires_at,
+        )
+        .await?;
+
+    info!(
+        "Key store {} from keygen session {} for user {} queued for processing",
+        request.key_id, keygen_session_id, user_id
+    );
+
+    let response = StoreKeyFromKeygenResponse {
+        key_id: request.key_id,
+        user_id,
+        keygen_session_id,
+    };
+
+    Ok(Json(response))
+}
+
+// ============================================================================
+// Single-Signer Signing Handlers
+// ============================================================================
+
+/// Create a single-signer signing session (async - poll status endpoint)
+#[utoipa::path(
+    post,
+    path = "/sign/single",
+    tag = "single_signing",
+    summary = "Sign with stored key",
+    description = "Create a single-signer signing session using a stored key. The signing is processed asynchronously - poll /sign/single/{session_id}/status/{user_id} to check completion. Requires X-User-Signature header.",
+    request_body = SignSingleRequest,
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Signing session created", body = SignSingleResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 404, description = "Key not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn sign_single(
+    State(state): State<AppState>,
+    TypedHeader(user_signature): TypedHeader<UserSignature>,
+    Json(request): Json<SignSingleRequest>,
+) -> ApiResult<Json<SignSingleResponse>> {
+    // Validate signature first
+    validate_user_key_signature(
+        &state.db,
+        &state.nonce_cache,
+        &request.user_id,
+        &request.key_id,
+        user_signature.value(),
+    )
+    .await?;
+
+    info!(
+        "Creating single signing session for user {} with key {}",
+        request.user_id, request.key_id
+    );
+
+    // Verify the user key exists and get its database ID
+    let user_key = state
+        .db
+        .get_user_key_by_user_and_key(&request.user_id, &request.key_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "Key {} not found for user {}",
+                request.key_id, request.user_id
+            ))
+        })?;
+
+    // Verify the assigned enclave is healthy
+    let _health_info = state
+        .db
+        .get_enclave_health(user_key.enclave_id.as_u32())
+        .await?
+        .ok_or_else(|| {
+            ApiError::enclave_communication(format!(
+                "Enclave {} not healthy",
+                user_key.enclave_id.as_u32()
+            ))
+        })?;
+
+    // Decode the encrypted data to validate it's valid hex
+    let encrypted_message_bytes = hex::decode(&request.encrypted_message)
+        .map_err(|e| ApiError::bad_request(format!("Invalid encrypted_message hex: {}", e)))?;
+    let encrypted_session_secret_bytes =
+        hex::decode(&request.encrypted_session_secret).map_err(|e| {
+            ApiError::bad_request(format!("Invalid encrypted_session_secret hex: {}", e))
+        })?;
+
+    // Generate a new signing session ID
+    let signing_session_id = SessionId::new_v7();
+
+    // Calculate expiration (10 minutes from now)
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
+        .as_secs() as i64
+        + 600;
+
+    // Write to single_signing_sessions table for async processing by coordinator
+    // The coordinator will send the SignSingleCommand to the enclave
+    state
+        .db
+        .create_single_signing_session(CreateSingleSigningParams {
+            signing_session_id: &signing_session_id,
+            user_key_id: user_key.id,
+            encrypted_message: &encrypted_message_bytes,
+            encrypted_session_secret: &encrypted_session_secret_bytes,
+            signature_type: request.signature_type.as_ref(),
+            approval_signature: &request.approval_signature,
+            approval_timestamp: request.approval_timestamp as i64,
+            expires_at,
+        })
+        .await?;
+
+    info!(
+        "Single signing session {} for user {} with key {} queued for processing",
+        signing_session_id, request.user_id, request.key_id
+    );
+
+    let response = SignSingleResponse {
+        signing_session_id,
+        user_id: request.user_id,
+        key_id: request.key_id,
+        status: SingleSigningStatus::Pending,
+    };
+
+    Ok(Json(response))
+}
+
+/// Get single-signer signing session status
+#[utoipa::path(
+    get,
+    path = "/sign/single/{session_id}/status/{user_id}",
+    tag = "single_signing",
+    summary = "Get single signing status",
+    description = "Get the status of a single-signer signing session (signature encrypted to session secret). Requires X-User-Signature header.",
+    params(
+        ("session_id" = String, Path, description = "Signing session ID"),
+        ("user_id" = String, Path, description = "User ID")
+    ),
+    security(
+        ("UserSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Signing status", body = SingleSigningStatusResponse),
+        (status = 401, description = "Missing or invalid X-User-Signature header", body = ErrorResponse),
+        (status = 404, description = "Session not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn get_single_signing_status(
+    State(state): State<AppState>,
+    SingleSigningAuth((session_id, user_id, _key_id)): SingleSigningAuth,
+) -> ApiResult<Json<SingleSigningStatusResponse>> {
+    debug!(
+        "Getting single signing session status: {} for user {}",
+        session_id, user_id
+    );
+
+    // Get the signing session from database (already validated by extractor)
+    let session = state
+        .db
+        .get_single_signing_session(&session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Single signing session not found"))?;
+
+    // Convert status_name to SingleSigningStatus
+    let status = match session.status_name.as_str() {
+        "pending" => SingleSigningStatus::Pending,
+        "processing" => SingleSigningStatus::Processing,
+        "completed" => SingleSigningStatus::Completed,
+        "failed" => SingleSigningStatus::Failed,
+        _ => SingleSigningStatus::Pending,
+    };
+
+    // Parse signature type
+    let signature_type = if status == SingleSigningStatus::Completed {
+        Some(
+            session
+                .signature_type
+                .parse()
+                .unwrap_or(keymeld_core::protocol::SignatureType::SchnorrBip340),
+        )
+    } else {
+        None
+    };
+
+    let response = SingleSigningStatusResponse {
+        signing_session_id: session.signing_session_id,
+        user_id: session.user_id,
+        key_id: session.key_id,
+        status,
+        encrypted_signature: session.encrypted_signature,
+        signature_type,
+        error_message: session.error_message,
     };
 
     Ok(Json(response))

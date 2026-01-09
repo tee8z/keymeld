@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO signing_participants (\n                            signing_session_id, user_id, user_key_id,\n                            registered_at, session_encrypted_data\n                        ) VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "660749b707c8abefa08a3b641a34e30ae965a8ec2b24e5b032762557082d2c99"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_key_stores\n                     SET status_name = 'failed', error_message = ?, updated_at = ?\n                     WHERE key_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "816eef375db470c38a320b9a16a0a90f646e10e608a11d738fd15d8f9a767fed"
+}

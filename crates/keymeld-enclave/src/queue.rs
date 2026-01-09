@@ -314,7 +314,10 @@ impl Drop for Queue {
 
 #[cfg(test)]
 mod tests {
-    use keymeld_core::protocol::{EnclaveCommand, KeygenCommand, MusigCommand};
+    use keymeld_core::{
+        protocol::{EnclaveCommand, KeygenCommand, MusigCommand},
+        EnclaveId,
+    };
 
     use crate::operations::{
         context::EnclaveSharedContext,
@@ -345,7 +348,7 @@ mod tests {
 
         // Create test enclave context
         let enclave_context = Arc::new(std::sync::RwLock::new(EnclaveSharedContext::new(
-            keymeld_core::identifiers::EnclaveId::new(1),
+            EnclaveId::new(1),
             vec![1, 2, 3],
             vec![4, 5, 6],
             None,
@@ -421,7 +424,7 @@ mod tests {
 
         // Create shared enclave context
         let enclave_context = Arc::new(std::sync::RwLock::new(EnclaveSharedContext::new(
-            keymeld_core::identifiers::EnclaveId::new(1),
+            EnclaveId::new(1),
             vec![1, 2, 3],
             vec![4, 5, 6],
             None,

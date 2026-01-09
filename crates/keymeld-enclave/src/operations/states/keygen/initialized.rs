@@ -1,5 +1,6 @@
 use crate::musig::MusigProcessor;
 use keymeld_core::{
+    crypto::EncryptedData,
     identifiers::{SessionId, UserId},
     protocol::{EnclaveError, EncryptedParticipantPublicKey, SessionError, ValidationError},
     SessionSecret,
@@ -166,7 +167,6 @@ impl Initialized {
 
         // Decrypt taproot tweak if we have a session secret
         let taproot_tweak = if let Some(ref session_secret) = keygen_ctx.session_secret {
-            use keymeld_core::crypto::EncryptedData;
             match EncryptedData::from_hex(&init_cmd.encrypted_taproot_tweak) {
                 Ok(encrypted) => match session_secret.decrypt(&encrypted, "taproot_tweak") {
                     Ok(decrypted_bytes) => match serde_json::from_slice(&decrypted_bytes) {

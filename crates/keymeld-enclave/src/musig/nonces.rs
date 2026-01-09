@@ -108,6 +108,8 @@ impl MusigProcessor {
                 coordinator: false, // Default to false for nonce generation
                 signer_index,
                 private_key: Some(private_key.clone()),
+                auth_pubkey: None,
+                require_signing_approval: false,
                 first_round: Some(first_round),
                 second_round: None,
                 adaptor_first_rounds: BTreeMap::new(),
@@ -572,6 +574,8 @@ impl MusigProcessor {
             coordinator: false, // Default to false for adaptor nonce generation
             signer_index,
             private_key: Some(private_key.clone()),
+            auth_pubkey: None,
+            require_signing_approval: false,
             first_round: None,
             second_round: None,
             adaptor_first_rounds,

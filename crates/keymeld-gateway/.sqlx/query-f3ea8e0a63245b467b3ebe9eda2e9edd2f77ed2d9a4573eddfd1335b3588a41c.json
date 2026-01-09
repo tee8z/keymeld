@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_keys (\n                        user_id, key_id, enclave_id, enclave_key_epoch,\n                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,\n                        created_at, updated_at\n                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n                    RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f3ea8e0a63245b467b3ebe9eda2e9edd2f77ed2d9a4573eddfd1335b3588a41c"
+}

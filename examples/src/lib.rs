@@ -1,5 +1,7 @@
 pub mod adaptor_utils;
+pub mod keygen_with_stored_key;
 pub mod rpc_batcher;
+pub mod single_signer;
 
 use anyhow::{anyhow, Result};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};

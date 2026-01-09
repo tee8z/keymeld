@@ -32,10 +32,7 @@ impl Validator {
         if let Some(max_len) = max {
             if vec.len() > max_len {
                 return Err(KeyMeldError::InvalidConfiguration(format!(
-                    "{} must have at most {} items (max: {})",
-                    field_name,
-                    vec.len(),
-                    max_len
+                    "{field_name} exceeds max {max_len} items"
                 )));
             }
         }
@@ -104,6 +101,15 @@ pub fn encrypt_session_data(data: &str, session_secret: &str) -> Result<String, 
     let secret = SessionSecret::from_hex(session_secret)?;
     let encrypted_data = secret.encrypt(data.as_bytes(), "session_data")?;
     encrypted_data.to_hex()
+}
+
+/// Encrypt session data and return as JSON (for single-signer signing)
+pub fn encrypt_session_data_json(data: &str, session_secret: &str) -> Result<String, KeyMeldError> {
+    let secret = SessionSecret::from_hex(session_secret)?;
+    let encrypted_data = secret.encrypt(data.as_bytes(), "message")?;
+    serde_json::to_string(&encrypted_data).map_err(|e| {
+        KeyMeldError::SerializationError(format!("Failed to serialize EncryptedData: {}", e))
+    })
 }
 
 pub fn decrypt_session_data(

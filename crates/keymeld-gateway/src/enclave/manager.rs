@@ -16,7 +16,8 @@ use keymeld_core::{
         EnclavePublicKeyInfo, EncryptedParticipantPublicKey, EncryptedSessionSecret,
         FinalizeSignatureCommand, GetAggregatePublicKeyCommand, InitKeygenSessionCommand,
         InitSigningSessionCommand, KeygenCommand, KeygenOutcome, MusigCommand, MusigOutcome,
-        Outcome, SigningCommand, SigningOutcome, SystemCommand, SystemOutcome,
+        Outcome, ParticipantRegistrationData, RestoreUserKeyCommand, SigningCommand,
+        SigningOutcome, SystemCommand, SystemOutcome, UserKeyCommand,
     },
     AggregatePublicKey, AttestationDocument, KeyMeldError,
 };
@@ -75,6 +76,8 @@ pub struct RestorationStats {
     pub keygen_failed: u32,
     pub signing_reset: u32,
     pub signing_failed: u32,
+    pub user_keys_restored: u32,
+    pub user_keys_failed: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -121,14 +124,19 @@ impl EnclaveManager {
         );
 
         // Group participants by their assigned enclave
-        let mut participants_by_enclave: BTreeMap<EnclaveId, Vec<(UserId, String)>> =
+        let mut participants_by_enclave: BTreeMap<EnclaveId, Vec<ParticipantRegistrationData>> =
             BTreeMap::new();
 
         for (user_id, participant) in participants {
             participants_by_enclave
                 .entry(participant.enclave_id)
                 .or_default()
-                .push((user_id.clone(), participant.enclave_encrypted_data.clone()));
+                .push(ParticipantRegistrationData {
+                    user_id: user_id.clone(),
+                    enclave_encrypted_data: participant.enclave_encrypted_data.clone(),
+                    auth_pubkey: participant.auth_pubkey.clone(),
+                    require_signing_approval: participant.require_signing_approval,
+                });
         }
 
         info!(
@@ -671,42 +679,14 @@ impl EnclaveManager {
         Ok(successful_count)
     }
 
-    pub async fn validate_and_sync_enclave_epochs(&self) -> Result<bool, KeyMeldError> {
-        let enclave_ids: Vec<EnclaveId> =
-            self.enclave_info.iter().map(|entry| *entry.key()).collect();
-        let mut any_epoch_mismatch = false;
-
-        for enclave_id in &enclave_ids {
-            match self.validate_enclave_epoch(enclave_id).await {
-                Ok(had_mismatch) => {
-                    if had_mismatch {
-                        any_epoch_mismatch = true;
-                        info!("Detected restart for enclave {}, epoch synced", enclave_id);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to validate epoch for enclave {}: {}", enclave_id, e);
-                }
-            }
-        }
-
-        Ok(any_epoch_mismatch)
-    }
-
-    /// Validate enclave epoch and reconfigure if restart detected.
+    /// Validate enclave epoch and reconfigure with KMS keys if restart detected.
     ///
-    /// When `db` and `kms_config` are provided, a full KMS reconfiguration is performed
-    /// on restart detection (enclave gets its master key back).
-    /// When not provided, only epoch sync is done (enclave won't have its key).
-    pub async fn validate_enclave_epoch(
-        &self,
-        enclave_id: &EnclaveId,
-    ) -> Result<bool, KeyMeldError> {
-        self.validate_enclave_epoch_with_kms(enclave_id, None, None)
-            .await
-    }
-
-    /// Validate enclave epoch with optional KMS reconfiguration on restart.
+    /// This function detects enclave restarts by comparing the current public key and epoch
+    /// with cached values. On restart detection, it sends a Configure command with the
+    /// encrypted KMS keys from the database so the enclave can decrypt session data.
+    ///
+    /// Both `db` and `kms_config` must be provided for proper restart recovery.
+    /// Without them, the enclave won't be able to decrypt existing session data after restart.
     pub async fn validate_enclave_epoch_with_kms(
         &self,
         enclave_id: &EnclaveId,
@@ -916,23 +896,6 @@ impl EnclaveManager {
 
     fn get_cached_enclave_info(&self, enclave_id: &EnclaveId) -> Option<EnclaveInfo> {
         self.enclave_info.get(enclave_id).map(|info| info.clone())
-    }
-
-    pub async fn get_enclave_public_key_safe(
-        &self,
-        enclave_id: &EnclaveId,
-    ) -> Result<String, KeyMeldError> {
-        let had_restart = self.validate_enclave_epoch(enclave_id).await?;
-
-        if had_restart {
-            info!(
-                "Enclave {} restart detected during key request, using fresh keys",
-                enclave_id
-            );
-        }
-
-        let (public_key, _, _, _, _, _) = self.get_enclave_public_info(enclave_id).await?;
-        Ok(public_key)
     }
 
     pub async fn get_enclave_public_key(
@@ -1273,6 +1236,7 @@ impl EnclaveManager {
                     } else {
                         Some(params.encrypted_adaptor_configs.clone())
                     },
+                    approval_signatures: vec![], // TODO: Pass approval signatures from request
                 };
 
                 let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1551,16 +1515,79 @@ impl EnclaveManager {
             }
         }
 
+        // Step 3: Restore user keys (for single-signer operations)
+        let user_keys = db
+            .get_user_keys_for_enclave(*enclave_id)
+            .await
+            .map_err(|e| KeyMeldError::EnclaveError(format!("Failed to query user keys: {}", e)))?;
+
         info!(
-            "Session restoration complete for enclave {}: {} keygen restored, {} keygen failed, {} signing reset, {} signing failed",
+            "Found {} user keys to restore for enclave {}",
+            user_keys.len(),
+            enclave_id
+        );
+
+        for key in user_keys {
+            match self.restore_user_key(enclave_id, &key).await {
+                Ok(_) => {
+                    stats.user_keys_restored += 1;
+                    debug!(
+                        "Restored user key {} for user {} to enclave {}",
+                        key.key_id, key.user_id, enclave_id
+                    );
+                }
+                Err(e) => {
+                    stats.user_keys_failed += 1;
+                    warn!(
+                        "Failed to restore user key {} for user {} to enclave {}: {}",
+                        key.key_id, key.user_id, enclave_id, e
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Session restoration complete for enclave {}: {} keygen restored, {} keygen failed, {} signing reset, {} signing failed, {} user keys restored, {} user keys failed",
             enclave_id,
             stats.keygen_restored,
             stats.keygen_failed,
             stats.signing_reset,
-            stats.signing_failed
+            stats.signing_failed,
+            stats.user_keys_restored,
+            stats.user_keys_failed,
         );
 
         Ok(stats)
+    }
+
+    /// Restore a single user key to an enclave
+    async fn restore_user_key(
+        &self,
+        enclave_id: &EnclaveId,
+        key: &crate::database::UserKey,
+    ) -> Result<(), KeyMeldError> {
+        let command = EnclaveCommand::UserKey(UserKeyCommand::RestoreKey(RestoreUserKeyCommand {
+            user_id: key.user_id.clone(),
+            key_id: key.key_id.clone(),
+            encrypted_private_key: hex::encode(&key.encrypted_private_key),
+            auth_pubkey: key.auth_pubkey.clone(),
+            origin_keygen_session_id: key.origin_keygen_session_id.clone(),
+            created_at: key.created_at as u64,
+        }));
+
+        let outcome = self
+            .send_command_to_enclave(enclave_id, command.into())
+            .await?;
+
+        match outcome.response {
+            keymeld_core::protocol::EnclaveOutcome::UserKey(
+                keymeld_core::protocol::UserKeyOutcome::KeyRestored(_),
+            ) => Ok(()),
+            other => Err(KeyMeldError::EnclaveError(format!(
+                "Unexpected outcome restoring user key: {:?}",
+                other
+            ))),
+        }
     }
 
     /// Restore a single keygen session to an enclave
@@ -1711,11 +1738,16 @@ impl EnclaveManager {
         }
 
         // Add participants to this enclave
-        let participants_for_enclave: Vec<(UserId, String)> = completed
+        let participants_for_enclave: Vec<ParticipantRegistrationData> = completed
             .registered_participants
             .iter()
             .filter(|(_, p)| p.enclave_id == *enclave_id)
-            .map(|(user_id, p)| (user_id.clone(), p.enclave_encrypted_data.clone()))
+            .map(|(user_id, p)| ParticipantRegistrationData {
+                user_id: user_id.clone(),
+                enclave_encrypted_data: p.enclave_encrypted_data.clone(),
+                auth_pubkey: p.auth_pubkey.clone(),
+                require_signing_approval: p.require_signing_approval,
+            })
             .collect();
 
         if !participants_for_enclave.is_empty() {
@@ -1843,10 +1875,13 @@ mod tests {
             let user_id = UserId::new_v7();
             let participant = ParticipantData {
                 user_id: user_id.clone(),
+                user_key_id: i as i64,
                 enclave_id: EnclaveId::from(i),
                 enclave_key_epoch: 1,
-                session_encrypted_data: format!("session_data_{}", i),
+                session_encrypted_data: Some(format!("session_data_{}", i)),
                 enclave_encrypted_data: format!("enclave_data_{}", i),
+                auth_pubkey: vec![1, 2, 3],
+                require_signing_approval: false,
             };
             participants.insert(user_id, participant);
         }

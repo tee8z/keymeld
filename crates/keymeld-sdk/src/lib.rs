@@ -6,10 +6,10 @@ use utoipa::ToSchema;
 
 pub use keymeld_core::crypto::{EncryptedData, SecureCrypto, SessionSecret};
 pub use keymeld_core::hash_message;
-pub use keymeld_core::identifiers::{EnclaveId, SessionId, UserId};
+pub use keymeld_core::identifiers::{EnclaveId, KeyId, SessionId, UserId};
 pub use keymeld_core::protocol::{
     AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, KeygenStatusKind,
-    SigningStatusKind, TaprootTweak,
+    SignatureType, SigningStatusKind, TaprootTweak, UserKeyInfo,
 };
 pub use keymeld_core::validation;
 pub use keymeld_core::AggregatePublicKey;
@@ -268,6 +268,166 @@ pub struct ErrorResponse {
     pub message: String,
     pub details: Option<serde_json::Value>,
     pub retryable: bool,
+}
+
+// ============================================================================
+// User Key Management API Types
+// ============================================================================
+
+/// Request to reserve a key slot (step 1 of key import)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct ReserveKeySlotRequest {
+    pub user_id: UserId,
+}
+
+/// Response from reserving a key slot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct ReserveKeySlotResponse {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub enclave_id: EnclaveId,
+    pub enclave_public_key: String,
+    pub enclave_key_epoch: u64,
+}
+
+/// Request to import a user key (step 2 of key import)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct ImportUserKeyRequest {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    /// Private key ECIES-encrypted to the assigned enclave's public key
+    pub encrypted_private_key: String,
+    /// Auth public key for authenticating future requests
+    pub auth_pubkey: Vec<u8>,
+    /// The enclave public key used for encryption (for validation)
+    pub enclave_public_key: String,
+}
+
+/// Response after importing a user key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct ImportUserKeyResponse {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub enclave_id: EnclaveId,
+}
+
+/// Response listing user's keys
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct ListUserKeysResponse {
+    pub user_id: UserId,
+    pub keys: Vec<UserKeyInfo>,
+}
+
+/// Response after deleting a key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct DeleteUserKeyResponse {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub deleted: bool,
+}
+
+/// Response for key operation status (import/store progress)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct KeyStatusResponse {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    /// Status of the key operation: "pending", "processing", "completed", "failed"
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: u64,
+}
+
+/// Request to store a key from a completed keygen session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct StoreKeyFromKeygenRequest {
+    pub key_id: KeyId,
+}
+
+/// Response after storing key from keygen
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct StoreKeyFromKeygenResponse {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub keygen_session_id: SessionId,
+}
+
+// ============================================================================
+// Single-Signer Signing API Types
+// ============================================================================
+
+/// Request to create a single-signer signing session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SignSingleRequest {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    /// Message encrypted with session secret
+    pub encrypted_message: String,
+    pub signature_type: SignatureType,
+    /// Session secret ECIES-encrypted to enclave's public key
+    pub encrypted_session_secret: String,
+    /// Approval signature: Sign(auth_privkey, SHA256(message_hash || key_id || approval_timestamp))
+    /// Proves the user authorized this specific signing operation
+    pub approval_signature: Vec<u8>,
+    /// Timestamp used in approval signature (Unix timestamp in seconds)
+    /// Enclave will reject if too old (prevents replay attacks)
+    pub approval_timestamp: u64,
+}
+
+/// Response from creating a single-signer signing session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SignSingleResponse {
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub status: SingleSigningStatus,
+}
+
+/// Status of a single-signer signing session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SingleSigningStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed,
+}
+
+/// Response for single-signer signing status query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SingleSigningStatusResponse {
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub status: SingleSigningStatus,
+    /// Signature encrypted with session secret (only when completed)
+    pub encrypted_signature: Option<String>,
+    pub signature_type: Option<SignatureType>,
+    pub error_message: Option<String>,
 }
 
 pub fn validate_reserve_keygen_session_request(

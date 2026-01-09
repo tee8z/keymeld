@@ -2,13 +2,13 @@ use crate::{
     identifiers::{EnclaveId, SessionId, UserId},
     KeyMeldError,
 };
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use std::{
-    collections::BTreeMap,
+    collections::{hash_map::DefaultHasher, BTreeMap},
+    hash::{Hash, Hasher},
     sync::atomic::{AtomicU32, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -82,10 +82,7 @@ impl EnclaveAssignmentManager {
         }
 
         // Distribute coordinator assignment based on session ID hash
-        // This spreads coordinator load across all available enclaves
         let session_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
             session_id.hash(&mut hasher);
             hasher.finish()
@@ -246,9 +243,6 @@ impl EnclaveAssignmentManager {
             assignment.user_enclave_assignments
         );
 
-        // Use entry() for atomic insert
-        use dashmap::mapref::entry::Entry;
-
         match self.session_assignments.entry(session_id) {
             Entry::Occupied(mut entry) => {
                 entry.insert(assignment.clone());
@@ -325,9 +319,6 @@ impl EnclaveAssignmentManager {
     }
 
     pub fn remove_session(&self, session_id: &SessionId) -> Option<SessionAssignment> {
-        // Use entry() for atomic remove to avoid race conditions
-        use dashmap::mapref::entry::Entry;
-
         match self.session_assignments.entry(session_id.clone()) {
             Entry::Occupied(entry) => {
                 let (_, assignment) = entry.remove_entry();
@@ -357,9 +348,6 @@ impl EnclaveAssignmentManager {
     }
 
     pub fn restore_assignment(&self, assignment: SessionAssignment) {
-        // Use entry() for atomic insert
-        use dashmap::mapref::entry::Entry;
-
         match self
             .session_assignments
             .entry(assignment.session_id.clone())
@@ -409,9 +397,6 @@ impl EnclaveAssignmentManager {
     }
 
     pub fn restore_session_assignment(&self, assignment: SessionAssignment) {
-        // Use entry() for atomic insert
-        use dashmap::mapref::entry::Entry;
-
         match self
             .session_assignments
             .entry(assignment.session_id.clone())

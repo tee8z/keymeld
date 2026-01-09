@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_key_imports\n                     SET status_name = 'failed', error_message = ?, updated_at = ?\n                     WHERE key_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fc2433135fe39ecba51d486f46ff0ccbb081c6b06e30d15395a6261e15e43942"
+}

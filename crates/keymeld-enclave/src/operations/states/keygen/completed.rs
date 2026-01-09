@@ -149,7 +149,7 @@ impl TryFrom<Completed> for Initialized {
                 .unwrap_or(0);
 
             musig_processor
-                .store_user_private_key(&user_id, private_key, signer_index, false)
+                .store_user_private_key(&user_id, private_key, signer_index, false, None, false)
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
                         "Failed to store user private key: {}",
@@ -227,7 +227,7 @@ impl TryFrom<&Completed> for Initialized {
                 .unwrap_or(0);
 
             musig_processor
-                .store_user_private_key(&user_id, private_key, signer_index, false)
+                .store_user_private_key(&user_id, private_key, signer_index, false, None, false)
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
                         "Failed to store user private key: {}",

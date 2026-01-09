@@ -117,25 +117,31 @@ mod tests {
         let mut existing = BTreeMap::new();
         existing.insert(
             user1.clone(),
-            ParticipantData::new_with_epoch(
-                user1.clone(),
-                enclave1,
-                1,
-                "{}".to_string(),
-                "encrypted_key".to_string(),
-            ),
+            ParticipantData {
+                user_id: user1.clone(),
+                user_key_id: 1,
+                enclave_id: enclave1,
+                enclave_key_epoch: 1,
+                session_encrypted_data: Some("{}".to_string()),
+                enclave_encrypted_data: "encrypted_key".to_string(),
+                auth_pubkey: vec![1, 2, 3],
+                require_signing_approval: false,
+            },
         );
 
         let mut fresh = BTreeMap::new();
         fresh.insert(
             user2.clone(),
-            ParticipantData::new_with_epoch(
-                user2.clone(),
-                enclave1,
-                1,
-                "{}".to_string(),
-                "encrypted_key".to_string(),
-            ),
+            ParticipantData {
+                user_id: user2.clone(),
+                user_key_id: 2,
+                enclave_id: enclave1,
+                enclave_key_epoch: 1,
+                session_encrypted_data: Some("{}".to_string()),
+                enclave_encrypted_data: "encrypted_key".to_string(),
+                auth_pubkey: vec![4, 5, 6],
+                require_signing_approval: false,
+            },
         );
 
         assert!(merge_participants(&mut existing, fresh).is_ok());

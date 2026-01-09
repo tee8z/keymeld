@@ -28,6 +28,10 @@ pub struct UserMusigSession {
     pub coordinator: bool,
     pub signer_index: usize,
     pub private_key: Option<KeyMaterial>,
+    /// Auth public key for verifying signing approval signatures
+    pub auth_pubkey: Option<Vec<u8>>,
+    /// Whether this user requires explicit approval before signing
+    pub require_signing_approval: bool,
     // Per-user MuSig2 state machines (cannot be shared across users)
     pub first_round: Option<musig2::FirstRound>,
     pub second_round: Option<musig2::SecondRound<Vec<u8>>>,

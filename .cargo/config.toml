@@ -90,6 +90,8 @@ low-speed-limit = 10
 # Default environment variables for development
 RUST_LOG = { value = "info,keymeld=debug", force = false }
 RUST_BACKTRACE = { value = "1", force = false }
+# Use offline mode for SQLx to use cached query metadata
+SQLX_OFFLINE = { value = "true", force = false }
 
 # KeyMeld specific environment variables
 KEYMELD_ENV = { value = "development", force = false }

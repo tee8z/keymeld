@@ -42,6 +42,12 @@ impl From<u32> for EnclaveId {
     }
 }
 
+impl From<EnclaveId> for i64 {
+    fn from(id: EnclaveId) -> Self {
+        id.0 as i64
+    }
+}
+
 impl fmt::Display for EnclaveId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "enclave-{}", self.0)
@@ -281,6 +287,102 @@ impl sqlx::Decode<'_, sqlx::Sqlite> for SessionId {
         let bytes = <Vec<u8> as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
         let uuid = Uuid::from_slice(&bytes)?;
         Ok(SessionId(uuid))
+    }
+}
+
+/// Unique identifier for a user's stored key
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(transparent)]
+pub struct KeyId(#[serde(with = "uuid_serde")] Uuid);
+
+impl KeyId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(Uuid::parse_str(&id.into()).unwrap_or_else(|_| Uuid::now_v7()))
+    }
+
+    pub fn parse(id: impl AsRef<str>) -> Result<Self, uuid::Error> {
+        Ok(Self(Uuid::parse_str(id.as_ref())?))
+    }
+
+    pub fn new_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn as_string(&self) -> String {
+        self.0.to_string()
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    pub fn uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<String> for KeyId {
+    type Error = uuid::Error;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::parse(id)
+    }
+}
+
+impl TryFrom<&str> for KeyId {
+    type Error = uuid::Error;
+
+    fn try_from(id: &str) -> Result<Self, Self::Error> {
+        Self::parse(id)
+    }
+}
+
+impl TryFrom<Vec<u8>> for KeyId {
+    type Error = uuid::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        let uuid = Uuid::from_slice(&bytes)?;
+        Ok(Self(uuid))
+    }
+}
+
+impl From<Uuid> for KeyId {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl fmt::Display for KeyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Type<sqlx::Sqlite> for KeyId {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <Vec<u8> as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Encode<'_, sqlx::Sqlite> for KeyId {
+    fn encode_by_ref(
+        &self,
+        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        let bytes = self.0.as_bytes().to_vec();
+        <Vec<u8> as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&bytes, args)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Decode<'_, sqlx::Sqlite> for KeyId {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = <Vec<u8> as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        let uuid = Uuid::from_slice(&bytes)?;
+        Ok(KeyId(uuid))
     }
 }
 

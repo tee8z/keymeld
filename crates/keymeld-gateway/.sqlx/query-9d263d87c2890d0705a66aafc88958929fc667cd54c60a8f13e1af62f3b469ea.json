@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE single_signing_sessions\n                     SET status_name = $1, encrypted_signature = $2, error_message = $3,\n                         completed_at = $4, updated_at = $5\n                     WHERE signing_session_id = $6",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "9d263d87c2890d0705a66aafc88958929fc667cd54c60a8f13e1af62f3b469ea"
+}

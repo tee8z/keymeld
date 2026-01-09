@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO single_signing_sessions (\n                        signing_session_id, user_key_id, status_name,\n                        encrypted_message, encrypted_session_secret, signature_type,\n                        approval_signature, approval_timestamp,\n                        created_at, updated_at, expires_at\n                    ) VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "b7be2841cd7fe7d1dab4f810d6b9c1ff86216a819c676acf68e22df314fec9a4"
+}

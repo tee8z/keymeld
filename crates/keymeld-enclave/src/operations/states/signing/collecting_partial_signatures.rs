@@ -317,8 +317,6 @@ impl TryFrom<CollectingPartialSignatures>
     type Error = EnclaveError;
 
     fn try_from(value: CollectingPartialSignatures) -> Result<Self, Self::Error> {
-        use crate::operations::states::signing::FinalizingSignature;
-
         value.musig_processor.get_aggregate_pubkey().map_err(|e| {
             EnclaveError::Session(keymeld_core::protocol::SessionError::MusigInitialization(
                 format!(

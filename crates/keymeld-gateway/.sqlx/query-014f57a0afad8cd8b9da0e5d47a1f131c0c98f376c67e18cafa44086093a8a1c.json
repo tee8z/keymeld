@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM reserved_key_slots WHERE key_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "014f57a0afad8cd8b9da0e5d47a1f131c0c98f376c67e18cafa44086093a8a1c"
+}

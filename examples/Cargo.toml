@@ -23,7 +23,6 @@ keymeld-sdk = { path = "../crates/keymeld-sdk" }
 bdk_wallet = { version = "2.3.0", features = ["keys-bip39"] }
 bdk_bitcoind_rpc = { version = "0.22.0" }
 bitcoin = { workspace = true, features = ["serde", "rand", "std"] }
-bitcoin_hashes = { workspace = true }
 secp256k1 = { workspace = true }
 musig2 = { workspace = true }
 tokio = { workspace = true }
@@ -35,15 +34,10 @@ hex = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
-time = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
-
-[dev-dependencies]
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

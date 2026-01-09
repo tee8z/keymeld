@@ -1,10 +1,9 @@
 use super::keygen_data::KeygenSessionData;
 use crate::musig::MusigProcessor;
 use crate::operations::{context::EnclaveSharedContext, states::signing::CoordinatorData};
-use keymeld_core::hash_message;
 use keymeld_core::protocol::{KeygenCommand, KeygenCommandKind, MusigCommand, SigningCommandKind};
 use keymeld_core::{
-    crypto::SessionSecret,
+    crypto::{EncryptedData, SessionSecret},
     identifiers::{SessionId, UserId},
     protocol::{
         Command, EnclaveCommand, EnclaveError, EncryptedParticipantPublicKey,
@@ -12,6 +11,7 @@ use keymeld_core::{
     },
     KeyMaterial,
 };
+use keymeld_core::{hash_message, EnclaveId};
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -32,7 +32,7 @@ pub struct KeygenSessionContext {
     pub session_secret: Option<SessionSecret>,
     pub coordinator_data: Option<CoordinatorData>,
     pub encrypted_public_keys_for_response: Vec<EncryptedParticipantPublicKey>,
-    pub session_enclave_public_keys: BTreeMap<keymeld_core::identifiers::EnclaveId, String>, // Other enclaves in this session
+    pub session_enclave_public_keys: BTreeMap<EnclaveId, String>, // Other enclaves in this session
     pub command_history: Vec<Command>, // Track processed commands for idempotency
 }
 
@@ -46,9 +46,9 @@ pub struct SigningSessionContext {
     pub message_hash: Vec<u8>,
     pub session_secret: Option<SessionSecret>,
     pub coordinator_data: Option<CoordinatorData>,
-    pub nonces: BTreeMap<UserId, Vec<u8>>, // Simplified for now - replace with actual NonceData type
-    pub partial_signatures: BTreeMap<UserId, Vec<u8>>, // Simplified for now - replace with actual PartialSignature type
-    pub session_enclave_public_keys: BTreeMap<keymeld_core::identifiers::EnclaveId, String>, // Other enclaves in this session
+    pub nonces: BTreeMap<UserId, Vec<u8>>,
+    pub partial_signatures: BTreeMap<UserId, Vec<u8>>,
+    pub session_enclave_public_keys: BTreeMap<EnclaveId, String>, // Other enclaves in this session
     pub command_history: Vec<Command>, // Track processed commands for idempotency
 }
 
@@ -168,6 +168,8 @@ impl SessionContext {
 
             // System commands are handled at operator level, not here
             EnclaveCommand::System(_) => Ok(false),
+            // UserKey commands will be handled separately (not session-based)
+            EnclaveCommand::UserKey(_) => Ok(false),
         }
     }
 
@@ -227,6 +229,7 @@ impl SigningSessionContext {
                 }
             }
             EnclaveCommand::System(_) => Ok(false), // System commands handled at operator level
+            EnclaveCommand::UserKey(_) => Ok(false), // UserKey commands handled separately
         }
     }
 
@@ -291,7 +294,6 @@ impl
 
         // Decrypt taproot tweak if we have a session secret
         let taproot_tweak = if let Some(ref session_secret) = ctx.session_secret {
-            use keymeld_core::crypto::EncryptedData;
             match EncryptedData::from_hex(&cmd.encrypted_taproot_tweak) {
                 Ok(encrypted) => match session_secret.decrypt(&encrypted, "taproot_tweak") {
                     Ok(decrypted_bytes) => match serde_json::from_slice(&decrypted_bytes) {

@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use keymeld_core::{
-    identifiers::{EnclaveId, SessionId, UserId},
+    identifiers::{EnclaveId, KeyId, SessionId, UserId},
     protocol::{KeygenStatusKind, SigningStatusKind},
 };
 use keymeld_sdk::{
@@ -20,8 +20,8 @@ use keymeld_sdk::{
 };
 use secp256k1::PublicKey;
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow},
-    FromRow, Row,
+    sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
+    FromRow,
 };
 use std::{collections::BTreeMap, future::Future, str::FromStr, time::Duration};
 use time::OffsetDateTime;
@@ -37,6 +37,37 @@ impl DbUtils {
     pub fn current_timestamp() -> i64 {
         OffsetDateTime::now_utc().unix_timestamp()
     }
+}
+
+pub struct StoreUserKeyParams<'a> {
+    pub user_id: &'a UserId,
+    pub key_id: &'a KeyId,
+    pub enclave_id: EnclaveId,
+    pub enclave_key_epoch: u64,
+    pub encrypted_private_key: &'a [u8],
+    pub auth_pubkey: &'a [u8],
+    pub origin_keygen_session_id: Option<&'a SessionId>,
+}
+
+pub struct CreateSingleSigningParams<'a> {
+    pub signing_session_id: &'a SessionId,
+    pub user_key_id: i64,
+    pub encrypted_message: &'a [u8],
+    pub encrypted_session_secret: &'a [u8],
+    pub signature_type: &'a str,
+    pub approval_signature: &'a [u8],
+    pub approval_timestamp: i64,
+    pub expires_at: i64,
+}
+
+pub struct CreatePendingKeyImportParams<'a> {
+    pub key_id: &'a KeyId,
+    pub user_id: &'a UserId,
+    pub enclave_id: EnclaveId,
+    pub enclave_key_epoch: u64,
+    pub encrypted_private_key: &'a [u8],
+    pub auth_pubkey: &'a [u8],
+    pub expires_at: i64,
 }
 
 type WriteOperation = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -374,7 +405,7 @@ impl Database {
 
                 let status_name = status.kind().to_string();
                 let keygen_session_id = &request.keygen_session_id;
-                let coordinator_enclave_id_i64 = coordinator_enclave_id.as_u32() as i64;
+                let coordinator_enclave_id: i64 = coordinator_enclave_id.into();
                 let max_signing_sessions = request.max_signing_sessions.map(|max| max as i64);
                 let expected_participants_json =
                     serde_json::to_string(&request.expected_participants)?;
@@ -388,7 +419,7 @@ impl Database {
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL)"#,
                     keygen_session_id,
                     status_name,
-                    coordinator_enclave_id_i64,
+                    coordinator_enclave_id,
                     current_time,
                     expires_at,
                     current_time,
@@ -566,25 +597,56 @@ impl Database {
             .execute(self.pool.clone(), move |pool| async move {
                 let current_time = DbUtils::current_timestamp();
                 let user_id = &request.user_id;
-                let enclave_id_i64 = enclave_id.as_u32() as i64;
-                let enclave_key_epoch_i64 = enclave_key_epoch as i64;
+                let enclave_id: i64 = enclave_id.into();
+                let enclave_key_epoch: i64 = enclave_key_epoch as i64;
                 let auth_pubkey = request.auth_pubkey.as_slice();
 
+                // Generate a key_id for this participant's key
+                let key_id = KeyId::new_v7();
+
+                // Decode the enclave_encrypted_data (hex-encoded encrypted private key)
+                let encrypted_private_key = hex::decode(&enclave_encrypted_data).map_err(|e| {
+                    ApiError::BadRequest(format!("Invalid enclave_encrypted_data hex: {}", e))
+                })?;
+
+                // First, insert into user_keys table
+                let result = sqlx::query!(
+                    r#"INSERT INTO user_keys (
+                        user_id, key_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                        created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id"#,
+                    user_id,
+                    key_id,
+                    enclave_id,
+                    enclave_key_epoch,
+                    encrypted_private_key,
+                    auth_pubkey,
+                    keygen_session_id,
+                    current_time,
+                    current_time
+                )
+                .fetch_one(&pool)
+                .await?;
+
+                let user_key_id = result.id.ok_or_else(|| {
+                    ApiError::database("No id returned from user_keys insert".to_string())
+                })?;
+
+                // Then, insert into keygen_participants with reference to user_keys
                 sqlx::query!(
                     r#"INSERT OR REPLACE INTO keygen_participants (
-                        keygen_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
-                        registered_at, require_signing_approval, auth_pubkey,
-                        session_encrypted_data, enclave_encrypted_data
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+                        keygen_session_id, user_id, user_key_id,
+                        registered_at, require_signing_approval,
+                        session_encrypted_data
+                    ) VALUES ($1, $2, $3, $4, $5, $6)"#,
                     keygen_session_id,
                     user_id,
-                    enclave_id_i64,
-                    enclave_key_epoch_i64,
+                    user_key_id,
                     current_time,
                     request.require_signing_approval,
-                    auth_pubkey,
-                    session_encrypted_data,
-                    enclave_encrypted_data
+                    session_encrypted_data
                 )
                 .execute(&pool)
                 .await?;
@@ -594,31 +656,62 @@ impl Database {
             .await
     }
 
-    /// Note: We use `query_as::<_, T>()` (runtime) instead of `query_as!()` (macro) here
-    /// because `KeygenParticipantRow` has custom types (`UserId`, `EnclaveId`) that require
-    /// a `FromRow` implementation for proper type conversion from SQLite primitives.
-    /// The `query_as!` macro generates its own mapping code and doesn't use `FromRow`,
-    /// so it can't handle custom type conversions. If sqlx adds support for custom type
-    /// mappings in macros in the future, this could be converted to use `query_as!`.
     async fn get_keygen_participants(
         &self,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<ParticipantData>, ApiError> {
-        let rows = sqlx::query_as::<_, KeygenParticipantRow>(
-            r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
-                    require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
-             FROM keygen_participants
-             WHERE keygen_session_id = ?
-             ORDER BY registered_at ASC"#,
+        // Join with user_keys to get enclave info and auth_pubkey
+        // Use hex() to convert encrypted_private_key BLOB to hex string directly
+        let participants = sqlx::query_as!(
+            ParticipantData,
+            r#"SELECT
+                kp.user_id as "user_id!: UserId",
+                kp.user_key_id as "user_key_id!",
+                uk.enclave_id as "enclave_id!: EnclaveId",
+                uk.enclave_key_epoch as "enclave_key_epoch!: u64",
+                kp.require_signing_approval as "require_signing_approval!: bool",
+                uk.auth_pubkey as "auth_pubkey!",
+                kp.session_encrypted_data,
+                hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
+             FROM keygen_participants kp
+             JOIN user_keys uk ON kp.user_key_id = uk.id
+             WHERE kp.keygen_session_id = $1
+             ORDER BY kp.registered_at ASC"#,
+            keygen_session_id
         )
-        .bind(keygen_session_id)
         .fetch_all(&self.pool)
         .await?;
 
-        let participants: Vec<ParticipantData> =
-            rows.into_iter().filter_map(|row| row.into()).collect();
-
         Ok(participants)
+    }
+
+    /// Get a single keygen participant by session ID and user ID.
+    pub async fn get_keygen_participant(
+        &self,
+        keygen_session_id: &SessionId,
+        user_id: &UserId,
+    ) -> Result<Option<ParticipantData>, ApiError> {
+        let participant = sqlx::query_as!(
+            ParticipantData,
+            r#"SELECT
+                kp.user_id as "user_id!: UserId",
+                kp.user_key_id as "user_key_id!",
+                uk.enclave_id as "enclave_id!: EnclaveId",
+                uk.enclave_key_epoch as "enclave_key_epoch!: u64",
+                kp.require_signing_approval as "require_signing_approval!: bool",
+                uk.auth_pubkey as "auth_pubkey!",
+                kp.session_encrypted_data,
+                hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
+             FROM keygen_participants kp
+             JOIN user_keys uk ON kp.user_key_id = uk.id
+             WHERE kp.keygen_session_id = $1 AND kp.user_id = $2"#,
+            keygen_session_id,
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(participant)
     }
 
     pub async fn get_keygen_participant_count(
@@ -640,9 +733,12 @@ impl Database {
         user_id: &UserId,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<u8>, ApiError> {
+        // Join with user_keys to get the auth_pubkey
         let auth_pubkey: Vec<u8> = sqlx::query_scalar!(
-            r#"SELECT auth_pubkey FROM keygen_participants
-             WHERE user_id = $1 AND keygen_session_id = $2"#,
+            r#"SELECT uk.auth_pubkey
+             FROM keygen_participants kp
+             JOIN user_keys uk ON kp.user_key_id = uk.id
+             WHERE kp.user_id = $1 AND kp.keygen_session_id = $2"#,
             user_id,
             keygen_session_id
         )
@@ -728,21 +824,25 @@ impl Database {
                         }
                     };
 
-                let keygen_participants_rows = sqlx::query_as::<_, KeygenParticipantRow>(
-                    r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
-                            require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
-                     FROM keygen_participants
-                     WHERE keygen_session_id = ?
-                     ORDER BY registered_at ASC"#,
+                let keygen_participants: Vec<ParticipantData> = sqlx::query_as!(
+                    ParticipantData,
+                    r#"SELECT
+                        kp.user_id as "user_id!: UserId",
+                        kp.user_key_id as "user_key_id!",
+                        uk.enclave_id as "enclave_id!: EnclaveId",
+                        uk.enclave_key_epoch as "enclave_key_epoch!: u64",
+                        kp.require_signing_approval as "require_signing_approval!: bool",
+                        uk.auth_pubkey as "auth_pubkey!",
+                        kp.session_encrypted_data,
+                        hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
+                     FROM keygen_participants kp
+                     JOIN user_keys uk ON kp.user_key_id = uk.id
+                     WHERE kp.keygen_session_id = $1
+                     ORDER BY kp.registered_at ASC"#,
+                    keygen_session_id
                 )
-                .bind(keygen_session_id)
                 .fetch_all(&pool)
                 .await?;
-
-                let keygen_participants: Vec<ParticipantData> = keygen_participants_rows
-                    .into_iter()
-                    .filter_map(|row| row.into())
-                    .collect();
 
                 let expected_participants: Vec<UserId> = keygen_participants
                     .iter()
@@ -752,18 +852,16 @@ impl Database {
                 let current_time = DbUtils::current_timestamp();
                 let expires_at = current_time + request.timeout_secs as i64;
 
-                let participants_requiring_approval: Vec<UserId> = sqlx::query_scalar!(
-                    r#"SELECT user_id as "user_id: UserId" FROM keygen_participants
-                     WHERE keygen_session_id = $1 AND require_signing_approval = true"#,
-                    keygen_session_id
-                )
-                .fetch_all(&pool)
-                .await?;
+                let participants_requiring_approval: Vec<UserId> = keygen_participants
+                    .iter()
+                    .filter(|p| p.require_signing_approval)
+                    .map(|p| p.user_id.clone())
+                    .collect();
 
-                // Convert keygen participants to registered participants map
+                // Convert keygen participants to registered participants map (clone to reuse later)
                 let registered_participants: BTreeMap<UserId, ParticipantData> = keygen_participants
-                    .into_iter()
-                    .map(|p| (p.user_id.clone(), p))
+                    .iter()
+                    .map(|p| (p.user_id.clone(), p.clone()))
                     .collect();
 
                 // Create initial signing session status - CollectingParticipants
@@ -839,42 +937,21 @@ impl Database {
                 .execute(&pool)
                 .await?;
 
-                // Get fresh keygen participants for database insertion (uses runtime query_as for custom FromRow types)
-                let keygen_participants_for_db_rows = sqlx::query_as::<_, KeygenParticipantRow>(
-                    r#"SELECT user_id, assigned_enclave_id as enclave_id, enclave_key_epoch, registered_at,
-                            require_signing_approval, auth_pubkey, session_encrypted_data, enclave_encrypted_data
-                     FROM keygen_participants
-                     WHERE keygen_session_id = ?
-                     ORDER BY registered_at ASC"#,
-                )
-                .bind(keygen_session_id)
-                .fetch_all(&pool)
-                .await?;
-
-                let keygen_participants_for_db: Vec<ParticipantData> = keygen_participants_for_db_rows
-                    .into_iter()
-                    .filter_map(|row| row.into())
-                    .collect();
-
-                for participant in &keygen_participants_for_db {
+                for participant in &keygen_participants {
                     let participant_session_encrypted = &participant.session_encrypted_data;
-                    let participant_enclave_encrypted = &participant.enclave_encrypted_data;
                     let user_id = &participant.user_id;
-                    let enclave_id_i64 = participant.enclave_id.as_u32() as i64;
-                    let enclave_key_epoch_i64 = participant.enclave_key_epoch as i64;
+                    let user_key_id = participant.user_key_id;
 
                     sqlx::query!(
                         r#"INSERT INTO signing_participants (
-                            signing_session_id, user_id, assigned_enclave_id, enclave_key_epoch,
-                            registered_at, session_encrypted_data, enclave_encrypted_data
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                            signing_session_id, user_id, user_key_id,
+                            registered_at, session_encrypted_data
+                        ) VALUES ($1, $2, $3, $4, $5)"#,
                         signing_session_id,
                         user_id,
-                        enclave_id_i64,
-                        enclave_key_epoch_i64,
+                        user_key_id,
                         current_time,
-                        participant_session_encrypted,
-                        participant_enclave_encrypted
+                        participant_session_encrypted
                     )
                     .execute(&pool)
                     .await?;
@@ -1217,36 +1294,40 @@ impl Database {
         Ok(records)
     }
 
-    /// Get all COMPLETED, non-expired keygen sessions where this enclave participates
-    /// (either as coordinator or has participants assigned).
+    /// Get all COMPLETED, non-expired keygen sessions where this enclave participates.
     /// These are long-lived sessions that need to be restored after gateway/enclave restart.
+    /// An enclave participates if it is either:
+    /// 1. The coordinator enclave for the session, OR
+    /// 2. Has user keys stored from that keygen session (via user_keys.origin_keygen_session_id)
     pub async fn get_restorable_keygen_sessions_for_enclave(
         &self,
         enclave_id: u32,
     ) -> Result<Vec<KeygenSessionStatus>, ApiError> {
         // Get sessions where this enclave is either:
         // 1. The coordinator enclave, OR
-        // 2. Has participants assigned to it
-        let rows = sqlx::query(
+        // 2. Has user keys that originated from this keygen session
+        let enclave_id: i64 = enclave_id as i64;
+        let rows = sqlx::query!(
             r#"
             SELECT DISTINCT ks.keygen_session_id, ks.status
             FROM keygen_sessions ks
-            LEFT JOIN keygen_participants kp ON ks.keygen_session_id = kp.keygen_session_id
+            LEFT JOIN user_keys uk ON ks.keygen_session_id = uk.origin_keygen_session_id
             WHERE ks.status_name = 'completed'
-              AND (ks.coordinator_enclave_id = ? OR kp.assigned_enclave_id = ?)
+              AND (ks.coordinator_enclave_id = $1 OR uk.enclave_id = $1)
             "#,
+            enclave_id
         )
-        .bind(enclave_id as i64)
-        .bind(enclave_id as i64)
         .fetch_all(&self.pool)
         .await?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let session_id_bytes: Vec<u8> = row.try_get("keygen_session_id")?;
+            let session_id_bytes = row
+                .keygen_session_id
+                .ok_or_else(|| ApiError::Serialization("Missing keygen_session_id".to_string()))?;
             let session_id = SessionId::try_from(session_id_bytes)
                 .map_err(|e| ApiError::Serialization(format!("Invalid session ID: {e:?}")))?;
-            let status_json: String = row.try_get("status")?;
+            let status_json = row.status;
 
             let mut status: KeygenSessionStatus =
                 serde_json::from_str(&status_json).map_err(|e| {
@@ -1287,16 +1368,17 @@ impl Database {
     ) -> Result<Vec<SigningSessionStatus>, ApiError> {
         // Get signing sessions where this enclave has participants assigned
         // and the session is still active (not completed or failed)
-        let enclave_id_i64 = enclave_id as i64;
+        let enclave_id: i64 = enclave_id as i64;
         let rows = sqlx::query!(
             r#"
             SELECT DISTINCT ss.signing_session_id, ss.status
             FROM signing_sessions ss
             INNER JOIN signing_participants sp ON ss.signing_session_id = sp.signing_session_id
+            INNER JOIN user_keys uk ON sp.user_key_id = uk.id
             WHERE ss.status_name NOT IN ('completed', 'failed')
-              AND sp.assigned_enclave_id = $1
+              AND uk.enclave_id = $1
             "#,
-            enclave_id_i64
+            enclave_id
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1450,10 +1532,10 @@ impl Database {
         public_key: Option<String>,
         cache_duration_secs: i64,
         attestation_document: Option<String>,
-        key_epoch: Option<u64>,
-        key_generation_time: Option<u64>,
-        startup_time: Option<u64>,
-        active_sessions: Option<u32>,
+        key_epoch: Option<i64>,
+        key_generation_time: Option<i64>,
+        startup_time: Option<i64>,
+        active_sessions: Option<i32>,
     ) -> Result<(), ApiError> {
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
@@ -1462,10 +1544,10 @@ impl Database {
                 let public_key_value = public_key.unwrap_or_else(|| "unavailable".to_string());
                 let enclave_id_i32 = enclave_id as i32;
                 let attestation_doc = attestation_document.unwrap_or_default();
-                let key_epoch_i64 = key_epoch.unwrap_or(1) as i64;
-                let key_gen_time_i64 = key_generation_time.unwrap_or(0) as i64;
-                let startup_time_i64 = startup_time.unwrap_or(current_time as u64) as i64;
-                let active_sessions_i32 = active_sessions.unwrap_or(0) as i32;
+                let key_epoch = key_epoch.unwrap_or(1);
+                let key_generation_time = key_generation_time.unwrap_or(0);
+                let startup_time = startup_time.unwrap_or(current_time);
+                let active_sessions = active_sessions.unwrap_or(0);
 
                 sqlx::query!(
                     r#"INSERT INTO enclave_public_keys (enclave_id, public_key, cached_at, expires_at, is_healthy,
@@ -1487,10 +1569,10 @@ impl Database {
                     expires_at,
                     is_healthy,
                     attestation_doc,
-                    key_epoch_i64,
-                    key_gen_time_i64,
-                    startup_time_i64,
-                    active_sessions_i32
+                    key_epoch,
+                    key_generation_time,
+                    startup_time,
+                    active_sessions
                 )
                 .execute(&pool)
                 .await?;
@@ -1638,7 +1720,7 @@ impl Database {
         let kms_key_id = kms_key_id.to_string();
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
-                let enclave_id_i64 = enclave_id.as_u32() as i64;
+                let enclave_id: i64 = enclave_id.into();
 
                 sqlx::query!(
                     r#"INSERT INTO enclave_master_keys (
@@ -1649,7 +1731,7 @@ impl Database {
                         encrypted_private_key = excluded.encrypted_private_key,
                         kms_key_id = excluded.kms_key_id,
                         key_epoch = key_epoch + 1"#,
-                    enclave_id_i64,
+                    enclave_id,
                     kms_encrypted_dek,
                     encrypted_private_key,
                     kms_key_id
@@ -1672,83 +1754,953 @@ impl Database {
              FROM enclave_master_keys
              WHERE enclave_id = ?"#,
         )
-        .bind(enclave_id.as_u32() as i64)
+        .bind(i64::from(enclave_id))
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row)
     }
+
+    /// Reserve a key slot for the two-phase import flow
+    pub async fn reserve_key_slot(
+        &self,
+        key_id: &KeyId,
+        user_id: &UserId,
+        enclave_id: EnclaveId,
+        enclave_key_epoch: u64,
+        expires_at: i64,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let user_id = user_id.clone();
+        let enclave_key_epoch_i64 = enclave_key_epoch as i64;
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"INSERT INTO reserved_key_slots (
+                        key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    key_id,
+                    user_id,
+                    enclave_id,
+                    enclave_key_epoch_i64,
+                    now,
+                    expires_at
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get a reserved key slot
+    pub async fn get_reserved_key_slot(
+        &self,
+        key_id: &KeyId,
+    ) -> Result<Option<ReservedKeySlot>, ApiError> {
+        let row = sqlx::query_as::<_, ReservedKeySlot>(
+            r#"SELECT key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at
+             FROM reserved_key_slots
+             WHERE key_id = ? AND expires_at > ?"#,
+        )
+        .bind(key_id)
+        .bind(DbUtils::current_timestamp())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Delete a reserved key slot (after successful import or expiry cleanup)
+    pub async fn delete_reserved_key_slot(&self, key_id: &KeyId) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"DELETE FROM reserved_key_slots WHERE key_id = $1"#,
+                    key_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Store a user key
+    pub async fn store_user_key(&self, params: StoreUserKeyParams<'_>) -> Result<i64, ApiError> {
+        let user_id = params.user_id.clone();
+        let key_id = params.key_id.clone();
+        let enclave_id = params.enclave_id;
+        let enclave_key_epoch_i64 = params.enclave_key_epoch as i64;
+        let encrypted_private_key = params.encrypted_private_key.to_vec();
+        let auth_pubkey = params.auth_pubkey.to_vec();
+        let origin_keygen_session_id = params.origin_keygen_session_id.cloned();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                let result = sqlx::query!(
+                    r#"INSERT INTO user_keys (
+                        user_id, key_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                        created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id"#,
+                    user_id,
+                    key_id,
+                    enclave_id,
+                    enclave_key_epoch_i64,
+                    encrypted_private_key,
+                    auth_pubkey,
+                    origin_keygen_session_id,
+                    now,
+                    now
+                )
+                .fetch_one(&pool)
+                .await?;
+
+                result
+                    .id
+                    .ok_or_else(|| ApiError::database("No id returned from insert".to_string()))
+            })
+            .await
+    }
+
+    /// Get a user key by key_id
+    pub async fn get_user_key(&self, key_id: &KeyId) -> Result<Option<UserKey>, ApiError> {
+        let row = sqlx::query_as::<_, UserKey>(
+            r#"SELECT id, user_id, key_id, enclave_id, enclave_key_epoch,
+                    encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                    created_at, updated_at
+             FROM user_keys
+             WHERE key_id = ?"#,
+        )
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get a user key by user_id and key_id
+    pub async fn get_user_key_by_user_and_key(
+        &self,
+        user_id: &UserId,
+        key_id: &KeyId,
+    ) -> Result<Option<UserKey>, ApiError> {
+        let row = sqlx::query_as::<_, UserKey>(
+            r#"SELECT id, user_id, key_id, enclave_id, enclave_key_epoch,
+                    encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                    created_at, updated_at
+             FROM user_keys
+             WHERE user_id = ? AND key_id = ?"#,
+        )
+        .bind(user_id)
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// List all keys for a user
+    pub async fn list_user_keys(&self, user_id: &UserId) -> Result<Vec<UserKey>, ApiError> {
+        let rows = sqlx::query_as::<_, UserKey>(
+            r#"SELECT id, user_id, key_id, enclave_id, enclave_key_epoch,
+                    encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                    created_at, updated_at
+             FROM user_keys
+             WHERE user_id = ?
+             ORDER BY created_at DESC"#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Delete a user key and its associated signing sessions atomically
+    pub async fn delete_user_key(
+        &self,
+        user_id: &UserId,
+        key_id: &KeyId,
+    ) -> Result<bool, ApiError> {
+        let user_id = user_id.clone();
+        let key_id = key_id.clone();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                let mut tx = pool.begin().await?;
+
+                // First get the user_key id to delete associated signing sessions
+                let user_key_row: Option<(i64,)> = sqlx::query_as(
+                    r#"SELECT id FROM user_keys WHERE user_id = $1 AND key_id = $2"#,
+                )
+                .bind(&user_id)
+                .bind(&key_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                if let Some((user_key_id,)) = user_key_row {
+                    // Delete associated single signing sessions first
+                    sqlx::query(r#"DELETE FROM single_signing_sessions WHERE user_key_id = $1"#)
+                        .bind(user_key_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    // Now delete the user key
+                    let result = sqlx::query(r#"DELETE FROM user_keys WHERE id = $1"#)
+                        .bind(user_key_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    tx.commit().await?;
+                    Ok(result.rows_affected() > 0)
+                } else {
+                    Ok(false)
+                }
+            })
+            .await
+    }
+
+    /// Get all user keys for an enclave (for restoration)
+    pub async fn get_user_keys_for_enclave(
+        &self,
+        enclave_id: EnclaveId,
+    ) -> Result<Vec<UserKey>, ApiError> {
+        let rows = sqlx::query_as::<_, UserKey>(
+            r#"SELECT id, user_id, key_id, enclave_id, enclave_key_epoch,
+                    encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                    created_at, updated_at
+             FROM user_keys
+             WHERE enclave_id = ?"#,
+        )
+        .bind(enclave_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Create a single signing session
+    pub async fn create_single_signing_session(
+        &self,
+        params: CreateSingleSigningParams<'_>,
+    ) -> Result<(), ApiError> {
+        let signing_session_id = params.signing_session_id.clone();
+        let user_key_id = params.user_key_id;
+        let encrypted_message = params.encrypted_message.to_vec();
+        let encrypted_session_secret = params.encrypted_session_secret.to_vec();
+        let signature_type = params.signature_type.to_string();
+        let approval_signature = params.approval_signature.to_vec();
+        let approval_timestamp = params.approval_timestamp;
+        let expires_at = params.expires_at;
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"INSERT INTO single_signing_sessions (
+                        signing_session_id, user_key_id, status_name,
+                        encrypted_message, encrypted_session_secret, signature_type,
+                        approval_signature, approval_timestamp,
+                        created_at, updated_at, expires_at
+                    ) VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10)"#,
+                    signing_session_id,
+                    user_key_id,
+                    encrypted_message,
+                    encrypted_session_secret,
+                    signature_type,
+                    approval_signature,
+                    approval_timestamp,
+                    now,
+                    now,
+                    expires_at
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get a single signing session
+    pub async fn get_single_signing_session(
+        &self,
+        signing_session_id: &SessionId,
+    ) -> Result<Option<SingleSigningSession>, ApiError> {
+        let row = sqlx::query_as::<_, SingleSigningSession>(
+            r#"SELECT ss.signing_session_id, ss.user_key_id, ss.status_name,
+                    ss.encrypted_message, ss.encrypted_session_secret,
+                    ss.encrypted_signature, ss.signature_type,
+                    ss.approval_signature, ss.approval_timestamp,
+                    ss.created_at, ss.updated_at, ss.completed_at, ss.expires_at,
+                    ss.error_message, ss.processing_started_at, ss.last_processing_attempt,
+                    ss.retry_count,
+                    uk.user_id, uk.key_id, uk.enclave_id, uk.auth_pubkey
+             FROM single_signing_sessions ss
+             JOIN user_keys uk ON ss.user_key_id = uk.id
+             WHERE ss.signing_session_id = ?"#,
+        )
+        .bind(signing_session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Update single signing session with result
+    pub async fn update_single_signing_result(
+        &self,
+        signing_session_id: &SessionId,
+        encrypted_signature: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let signing_session_id = signing_session_id.clone();
+        let encrypted_signature = encrypted_signature.map(|s| s.to_string());
+        let error_message = error_message.map(|s| s.to_string());
+        let now = DbUtils::current_timestamp();
+
+        let status = if encrypted_signature.is_some() {
+            "completed"
+        } else {
+            "failed"
+        };
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE single_signing_sessions
+                     SET status_name = $1, encrypted_signature = $2, error_message = $3,
+                         completed_at = $4, updated_at = $5
+                     WHERE signing_session_id = $6"#,
+                    status,
+                    encrypted_signature,
+                    error_message,
+                    now,
+                    now,
+                    signing_session_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get processable single signing sessions
+    pub async fn get_processable_single_signing_sessions(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SingleSigningSession>, ApiError> {
+        let now = DbUtils::current_timestamp();
+        let rows = sqlx::query_as::<_, SingleSigningSession>(
+            r#"SELECT ss.signing_session_id, ss.user_key_id, ss.status_name,
+                    ss.encrypted_message, ss.encrypted_session_secret,
+                    ss.encrypted_signature, ss.signature_type,
+                    ss.approval_signature, ss.approval_timestamp,
+                    ss.created_at, ss.updated_at, ss.completed_at, ss.expires_at,
+                    ss.error_message, ss.processing_started_at, ss.last_processing_attempt,
+                    ss.retry_count,
+                    uk.user_id, uk.key_id, uk.enclave_id, uk.auth_pubkey
+             FROM single_signing_sessions ss
+             JOIN user_keys uk ON ss.user_key_id = uk.id
+             WHERE ss.status_name = 'pending'
+               AND ss.expires_at > ?
+             ORDER BY ss.created_at ASC
+             LIMIT ?"#,
+        )
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Mark single signing session as processing
+    pub async fn mark_single_signing_processing(
+        &self,
+        signing_session_id: &SessionId,
+    ) -> Result<(), ApiError> {
+        let signing_session_id = signing_session_id.clone();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE single_signing_sessions
+                     SET status_name = 'processing', processing_started_at = $1,
+                         last_processing_attempt = $2, updated_at = $3
+                     WHERE signing_session_id = $4"#,
+                    now,
+                    now,
+                    now,
+                    signing_session_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Atomically move a reserved key slot to pending key import
+    /// Uses a transaction to ensure atomicity
+    pub async fn move_reserved_to_pending_import(
+        &self,
+        key_id: &KeyId,
+        encrypted_private_key: &[u8],
+        auth_pubkey: &[u8],
+        expires_at: i64,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let encrypted_private_key = encrypted_private_key.to_vec();
+        let auth_pubkey = auth_pubkey.to_vec();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                let mut tx = pool.begin().await?;
+
+                // SELECT + INSERT in one statement using CTE
+                let result = sqlx::query(
+                    r#"WITH source AS (
+                        SELECT key_id, user_id, enclave_id, enclave_key_epoch
+                        FROM reserved_key_slots
+                        WHERE key_id = $1
+                    )
+                    INSERT INTO pending_key_imports (
+                        key_id, user_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, status_name,
+                        created_at, updated_at, expires_at
+                    )
+                    SELECT key_id, user_id, enclave_id, enclave_key_epoch,
+                           $2, $3, 'pending', $4, $5, $6
+                    FROM source"#,
+                )
+                .bind(&key_id)
+                .bind(&encrypted_private_key)
+                .bind(&auth_pubkey)
+                .bind(now)
+                .bind(now)
+                .bind(expires_at)
+                .execute(&mut *tx)
+                .await?;
+
+                if result.rows_affected() == 0 {
+                    return Err(ApiError::NotFound(format!(
+                        "Reserved key slot {} not found",
+                        key_id
+                    )));
+                }
+
+                // DELETE from source
+                sqlx::query(r#"DELETE FROM reserved_key_slots WHERE key_id = $1"#)
+                    .bind(&key_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                tx.commit().await?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Create a pending key import record
+    pub async fn create_pending_key_import(
+        &self,
+        params: CreatePendingKeyImportParams<'_>,
+    ) -> Result<(), ApiError> {
+        let key_id = params.key_id.clone();
+        let user_id = params.user_id.clone();
+        let enclave_id = params.enclave_id;
+        let encrypted_private_key = params.encrypted_private_key.to_vec();
+        let auth_pubkey = params.auth_pubkey.to_vec();
+        let expires_at = params.expires_at;
+        let now = DbUtils::current_timestamp();
+        let enclave_key_epoch_i64 = params.enclave_key_epoch as i64;
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"INSERT INTO pending_key_imports (
+                        key_id, user_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, status_name,
+                        created_at, updated_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)"#,
+                    key_id,
+                    user_id,
+                    enclave_id,
+                    enclave_key_epoch_i64,
+                    encrypted_private_key,
+                    auth_pubkey,
+                    now,
+                    now,
+                    expires_at
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get a pending key import by key_id
+    pub async fn get_pending_key_import(
+        &self,
+        key_id: &KeyId,
+    ) -> Result<Option<PendingKeyImport>, ApiError> {
+        let row = sqlx::query_as::<_, PendingKeyImport>(
+            r#"SELECT * FROM pending_key_imports WHERE key_id = ?"#,
+        )
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get processable pending key imports (for coordinator)
+    pub async fn get_processable_pending_key_imports(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingKeyImport>, ApiError> {
+        let now = DbUtils::current_timestamp();
+
+        let rows = sqlx::query_as::<_, PendingKeyImport>(
+            r#"SELECT * FROM pending_key_imports
+             WHERE status_name = 'pending'
+               AND expires_at > ?
+             ORDER BY created_at ASC
+             LIMIT ?"#,
+        )
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Mark pending key import as processing
+    pub async fn mark_pending_key_import_processing(&self, key_id: &KeyId) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE pending_key_imports
+                     SET status_name = 'processing', processing_started_at = ?,
+                         last_processing_attempt = ?, updated_at = ?
+                     WHERE key_id = ?"#,
+                    now,
+                    now,
+                    now,
+                    key_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Complete pending key import - atomically move to user_keys table
+    /// Uses CTE for SELECT+INSERT, then DELETE, in a transaction
+    pub async fn complete_pending_key_import(&self, key_id: &KeyId) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                let mut tx = pool.begin().await?;
+
+                // SELECT + INSERT in one statement using CTE
+                let result = sqlx::query(
+                    r#"WITH source AS (
+                        SELECT user_id, key_id, enclave_id, enclave_key_epoch,
+                               encrypted_private_key, auth_pubkey
+                        FROM pending_key_imports
+                        WHERE key_id = $1
+                    )
+                    INSERT INTO user_keys (
+                        user_id, key_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                        created_at, updated_at
+                    )
+                    SELECT user_id, key_id, enclave_id, enclave_key_epoch,
+                           encrypted_private_key, auth_pubkey, NULL, $2, $3
+                    FROM source"#,
+                )
+                .bind(&key_id)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+
+                if result.rows_affected() == 0 {
+                    return Err(ApiError::NotFound(format!(
+                        "Pending key import {} not found",
+                        key_id
+                    )));
+                }
+
+                // DELETE from source
+                sqlx::query(r#"DELETE FROM pending_key_imports WHERE key_id = $1"#)
+                    .bind(&key_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                tx.commit().await?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Fail pending key import with error message
+    pub async fn fail_pending_key_import(
+        &self,
+        key_id: &KeyId,
+        error_message: &str,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let error_message = error_message.to_string();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE pending_key_imports
+                     SET status_name = 'failed', error_message = ?, updated_at = ?
+                     WHERE key_id = ?"#,
+                    error_message,
+                    now,
+                    key_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Create a pending key store record
+    pub async fn create_pending_key_store(
+        &self,
+        key_id: &KeyId,
+        user_id: &UserId,
+        keygen_session_id: &SessionId,
+        enclave_id: EnclaveId,
+        expires_at: i64,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let user_id = user_id.clone();
+        let keygen_session_id = keygen_session_id.clone();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"INSERT INTO pending_key_stores (
+                        key_id, user_id, keygen_session_id, enclave_id, status_name,
+                        created_at, updated_at, expires_at
+                    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)"#,
+                    key_id,
+                    user_id,
+                    keygen_session_id,
+                    enclave_id,
+                    now,
+                    now,
+                    expires_at
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get a pending key store by key_id
+    pub async fn get_pending_key_store(
+        &self,
+        key_id: &KeyId,
+    ) -> Result<Option<PendingKeyStore>, ApiError> {
+        let row = sqlx::query_as::<_, PendingKeyStore>(
+            r#"SELECT * FROM pending_key_stores WHERE key_id = ?"#,
+        )
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Get processable pending key stores (for coordinator)
+    pub async fn get_processable_pending_key_stores(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingKeyStore>, ApiError> {
+        let now = DbUtils::current_timestamp();
+
+        let rows = sqlx::query_as::<_, PendingKeyStore>(
+            r#"SELECT * FROM pending_key_stores
+             WHERE status_name = 'pending'
+               AND expires_at > ?
+             ORDER BY created_at ASC
+             LIMIT ?"#,
+        )
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// Mark pending key store as processing
+    pub async fn mark_pending_key_store_processing(&self, key_id: &KeyId) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE pending_key_stores
+                     SET status_name = 'processing', processing_started_at = ?,
+                         last_processing_attempt = ?, updated_at = ?
+                     WHERE key_id = ?"#,
+                    now,
+                    now,
+                    now,
+                    key_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Complete pending key store - atomically store encrypted key from enclave response
+    /// Uses CTE for SELECT+INSERT, then DELETE, in a transaction
+    pub async fn complete_pending_key_store(
+        &self,
+        key_id: &KeyId,
+        encrypted_private_key: &[u8],
+        auth_pubkey: &[u8],
+        enclave_key_epoch: u64,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let encrypted_private_key = encrypted_private_key.to_vec();
+        let auth_pubkey = auth_pubkey.to_vec();
+        let now = DbUtils::current_timestamp();
+        let enclave_key_epoch_i64 = enclave_key_epoch as i64;
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                let mut tx = pool.begin().await?;
+
+                // SELECT + INSERT in one statement using CTE
+                let result = sqlx::query(
+                    r#"WITH source AS (
+                        SELECT user_id, key_id, enclave_id, keygen_session_id
+                        FROM pending_key_stores
+                        WHERE key_id = $1
+                    )
+                    INSERT INTO user_keys (
+                        user_id, key_id, enclave_id, enclave_key_epoch,
+                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,
+                        created_at, updated_at
+                    )
+                    SELECT user_id, key_id, enclave_id, $2,
+                           $3, $4, keygen_session_id, $5, $6
+                    FROM source"#,
+                )
+                .bind(&key_id)
+                .bind(enclave_key_epoch_i64)
+                .bind(&encrypted_private_key)
+                .bind(&auth_pubkey)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+
+                if result.rows_affected() == 0 {
+                    return Err(ApiError::NotFound(format!(
+                        "Pending key store {} not found",
+                        key_id
+                    )));
+                }
+
+                // DELETE from source
+                sqlx::query(r#"DELETE FROM pending_key_stores WHERE key_id = $1"#)
+                    .bind(&key_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                tx.commit().await?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Fail pending key store with error message
+    pub async fn fail_pending_key_store(
+        &self,
+        key_id: &KeyId,
+        error_message: &str,
+    ) -> Result<(), ApiError> {
+        let key_id = key_id.clone();
+        let error_message = error_message.to_string();
+        let now = DbUtils::current_timestamp();
+
+        self.writer
+            .execute(self.pool.clone(), move |pool| async move {
+                sqlx::query!(
+                    r#"UPDATE pending_key_stores
+                     SET status_name = 'failed', error_message = ?, updated_at = ?
+                     WHERE key_id = ?"#,
+                    error_message,
+                    now,
+                    key_id
+                )
+                .execute(&pool)
+                .await?;
+
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get key operation status (checks both pending tables and user_keys)
+    pub async fn get_key_operation_status(
+        &self,
+        user_id: &UserId,
+        key_id: &KeyId,
+    ) -> Result<Option<KeyOperationStatus>, ApiError> {
+        // Check if key exists in user_keys (completed)
+        if let Some(key) = self.get_user_key_by_user_and_key(user_id, key_id).await? {
+            return Ok(Some(KeyOperationStatus {
+                key_id: key.key_id,
+                user_id: key.user_id,
+                status: "completed".to_string(),
+                error_message: None,
+                created_at: key.created_at,
+            }));
+        }
+
+        // Check pending_key_imports
+        if let Some(pending) = self.get_pending_key_import(key_id).await? {
+            if pending.user_id == *user_id {
+                return Ok(Some(KeyOperationStatus {
+                    key_id: pending.key_id,
+                    user_id: pending.user_id,
+                    status: pending.status_name,
+                    error_message: pending.error_message,
+                    created_at: pending.created_at,
+                }));
+            }
+        }
+
+        // Check pending_key_stores
+        if let Some(pending) = self.get_pending_key_store(key_id).await? {
+            if pending.user_id == *user_id {
+                return Ok(Some(KeyOperationStatus {
+                    key_id: pending.key_id,
+                    user_id: pending.user_id,
+                    status: pending.status_name,
+                    error_message: pending.error_message,
+                    created_at: pending.created_at,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
-#[derive(Debug, Clone)]
-pub struct KeygenParticipantRow {
+#[derive(Debug, Clone, FromRow)]
+pub struct ReservedKeySlot {
+    pub key_id: KeyId,
     pub user_id: UserId,
     pub enclave_id: EnclaveId,
-    pub enclave_key_epoch: u64,
-    pub registered_at: i64,
-    pub require_signing_approval: bool,
+    pub enclave_key_epoch: i64,
+    pub reserved_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct UserKey {
+    pub id: i64,
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub enclave_id: EnclaveId,
+    pub enclave_key_epoch: i64,
+    pub encrypted_private_key: Vec<u8>,
     pub auth_pubkey: Vec<u8>,
-    pub session_encrypted_data: String,
-    pub enclave_encrypted_data: String,
+    pub origin_keygen_session_id: Option<SessionId>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
-impl FromRow<'_, SqliteRow> for KeygenParticipantRow {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        let user_id: UserId = row.try_get("user_id")?;
-
-        let enclave_id: EnclaveId = row.try_get("enclave_id")?;
-
-        let enclave_key_epoch_i64: i64 = row.try_get("enclave_key_epoch")?;
-        let registered_at: i64 = row.try_get("registered_at")?;
-        let require_signing_approval: bool = row.try_get("require_signing_approval")?;
-        let auth_pubkey: Vec<u8> = row.try_get("auth_pubkey")?;
-        let session_encrypted_data: String = row.try_get("session_encrypted_data")?;
-        let enclave_encrypted_data: String = row.try_get("enclave_encrypted_data")?;
-
-        Ok(KeygenParticipantRow {
-            user_id,
-            enclave_id,
-            enclave_key_epoch: enclave_key_epoch_i64 as u64,
-            registered_at,
-            require_signing_approval,
-            auth_pubkey,
-            session_encrypted_data,
-            enclave_encrypted_data,
-        })
-    }
+#[derive(Debug, Clone, FromRow)]
+pub struct SingleSigningSession {
+    pub signing_session_id: SessionId,
+    pub user_key_id: i64,
+    pub status_name: String,
+    pub encrypted_message: Option<Vec<u8>>,
+    pub encrypted_session_secret: Option<Vec<u8>>,
+    pub encrypted_signature: Option<String>,
+    pub signature_type: String,
+    /// Approval signature: Sign(auth_privkey, SHA256(message_hash || key_id || approval_timestamp))
+    pub approval_signature: Vec<u8>,
+    /// Timestamp used in approval signature (enclave checks freshness)
+    pub approval_timestamp: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+    pub expires_at: i64,
+    pub error_message: Option<String>,
+    pub processing_started_at: Option<i64>,
+    pub last_processing_attempt: Option<i64>,
+    pub retry_count: i64,
+    // Joined from user_keys
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub enclave_id: EnclaveId,
+    pub auth_pubkey: Vec<u8>,
 }
 
-impl From<KeygenParticipantRow> for Option<ParticipantData> {
-    fn from(row: KeygenParticipantRow) -> Self {
-        Some(ParticipantData {
-            user_id: row.user_id,
-            enclave_id: row.enclave_id,
-            enclave_key_epoch: row.enclave_key_epoch,
-            session_encrypted_data: row.session_encrypted_data,
-            enclave_encrypted_data: row.enclave_encrypted_data,
-        })
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, FromRow)]
 pub struct ProcessableSessionRecord {
     pub session_id: SessionId,
     pub session_kind: SessionKind,
 }
 
-impl FromRow<'_, SqliteRow> for ProcessableSessionRecord {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        let session_kind: SessionKind = row.try_get("session_kind")?;
-        let session_id: SessionId = row.try_get("session_id")?;
-
-        Ok(ProcessableSessionRecord {
-            session_id,
-            session_kind,
-        })
-    }
+/// Row for restorable keygen session queries
+#[derive(Clone, FromRow)]
+pub struct RestorableKeygenSessionRow {
+    pub keygen_session_id: SessionId,
+    pub status: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromRow)]
 pub struct EnclaveMasterKeyRecord {
     pub kms_encrypted_dek: Vec<u8>,
     pub encrypted_private_key: Vec<u8>,
@@ -1756,46 +2708,18 @@ pub struct EnclaveMasterKeyRecord {
     pub key_epoch: i64,
 }
 
-impl FromRow<'_, SqliteRow> for EnclaveMasterKeyRecord {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(EnclaveMasterKeyRecord {
-            kms_encrypted_dek: row.try_get("kms_encrypted_dek")?,
-            encrypted_private_key: row.try_get("encrypted_private_key")?,
-            kms_key_id: row.try_get("kms_key_id")?,
-            key_epoch: row.try_get("key_epoch")?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, FromRow)]
 pub struct EnclaveHealthInfo {
-    pub enclave_id: u32,
+    pub enclave_id: i32,
     pub public_key: String,
     pub cached_at: i64,
     pub expires_at: i64,
     pub is_healthy: bool,
     pub attestation_document: String,
-    pub key_epoch: u64,
-    pub key_generation_time: u64,
-    pub startup_time: u64,
-    pub active_sessions: u32,
-}
-
-impl FromRow<'_, SqliteRow> for EnclaveHealthInfo {
-    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
-        Ok(EnclaveHealthInfo {
-            enclave_id: row.try_get::<i32, _>("enclave_id")? as u32,
-            public_key: row.try_get("public_key")?,
-            cached_at: row.try_get("cached_at")?,
-            expires_at: row.try_get("expires_at")?,
-            is_healthy: row.try_get("is_healthy")?,
-            attestation_document: row.try_get("attestation_document")?,
-            key_epoch: row.try_get::<i64, _>("key_epoch")? as u64,
-            key_generation_time: row.try_get::<i64, _>("key_generation_time")? as u64,
-            startup_time: row.try_get::<i64, _>("startup_time")? as u64,
-            active_sessions: row.try_get::<i32, _>("active_sessions")? as u32,
-        })
-    }
+    pub key_epoch: i64,
+    pub key_generation_time: i64,
+    pub startup_time: i64,
+    pub active_sessions: i32,
 }
 
 #[derive(Debug)]
@@ -1804,6 +2728,57 @@ pub struct DatabaseStats {
     pub active_sessions: i64,
     pub total_participants: i64,
     pub database_size_bytes: Option<u64>,
+}
+
+/// Pending import of an external private key into the system.
+/// The user provides their own private key (encrypted to the enclave).
+#[derive(Debug, Clone, FromRow)]
+pub struct PendingKeyImport {
+    pub id: i64,
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub enclave_id: EnclaveId,
+    pub enclave_key_epoch: i64,
+    pub encrypted_private_key: Vec<u8>,
+    pub auth_pubkey: Vec<u8>,
+    pub status_name: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub processing_started_at: Option<i64>,
+    pub last_processing_attempt: Option<i64>,
+    pub retry_count: i64,
+    pub expires_at: i64,
+}
+
+/// Pending storage of a key that was generated via MuSig2 keygen.
+/// The key already exists in the enclave from keygen; this promotes it to a stored user key
+/// for single-signer use.
+#[derive(Debug, Clone, FromRow)]
+pub struct PendingKeyStore {
+    pub id: i64,
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub keygen_session_id: SessionId,
+    pub enclave_id: EnclaveId,
+    pub status_name: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub processing_started_at: Option<i64>,
+    pub last_processing_attempt: Option<i64>,
+    pub retry_count: i64,
+    pub expires_at: i64,
+}
+
+/// Combined status for key operations (import or store from keygen)
+#[derive(Debug, Clone)]
+pub struct KeyOperationStatus {
+    pub key_id: KeyId,
+    pub user_id: UserId,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
 }
 
 #[cfg(test)]

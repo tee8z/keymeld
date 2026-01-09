@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use bdk_wallet::bitcoin::{OutPoint, Txid};
 use clap::{Parser, Subcommand};
+use keymeld_examples::single_signer::SingleSignerE2ETest;
 use keymeld_examples::{ExampleConfig, KeyMeldE2ETest};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -62,6 +63,16 @@ pub struct SavedSessionData {
     pub adaptor_session_secret: String,
     pub adaptor_utxo_txid: String,
     pub adaptor_utxo_vout: u32,
+
+    // Single-signer session data
+    pub single_signer_user_id: String,
+    pub single_signer_key_id: String,
+    pub single_signer_enclave_id: u32,
+    pub single_signer_enclave_public_key: String,
+    pub single_signer_private_key_hex: String,
+    pub single_signer_public_key_hex: String,
+    pub single_signer_auth_private_key_hex: String,
+    pub single_signer_auth_public_key_hex: String,
 
     // Common data
     pub destination: String,
@@ -182,7 +193,42 @@ async fn run_keygen(
         .await?;
     info!("Adaptor UTXO: {}:{}", adaptor_utxo.txid, adaptor_utxo.vout);
 
-    // Save session data (use plain_test for user IDs since both use the same keys)
+    // Create single-signer key
+    info!("");
+    info!("========================================");
+    info!("Creating single-signer key...");
+    info!("========================================");
+
+    let mut single_signer_test = SingleSignerE2ETest::new(config.clone()).await?;
+
+    // Reserve key slot
+    single_signer_test.reserve_key_slot().await?;
+
+    // Import key
+    single_signer_test.import_key().await?;
+
+    // List keys to verify
+    let keys = single_signer_test.list_keys().await?;
+    if keys.keys.is_empty() {
+        return Err(anyhow!("Single-signer key import failed - no keys found"));
+    }
+
+    info!(
+        "Single-signer key created: {}",
+        single_signer_test.key_id.as_ref().unwrap()
+    );
+    info!("Single-signer user ID: {}", single_signer_test.user_id);
+
+    // Test signing to verify the key works before restart
+    info!("Testing single-signer signing before restart...");
+    let test_message = b"Pre-restart test message";
+    let pre_restart_sig = single_signer_test.sign_schnorr(test_message).await?;
+    info!(
+        "Pre-restart signing successful: {} bytes",
+        pre_restart_sig.len()
+    );
+
+    // Save session data
     let saved_data = SavedSessionData {
         plain_keygen_session_id: plain_keygen_session_id.to_string(),
         plain_aggregate_key,
@@ -195,6 +241,16 @@ async fn run_keygen(
         adaptor_session_secret,
         adaptor_utxo_txid: adaptor_utxo.txid.to_string(),
         adaptor_utxo_vout: adaptor_utxo.vout,
+
+        // Single-signer data
+        single_signer_user_id: single_signer_test.user_id.to_string(),
+        single_signer_key_id: single_signer_test.key_id.as_ref().unwrap().to_string(),
+        single_signer_enclave_id: single_signer_test.enclave_id.unwrap(),
+        single_signer_enclave_public_key: single_signer_test.enclave_public_key.clone().unwrap(),
+        single_signer_private_key_hex: hex::encode(single_signer_test.private_key.secret_bytes()),
+        single_signer_public_key_hex: hex::encode(single_signer_test.public_key.serialize()),
+        single_signer_auth_private_key_hex: hex::encode(single_signer_test.auth_private_key_bytes),
+        single_signer_auth_public_key_hex: hex::encode(&single_signer_test.auth_public_key_bytes),
 
         destination: dest,
         amount,
@@ -222,9 +278,13 @@ async fn run_keygen(
     info!("========================================");
     info!("Keygen phase complete");
     info!("========================================");
-    info!("Plain session:   {}", plain_keygen_session_id);
-    info!("Adaptor session: {}", adaptor_keygen_session_id);
-    info!("Both sessions funded and ready for signing");
+    info!("Plain session:       {}", plain_keygen_session_id);
+    info!("Adaptor session:     {}", adaptor_keygen_session_id);
+    info!(
+        "Single-signer key:   {}",
+        single_signer_test.key_id.as_ref().unwrap()
+    );
+    info!("All sessions created and ready for signing");
     info!("Session data saved to: {}", output_path);
     info!("");
     info!("Now restart enclaves and run the 'sign' command to test restoration.");
@@ -252,6 +312,10 @@ async fn run_sign(config_path: String, input_path: String) -> Result<()> {
     info!(
         "Adaptor keygen session: {}",
         saved_data.adaptor_keygen_session_id
+    );
+    info!(
+        "Single-signer key:      {}",
+        saved_data.single_signer_key_id
     );
 
     // Test plain session - create and complete signing session
@@ -310,6 +374,19 @@ async fn run_sign(config_path: String, input_path: String) -> Result<()> {
         Err(e) => error!("adaptor session restoration: failed - {}", e),
     }
 
+    // Test single-signer key restoration
+    info!("");
+    info!("========================================");
+    info!("Testing single-signer key restoration...");
+    info!("========================================");
+
+    let single_signer_result = test_single_signer_restoration(&config, &saved_data).await;
+
+    match &single_signer_result {
+        Ok(()) => info!("Single-signer restoration: success"),
+        Err(e) => error!("Single-signer restoration: failed - {}", e),
+    }
+
     // Summary
     info!("");
     info!("========================================");
@@ -318,20 +395,26 @@ async fn run_sign(config_path: String, input_path: String) -> Result<()> {
 
     let plain_ok = plain_result.is_ok();
     let adaptor_ok = adaptor_result.is_ok();
+    let single_signer_ok = single_signer_result.is_ok();
 
     info!(
-        "Plain session:   {}",
+        "Plain session:     {}",
         if plain_ok { "passed" } else { "failed" }
     );
     info!(
-        "Adaptor session: {}",
+        "Adaptor session:   {}",
         if adaptor_ok { "passed" } else { "failed" }
     );
+    info!(
+        "Single-signer key: {}",
+        if single_signer_ok { "passed" } else { "failed" }
+    );
 
-    if plain_ok && adaptor_ok {
+    if plain_ok && adaptor_ok && single_signer_ok {
         info!("");
         info!("All session restoration tests passed!");
         info!("Created and completed new signing sessions using restored keygen sessions.");
+        info!("Single-signer key restored and signing verified.");
         Ok(())
     } else {
         Err(anyhow!("Some session restoration tests failed"))
@@ -469,4 +552,112 @@ async fn test_signing_with_restored_session(
     );
 
     Ok(final_txid.to_string())
+}
+
+/// Test single-signer key restoration after enclave restart
+async fn test_single_signer_restoration(
+    config: &ExampleConfig,
+    saved_data: &SavedSessionData,
+) -> Result<()> {
+    use bitcoin::secp256k1::{PublicKey, SecretKey};
+    use keymeld_sdk::{KeyId, UserId};
+
+    // Parse saved data
+    let user_id = UserId::parse(&saved_data.single_signer_user_id)
+        .map_err(|e| anyhow!("Invalid single-signer user ID: {}", e))?;
+    let key_id = KeyId::parse(&saved_data.single_signer_key_id)
+        .map_err(|e| anyhow!("Invalid single-signer key ID: {}", e))?;
+
+    let private_key_bytes = hex::decode(&saved_data.single_signer_private_key_hex)
+        .map_err(|e| anyhow!("Failed to decode private key hex: {}", e))?;
+    let private_key = SecretKey::from_slice(&private_key_bytes)
+        .map_err(|e| anyhow!("Failed to parse private key: {}", e))?;
+
+    let public_key_bytes = hex::decode(&saved_data.single_signer_public_key_hex)
+        .map_err(|e| anyhow!("Failed to decode public key hex: {}", e))?;
+    let public_key = PublicKey::from_slice(&public_key_bytes)
+        .map_err(|e| anyhow!("Failed to parse public key: {}", e))?;
+
+    let auth_private_key_bytes: [u8; 32] =
+        hex::decode(&saved_data.single_signer_auth_private_key_hex)
+            .map_err(|e| anyhow!("Failed to decode auth private key hex: {}", e))?
+            .try_into()
+            .map_err(|_| anyhow!("Auth private key is not 32 bytes"))?;
+
+    let auth_public_key_bytes = hex::decode(&saved_data.single_signer_auth_public_key_hex)
+        .map_err(|e| anyhow!("Failed to decode auth public key hex: {}", e))?;
+
+    info!("Restoring single-signer context...");
+    info!("  User ID: {}", user_id);
+    info!("  Key ID: {}", key_id);
+    info!("  Enclave ID: {}", saved_data.single_signer_enclave_id);
+
+    // Create a restored single-signer test instance
+    // We need to manually reconstruct it with the saved data
+    let restored_test = SingleSignerE2ETest {
+        config: config.clone(),
+        client: reqwest::Client::new(),
+        user_id,
+        private_key,
+        public_key,
+        auth_private_key_bytes,
+        auth_public_key_bytes,
+        key_id: Some(key_id),
+        enclave_id: Some(saved_data.single_signer_enclave_id),
+        enclave_public_key: Some(saved_data.single_signer_enclave_public_key.clone()),
+        rpc_client: None,             // Not needed for signing test
+        rpc_client_with_wallet: None, // Not needed for signing test
+        network: config.network,
+        destination: saved_data.destination.clone(),
+        amount: saved_data.amount,
+    };
+
+    // Test 1: List keys - verify the key still exists in the database
+    info!("Step 1: Verifying key exists after restart...");
+    let keys = restored_test.list_keys().await?;
+    let key_exists = keys
+        .keys
+        .iter()
+        .any(|k| k.key_id.to_string() == saved_data.single_signer_key_id);
+
+    if !key_exists {
+        return Err(anyhow!(
+            "Single-signer key {} not found after restart",
+            saved_data.single_signer_key_id
+        ));
+    }
+    info!("  Key found in database");
+
+    // Test 2: Sign with Schnorr (BIP-340) - this tests that the enclave restored the key
+    info!("Step 2: Testing Schnorr signing after restart...");
+    let schnorr_message = b"Post-restart Schnorr test message";
+    let schnorr_sig = restored_test.sign_schnorr(schnorr_message).await?;
+
+    if schnorr_sig.len() != 64 {
+        return Err(anyhow!(
+            "Invalid Schnorr signature length: expected 64, got {}",
+            schnorr_sig.len()
+        ));
+    }
+    info!("  Schnorr signature: {} bytes", schnorr_sig.len());
+
+    // Test 3: Sign with ECDSA - test the other signature type
+    info!("Step 3: Testing ECDSA signing after restart...");
+    let ecdsa_message = b"Post-restart ECDSA test message";
+    let ecdsa_sig = restored_test.sign_ecdsa(ecdsa_message).await?;
+
+    if ecdsa_sig.len() != 64 {
+        return Err(anyhow!(
+            "Invalid ECDSA signature length: expected 64, got {}",
+            ecdsa_sig.len()
+        ));
+    }
+    info!("  ECDSA signature: {} bytes", ecdsa_sig.len());
+
+    info!("Single-signer key restoration verified successfully!");
+    info!("  - Key exists in database after restart");
+    info!("  - Schnorr (BIP-340) signing works");
+    info!("  - ECDSA signing works");
+
+    Ok(())
 }
