@@ -804,15 +804,7 @@ pub struct InitSigningSessionCommand {
     /// Enclave verifies these against stored auth_pubkey before proceeding
     #[serde(default)]
     pub approval_signatures: Vec<SigningApproval>,
-
-    // Single message fields (backward compat, used if batch_items is empty)
-    #[serde(default)]
-    pub encrypted_message: String,
-    #[serde(default)]
-    pub encrypted_adaptor_configs: Option<String>,
-
-    // Batch of messages (takes precedence if non-empty)
-    #[serde(default)]
+    /// Batch items to sign (single message = batch of 1)
     pub batch_items: Vec<EnclaveBatchItem>,
 }
 
@@ -821,13 +813,8 @@ pub struct DistributeNoncesCommand {
     pub signing_session_id: SessionId,
     /// Vec of (user_id, encrypted_nonce_data_hex)
     /// Each nonce is encrypted with session secret using binary hex format (EncryptedData::to_hex)
-    /// For single-message sessions (backward compat)
-    #[serde(default)]
+    /// Single message = batch of 1
     pub nonces: Vec<(UserId, String)>,
-    /// Batch nonces: Vec of (user_id, BTreeMap<batch_item_id, encrypted_nonce_data_hex>)
-    /// For batch sessions
-    #[serde(default)]
-    pub batch_nonces: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -835,13 +822,8 @@ pub struct FinalizeSignatureCommand {
     pub signing_session_id: SessionId,
     /// Vec of (user_id, encrypted_signature_data_hex)
     /// Each signature is encrypted with session secret using binary hex format (EncryptedData::to_hex)
-    /// For single-message sessions (backward compat)
-    #[serde(default)]
+    /// Single message = batch of 1
     pub partial_signatures: Vec<(UserId, String)>,
-    /// Batch partial signatures: Vec of (user_id, BTreeMap<batch_item_id, encrypted_signature_data_hex>)
-    /// For batch sessions
-    #[serde(default)]
-    pub batch_partial_signatures: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 /// Participant data for keygen registration including auth info for signing approval
@@ -1029,13 +1011,8 @@ pub struct NoncesResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     /// Vec of (user_id, encrypted_nonce_data_hex) for all users initialized on this enclave
-    /// For single-message sessions (backward compat)
-    #[serde(default)]
+    /// Single message = batch of 1
     pub nonces: Vec<(UserId, String)>,
-    /// Batch nonces: Vec of (user_id, BTreeMap<batch_item_id, encrypted_nonce_data_hex>)
-    /// For batch sessions
-    #[serde(default)]
-    pub batch_nonces: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1054,13 +1031,8 @@ pub enum NonceData {
 pub struct PartialSignatureResponse {
     /// Vec of (user_id, encrypted_signature_data_hex)
     /// Each signature is encrypted with session secret using binary hex format (EncryptedData::to_hex)
-    /// For single-message sessions (backward compat)
-    #[serde(default)]
+    /// Single message = batch of 1
     pub partial_signatures: Vec<(UserId, String)>,
-    /// Batch partial signatures: Vec of (user_id, BTreeMap<batch_item_id, encrypted_signature_data_hex>)
-    /// For batch sessions
-    #[serde(default)]
-    pub batch_partial_signatures: Vec<(UserId, std::collections::BTreeMap<Uuid, String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1068,17 +1040,7 @@ pub struct FinalSignatureResponse {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub participant_count: usize,
-
-    // Single signature fields (backward compat)
-    /// Encrypted final signature as hex-encoded binary format (EncryptedData::to_hex)
-    #[serde(default)]
-    pub encrypted_final_signature: String,
-    /// Encrypted adaptor signatures as hex-encoded binary format (EncryptedData::to_hex)
-    #[serde(default)]
-    pub encrypted_adaptor_signatures: Option<String>,
-
-    // Batch results (populated for batch sessions)
-    #[serde(default)]
+    /// Batch results (single message = batch of 1)
     pub batch_results: Vec<EnclaveBatchResult>,
 }
 

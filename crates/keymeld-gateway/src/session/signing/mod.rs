@@ -5,6 +5,7 @@ use crate::{
     AggregatePublicKey, KeyMeldError,
 };
 use keymeld_core::protocol::SigningStatusKind;
+use keymeld_sdk::{BatchItemResult, SigningBatchItem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,8 +19,8 @@ pub mod processing;
 pub struct SigningCollectingParticipants {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub message_hash: Vec<u8>,
-    pub encrypted_message: String,
+    /// Batch items to sign (single message = batch of 1)
+    pub batch_items: Vec<SigningBatchItem>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub coordinator_encrypted_private_key: Option<String>,
@@ -29,7 +30,6 @@ pub struct SigningCollectingParticipants {
     pub required_enclave_epochs: BTreeMap<EnclaveId, u64>,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
-    pub encrypted_adaptor_configs: String,
     pub participants_requiring_approval: Vec<UserId>,
     pub approved_participants: Vec<UserId>,
 }
@@ -39,8 +39,8 @@ pub struct SigningCollectingParticipants {
 pub struct SigningInitializingSession {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub encrypted_message: String,
-    pub message_hash: Vec<u8>,
+    /// Batch items to sign (single message = batch of 1)
+    pub batch_items: Vec<SigningBatchItem>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -51,7 +51,6 @@ pub struct SigningInitializingSession {
     pub inherited_enclave_epochs: BTreeMap<EnclaveId, u64>,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
-    pub encrypted_adaptor_configs: String,
 }
 
 impl From<SigningCollectingParticipants> for SigningInitializingSession {
@@ -59,8 +58,7 @@ impl From<SigningCollectingParticipants> for SigningInitializingSession {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            encrypted_message: collecting.encrypted_message.clone(),
-            message_hash: collecting.message_hash.clone(),
+            batch_items: collecting.batch_items,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: None,
@@ -70,7 +68,6 @@ impl From<SigningCollectingParticipants> for SigningInitializingSession {
             expires_at: collecting.expires_at,
             inherited_enclave_epochs: collecting.required_enclave_epochs,
             encrypted_taproot_tweak: collecting.encrypted_taproot_tweak,
-            encrypted_adaptor_configs: collecting.encrypted_adaptor_configs,
         }
     }
 }
@@ -83,8 +80,7 @@ impl SigningInitializingSession {
         Self {
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
-            encrypted_message: collecting.encrypted_message.clone(),
-            message_hash: collecting.message_hash.clone(),
+            batch_items: collecting.batch_items,
             expected_participants: collecting.expected_participants,
             registered_participants: collecting.registered_participants,
             aggregate_public_key: Some(aggregate_public_key),
@@ -94,7 +90,6 @@ impl SigningInitializingSession {
             expires_at: collecting.expires_at,
             inherited_enclave_epochs: collecting.required_enclave_epochs,
             encrypted_taproot_tweak: collecting.encrypted_taproot_tweak,
-            encrypted_adaptor_configs: collecting.encrypted_adaptor_configs,
         }
     }
 }
@@ -104,8 +99,8 @@ impl SigningInitializingSession {
 pub struct SigningDistributingNonces {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub encrypted_message: String,
-    pub message_hash: Vec<u8>,
+    /// Batch items to sign (single message = batch of 1)
+    pub batch_items: Vec<SigningBatchItem>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -130,8 +125,7 @@ impl SigningDistributingNonces {
         Self {
             signing_session_id: initializing.signing_session_id,
             keygen_session_id: initializing.keygen_session_id,
-            encrypted_message: initializing.encrypted_message,
-            message_hash: initializing.message_hash,
+            batch_items: initializing.batch_items,
             expected_participants: initializing.expected_participants,
             registered_participants: initializing.registered_participants,
             aggregate_public_key: initializing.aggregate_public_key,
@@ -150,8 +144,8 @@ impl SigningDistributingNonces {
 pub struct SigningFinalizingSignature {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
-    pub encrypted_message: String,
-    pub message_hash: Vec<u8>,
+    /// Batch items to sign (single message = batch of 1)
+    pub batch_items: Vec<SigningBatchItem>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -174,8 +168,7 @@ impl SigningFinalizingSignature {
         Self {
             signing_session_id: distributing.signing_session_id,
             keygen_session_id: distributing.keygen_session_id,
-            encrypted_message: distributing.encrypted_message,
-            message_hash: distributing.message_hash,
+            batch_items: distributing.batch_items,
             expected_participants: distributing.expected_participants,
             registered_participants: distributing.registered_participants,
             aggregate_public_key: distributing.aggregate_public_key,
@@ -199,15 +192,15 @@ pub struct SigningCompleted {
     pub coordinator_encrypted_private_key: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
-    pub final_signature: String,
+    /// Batch results (single message = batch of 1)
+    pub batch_results: Vec<BatchItemResult>,
     pub inherited_enclave_epochs: BTreeMap<EnclaveId, u64>,
-    pub encrypted_adaptor_signatures: Option<String>,
 }
 
 impl SigningCompleted {
-    pub fn from_finalizing_with_signature(
+    pub fn from_finalizing_with_batch_results(
         finalizing: SigningFinalizingSignature,
-        final_signature: String,
+        batch_results: Vec<BatchItemResult>,
     ) -> Self {
         Self {
             signing_session_id: finalizing.signing_session_id,
@@ -218,29 +211,8 @@ impl SigningCompleted {
             coordinator_encrypted_private_key: finalizing.coordinator_encrypted_private_key,
             created_at: finalizing.created_at,
             expires_at: finalizing.expires_at,
-            final_signature,
+            batch_results,
             inherited_enclave_epochs: finalizing.inherited_enclave_epochs,
-            encrypted_adaptor_signatures: None,
-        }
-    }
-
-    pub fn from_finalizing_with_signature_and_adaptors(
-        finalizing: SigningFinalizingSignature,
-        final_signature: String,
-        encrypted_adaptor_signatures: String,
-    ) -> Self {
-        Self {
-            signing_session_id: finalizing.signing_session_id,
-            keygen_session_id: finalizing.keygen_session_id,
-            expected_participants: finalizing.expected_participants,
-            registered_participants: finalizing.registered_participants,
-            aggregate_public_key: finalizing.aggregate_public_key,
-            coordinator_encrypted_private_key: finalizing.coordinator_encrypted_private_key,
-            created_at: finalizing.created_at,
-            expires_at: finalizing.expires_at,
-            final_signature,
-            inherited_enclave_epochs: finalizing.inherited_enclave_epochs,
-            encrypted_adaptor_signatures: Some(encrypted_adaptor_signatures),
         }
     }
 }
@@ -280,103 +252,63 @@ impl SigningSessionStatus {
         ]
     }
 
-    pub fn get_encrypted_message(&self) -> Option<String> {
+    pub fn get_batch_items(&self) -> Option<&Vec<SigningBatchItem>> {
         match self {
-            SigningSessionStatus::CollectingParticipants(ref status) => {
-                Some(status.encrypted_message.clone())
-            }
-            SigningSessionStatus::InitializingSession(ref status) => {
-                Some(status.encrypted_message.clone())
-            }
-            SigningSessionStatus::DistributingNonces(ref status) => {
-                Some(status.encrypted_message.clone())
-            }
-            SigningSessionStatus::FinalizingSignature(ref status) => {
-                Some(status.encrypted_message.clone())
-            }
+            SigningSessionStatus::CollectingParticipants(ref status) => Some(&status.batch_items),
+            SigningSessionStatus::InitializingSession(ref status) => Some(&status.batch_items),
+            SigningSessionStatus::DistributingNonces(ref status) => Some(&status.batch_items),
+            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.batch_items),
             SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
         }
     }
 
-    pub fn get_message_hash(&self) -> Option<&Vec<u8>> {
+    pub fn get_batch_results(&self) -> Option<&Vec<BatchItemResult>> {
         match self {
-            SigningSessionStatus::CollectingParticipants(ref status) => Some(&status.message_hash),
-            SigningSessionStatus::InitializingSession(ref status) => Some(&status.message_hash),
-            SigningSessionStatus::DistributingNonces(ref status) => Some(&status.message_hash),
-            SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.message_hash),
-            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+            SigningSessionStatus::Completed(ref status) => Some(&status.batch_results),
+            _ => None,
         }
     }
 
-    pub fn extract_status_info(
-        &self,
-    ) -> (
-        SigningStatusKind,
-        usize,
-        Option<String>,
-        u64,
-        Vec<UserId>,
-        Vec<UserId>,
-        String,
-    ) {
+    pub fn extract_status_info(&self) -> (SigningStatusKind, usize, u64, Vec<UserId>, Vec<UserId>) {
         match self {
             SigningSessionStatus::CollectingParticipants(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
-                None,
                 status.expires_at,
                 status.participants_requiring_approval.clone(),
                 status.approved_participants.clone(),
-                String::new(),
             ),
             SigningSessionStatus::InitializingSession(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
-                None,
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(),
             ),
             SigningSessionStatus::DistributingNonces(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
-                None,
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(),
             ),
             SigningSessionStatus::FinalizingSignature(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
-                None,
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                String::new(),
             ),
             SigningSessionStatus::Completed(ref status) => (
                 SigningStatusKind::from(self),
                 status.expected_participants.len(),
-                Some(status.final_signature.clone()),
                 status.expires_at,
                 Vec::new(),
                 Vec::new(),
-                status
-                    .encrypted_adaptor_signatures
-                    .clone()
-                    .unwrap_or_default(),
             ),
-            SigningSessionStatus::Failed(_) => (
-                SigningStatusKind::from(self),
-                0,
-                None,
-                0,
-                Vec::new(),
-                Vec::new(),
-                String::new(),
-            ),
+            SigningSessionStatus::Failed(_) => {
+                (SigningStatusKind::from(self), 0, 0, Vec::new(), Vec::new())
+            }
         }
     }
 

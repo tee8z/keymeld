@@ -873,7 +873,6 @@ impl EnclaveOperator {
                     signing_session_id: cmd.signing_session_id.clone(),
                     keygen_session_id: cmd.keygen_session_id.clone(),
                     nonces,
-                    batch_nonces: vec![], // Single message mode
                 })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(
@@ -1010,10 +1009,7 @@ impl EnclaveOperator {
                     state.session_id()
                 );
 
-                Ok(PartialSignatureResponse {
-                    partial_signatures,
-                    batch_partial_signatures: vec![], // Single message mode
-                })
+                Ok(PartialSignatureResponse { partial_signatures })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(
                 "Partial signature not available in current signing state".to_string(),
@@ -1071,13 +1067,43 @@ impl EnclaveOperator {
 
                 let participant_count = state.participant_count() as usize;
 
+                // Get batch_items from the musig processor metadata
+                let batch_items = state
+                    .musig_processor()
+                    .get_session_metadata()
+                    .batch_items
+                    .clone();
+
+                // Build batch results from batch_items or create a single result
+                let batch_results = if batch_items.is_empty() {
+                    // Single message mode: create a batch of 1 using UUIDv7
+                    let batch_item_id = uuid::Uuid::now_v7();
+                    vec![keymeld_core::protocol::EnclaveBatchResult {
+                        batch_item_id,
+                        encrypted_final_signature: Some(encrypted_final_signature),
+                        encrypted_adaptor_signatures,
+                        error: None,
+                    }]
+                } else {
+                    // Batch mode: create results for each batch item
+                    // For now, since we only support single message, this path won't be hit
+                    // Full batch implementation would iterate over batch_items here
+                    batch_items
+                        .keys()
+                        .map(|batch_item_id| keymeld_core::protocol::EnclaveBatchResult {
+                            batch_item_id: *batch_item_id,
+                            encrypted_final_signature: Some(encrypted_final_signature.clone()),
+                            encrypted_adaptor_signatures: encrypted_adaptor_signatures.clone(),
+                            error: None,
+                        })
+                        .collect()
+                };
+
                 Ok(FinalSignatureResponse {
                     signing_session_id: signing_session_id.clone(),
                     keygen_session_id: keygen_session_id.clone(),
                     participant_count,
-                    encrypted_final_signature,
-                    encrypted_adaptor_signatures,
-                    batch_results: vec![], // Single message mode
+                    batch_results,
                 })
             }
             _ => Err(EnclaveError::Internal(InternalError::Other(
