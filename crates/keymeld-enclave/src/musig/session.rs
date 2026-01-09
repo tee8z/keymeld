@@ -61,6 +61,7 @@ impl SessionMetadata {
             taproot_tweak: self.taproot_tweak.clone(), // Preserve taproot configuration
             adaptor_configs: self.adaptor_configs.clone(), // Preserve adaptor configurations
             adaptor_final_signatures: BTreeMap::new(), // Reset final adaptor signatures
+            batch_items: BTreeMap::new(), // Will be set during signing initialization if batch
         })
     }
 
@@ -99,6 +100,7 @@ impl SessionMetadata {
             taproot_tweak,
             adaptor_configs: Vec::new(),
             adaptor_final_signatures: BTreeMap::new(),
+            batch_items: BTreeMap::new(),
         }
     }
 
