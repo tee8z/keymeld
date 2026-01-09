@@ -77,6 +77,20 @@ impl MusigProcessor {
         Ok(())
     }
 
+    /// Set batch items for batch signing
+    pub fn set_batch_items(
+        &mut self,
+        batch_items: std::collections::BTreeMap<uuid::Uuid, super::types::BatchItemData>,
+    ) -> Result<(), MusigError> {
+        info!(
+            "Storing {} batch items for session {}",
+            batch_items.len(),
+            self.session_metadata.session_id
+        );
+        self.session_metadata.batch_items = batch_items;
+        Ok(())
+    }
+
     pub fn get_adaptor_signature_results(
         &self,
     ) -> Result<BTreeMap<uuid::Uuid, AdaptorSignatureResult>, MusigError> {

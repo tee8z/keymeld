@@ -1928,15 +1928,21 @@ mod tests {
         let signing_session_id = SessionId::new_v7();
         let participants = create_test_participants();
 
+        let batch_item = SigningBatchItem {
+            batch_item_id: uuid::Uuid::now_v7(),
+            message_hash: vec![0u8; 32],
+            encrypted_message: Some("test_message".to_string()),
+            encrypted_adaptor_configs: None,
+        };
+
         let params = SigningSessionInitParams {
             keygen_session_id: keygen_session_id.clone(),
             signing_session_id: signing_session_id.clone(),
-            encrypted_message: "test_message".to_string(),
+            batch_items: vec![batch_item],
             participants: participants.clone(),
             coordinator_encrypted_private_key: Some("coordinator_key".to_string()),
             encrypted_session_secret: Some("session_secret".to_string()),
             encrypted_taproot_tweak: "encrypted_tweak".to_string(),
-            encrypted_adaptor_configs: String::new(),
         };
 
         assert_eq!(params.participants.len(), 3);
