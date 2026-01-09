@@ -1,4 +1,5 @@
 pub mod adaptor_utils;
+pub mod batch_signing;
 pub mod keygen_with_stored_key;
 pub mod rpc_batcher;
 pub mod single_signer;
@@ -1733,10 +1734,8 @@ impl KeyMeldE2ETest {
                     // Get the first batch result (single message = batch of 1)
                     if let Some(first_result) = status.batch_results.first() {
                         if let Some(ref encrypted_sig) = first_result.signature {
-                            let session_secret = self
-                                .session_secrets
-                                .get(keygen_session_id)
-                                .ok_or(anyhow!(
+                            let session_secret =
+                                self.session_secrets.get(keygen_session_id).ok_or(anyhow!(
                                 "Session secret not found for keygen session: {keygen_session_id}"
                             ))?;
 

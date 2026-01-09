@@ -339,13 +339,32 @@ impl Initialized {
 
             // Store the adaptor configs in the session metadata
             signing_processor
-                .set_adaptor_configs(adaptor_configs)
+                .set_adaptor_configs(adaptor_configs.clone())
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
                         "Failed to set adaptor configs: {e}"
                     )))
                 })?;
         }
+
+        // Store batch items in the session metadata so we can return correct batch_item_ids
+        let mut batch_items_map = std::collections::BTreeMap::new();
+        for batch_item in &init_cmd.batch_items {
+            let batch_item_data = crate::musig::types::BatchItemData {
+                batch_item_id: batch_item.batch_item_id,
+                message: message.clone(), // For now, all items use the first message
+                adaptor_configs: adaptor_configs.clone(),
+                adaptor_final_signatures: std::collections::BTreeMap::new(),
+            };
+            batch_items_map.insert(batch_item.batch_item_id, batch_item_data);
+        }
+        signing_processor
+            .set_batch_items(batch_items_map)
+            .map_err(|e| {
+                EnclaveError::Session(SessionError::MusigInitialization(format!(
+                    "Failed to set batch items: {e}"
+                )))
+            })?;
 
         signing_processor.get_aggregate_pubkey().map_err(|e| {
             EnclaveError::Session(SessionError::MusigInitialization(format!(

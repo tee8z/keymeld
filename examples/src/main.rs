@@ -61,6 +61,12 @@ enum Commands {
         #[arg(long)]
         config: String,
     },
+    /// Batch signing test (multiple messages in one session)
+    BatchSigning {
+        /// Configuration file path
+        #[arg(long)]
+        config: String,
+    },
 }
 
 #[tokio::main]
@@ -116,6 +122,18 @@ async fn main() -> Result<()> {
             let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
 
             keymeld_examples::keygen_with_stored_key::run_keygen_with_stored_key_test(config).await
+        }
+        Commands::BatchSigning { config } => {
+            use keymeld_examples::ExampleConfig;
+            use std::fs::read_to_string;
+            use tracing_subscriber::fmt::init;
+
+            init();
+
+            let config_content = read_to_string(&config)?;
+            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+
+            keymeld_examples::batch_signing::run_batch_signing_test(config).await
         }
     }
 }

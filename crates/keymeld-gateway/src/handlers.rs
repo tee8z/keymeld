@@ -1874,6 +1874,7 @@ mod tests {
             validate_decrypted_adaptor_configs,
         },
         AdaptorConfig, AdaptorHint, AdaptorType, CreateSigningSessionRequest, SessionId,
+        SigningBatchItem,
     };
     use uuid::Uuid;
 
@@ -1903,14 +1904,18 @@ mod tests {
             "0f6164617074 6f725f636f6e66696773000102030405060708090a0bdeadbeefcafebabe"
                 .replace(" ", "");
 
+        let batch_item = SigningBatchItem {
+            batch_item_id: uuid::Uuid::now_v7(),
+            message_hash: vec![0u8; 32],
+            encrypted_message: Some("test_message".to_string()),
+            encrypted_adaptor_configs: Some(mock_encrypted_hex.clone()),
+        };
+
         let request = CreateSigningSessionRequest {
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
             timeout_secs: 3600,
-            message_hash: vec![0u8; 32],
-            encrypted_message: Some("test_message".to_string()),
-            encrypted_adaptor_configs: mock_encrypted_hex.clone(),
-            batch_items: vec![],
+            batch_items: vec![batch_item],
         };
 
         let request_json = serde_json::to_string(&request).expect("Should serialize request");
@@ -1922,22 +1927,28 @@ mod tests {
 
     #[test]
     fn test_empty_encrypted_adaptor_configs_default() {
+        let batch_item = SigningBatchItem {
+            batch_item_id: uuid::Uuid::now_v7(),
+            message_hash: vec![0u8; 32],
+            encrypted_message: None,
+            encrypted_adaptor_configs: None,
+        };
+
         let request = CreateSigningSessionRequest {
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
             timeout_secs: 3600,
-            message_hash: vec![0u8; 32],
-            encrypted_message: None,
-            encrypted_adaptor_configs: String::new(),
-            batch_items: vec![],
+            batch_items: vec![batch_item],
         };
 
-        assert!(request.encrypted_adaptor_configs.is_empty());
+        assert!(request.batch_items[0].encrypted_adaptor_configs.is_none());
 
         let json = serde_json::to_string(&request).expect("Should serialize");
         let deserialized: CreateSigningSessionRequest =
             serde_json::from_str(&json).expect("Should deserialize");
-        assert!(deserialized.encrypted_adaptor_configs.is_empty());
+        assert!(deserialized.batch_items[0]
+            .encrypted_adaptor_configs
+            .is_none());
     }
 
     #[test]
