@@ -325,9 +325,16 @@ pub fn create_signing_session_context(
     cmd: &InitSigningSessionCommand,
     keygen_data: &KeygenSessionData<'_>,
 ) -> Result<SigningSessionContext, EnclaveError> {
+    // Get the first batch item's encrypted message (single message = batch of 1)
+    let first_batch_item = cmd.batch_items.first().ok_or_else(|| {
+        EnclaveError::Session(keymeld_core::protocol::SessionError::MusigInitialization(
+            "No batch items provided for signing".to_string(),
+        ))
+    })?;
+
     // Decrypt the message once using session_data context
     let decrypted_message_hex = keymeld_core::validation::decrypt_session_data(
-        &cmd.encrypted_message,
+        &first_batch_item.encrypted_message,
         &hex::encode(keygen_data.session_secret.as_bytes()),
     )
     .map_err(|e| {

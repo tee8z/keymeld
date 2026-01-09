@@ -233,9 +233,9 @@ impl Initialized {
             self.session_id
         );
 
-        if init_cmd.encrypted_message.is_empty() {
+        if init_cmd.batch_items.is_empty() {
             return Err(EnclaveError::Validation(ValidationError::Other(
-                "Encrypted message cannot be empty".to_string(),
+                "Batch items cannot be empty".to_string(),
             )));
         }
 
@@ -245,10 +245,13 @@ impl Initialized {
             )));
         }
 
+        // Get the first batch item (single message = batch of 1)
+        let first_batch_item = &init_cmd.batch_items[0];
+
         let session_secret = self.session_secret.clone();
 
         let decrypted_message_hex = decrypt_session_data(
-            &init_cmd.encrypted_message,
+            &first_batch_item.encrypted_message,
             &hex::encode(session_secret.as_bytes()),
         )
         .map_err(|e| {
@@ -323,12 +326,13 @@ impl Initialized {
                 )))
             })?;
 
-        let adaptor_configs =
-            if let Some(ref encrypted_adapator_configs) = init_cmd.encrypted_adaptor_configs {
-                decrypt_adaptor_configs(encrypted_adapator_configs, &self.session_secret)?
-            } else {
-                vec![]
-            };
+        let adaptor_configs = if let Some(ref encrypted_adaptor_configs) =
+            first_batch_item.encrypted_adaptor_configs
+        {
+            decrypt_adaptor_configs(encrypted_adaptor_configs, &self.session_secret)?
+        } else {
+            vec![]
+        };
 
         if !adaptor_configs.is_empty() {
             info!("Adaptor configs will be stored in SessionMetadata");

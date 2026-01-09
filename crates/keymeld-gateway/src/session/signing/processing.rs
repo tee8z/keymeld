@@ -164,12 +164,11 @@ impl Advanceable<SigningSessionStatus> for SigningInitializingSession {
         let init_params = SigningSessionInitParams {
             keygen_session_id: self.keygen_session_id.clone(),
             signing_session_id: self.signing_session_id.clone(),
-            encrypted_message: self.encrypted_message.clone(),
+            batch_items: self.batch_items.clone(),
             participants: self.registered_participants.clone(),
             coordinator_encrypted_private_key: self.coordinator_encrypted_private_key.clone(),
             encrypted_session_secret: self.encrypted_session_secret.clone(),
             encrypted_taproot_tweak: self.encrypted_taproot_tweak.clone(),
-            encrypted_adaptor_configs: self.encrypted_adaptor_configs.clone(),
         };
 
         let collected_nonces = enclave_manager
@@ -248,8 +247,8 @@ impl Advanceable<SigningSessionStatus> for SigningFinalizingSignature {
         );
 
         // Step 3: Finalize signature
-        // Returns already hex-encoded strings from the enclave
-        let (final_signature, encrypted_adaptor_signatures) = enclave_manager
+        // Returns batch results from the enclave
+        let batch_results = enclave_manager
             .orchestrate_finalize_signature(
                 &self.keygen_session_id,
                 &self.signing_session_id,
@@ -265,30 +264,13 @@ impl Advanceable<SigningSessionStatus> for SigningFinalizingSignature {
             })?;
 
         info!(
-            "Step 3 complete: Finalized signature for signing session {}: {} bytes",
+            "Step 3 complete: Finalized {} batch results for signing session {}",
+            batch_results.len(),
             self.signing_session_id,
-            final_signature.len() / 2 // hex string length / 2 = byte count
         );
 
-        // Handle adaptor signatures if present (already hex-encoded from enclave)
-        if let Some(encrypted_adaptor_signatures_hex) = encrypted_adaptor_signatures {
-            info!(
-                "Received encrypted adaptor signatures for signing session {}: {} bytes",
-                self.signing_session_id,
-                encrypted_adaptor_signatures_hex.len() / 2
-            );
-
-            Ok(SigningSessionStatus::Completed(
-                SigningCompleted::from_finalizing_with_signature_and_adaptors(
-                    self,
-                    final_signature,
-                    encrypted_adaptor_signatures_hex,
-                ),
-            ))
-        } else {
-            Ok(SigningSessionStatus::Completed(
-                SigningCompleted::from_finalizing_with_signature(self, final_signature),
-            ))
-        }
+        Ok(SigningSessionStatus::Completed(
+            SigningCompleted::from_finalizing_with_batch_results(self, batch_results),
+        ))
     }
 }

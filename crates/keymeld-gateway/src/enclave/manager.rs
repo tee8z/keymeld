@@ -21,6 +21,7 @@ use keymeld_core::{
     },
     AggregatePublicKey, AttestationDocument, KeyMeldError,
 };
+use keymeld_sdk::SigningBatchItem;
 use rand::seq::SliceRandom;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -54,12 +55,12 @@ pub struct OperationResult<T> {
 pub struct SigningSessionInitParams {
     pub keygen_session_id: SessionId,
     pub signing_session_id: SessionId,
-    pub encrypted_message: String,
+    /// Batch items to sign (single message = batch of 1)
+    pub batch_items: Vec<SigningBatchItem>,
     pub participants: BTreeMap<UserId, ParticipantData>,
     pub coordinator_encrypted_private_key: Option<String>,
     pub encrypted_session_secret: Option<String>,
     pub encrypted_taproot_tweak: String,
-    pub encrypted_adaptor_configs: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1224,6 +1225,17 @@ impl EnclaveManager {
         let mut init_futures: FuturesUnordered<_> = users_by_enclave
             .into_iter()
             .map(|(enclave_id, user_ids)| {
+                // Convert SigningBatchItem to EnclaveBatchItem
+                let enclave_batch_items: Vec<keymeld_core::protocol::EnclaveBatchItem> = params
+                    .batch_items
+                    .iter()
+                    .map(|item| keymeld_core::protocol::EnclaveBatchItem {
+                        batch_item_id: item.batch_item_id,
+                        encrypted_message: item.encrypted_message.clone().unwrap_or_default(),
+                        encrypted_adaptor_configs: item.encrypted_adaptor_configs.clone(),
+                    })
+                    .collect();
+
                 let init_cmd = InitSigningSessionCommand {
                     keygen_session_id: params.keygen_session_id.clone(),
                     signing_session_id: params.signing_session_id.clone(),
@@ -1231,15 +1243,7 @@ impl EnclaveManager {
                     encrypted_taproot_tweak: params.encrypted_taproot_tweak.clone(),
                     expected_participant_count: params.participants.len(),
                     approval_signatures: vec![], // TODO: Pass approval signatures from request
-                    // Single message fields (backward compat)
-                    encrypted_message: params.encrypted_message.clone(),
-                    encrypted_adaptor_configs: if params.encrypted_adaptor_configs.is_empty() {
-                        None
-                    } else {
-                        Some(params.encrypted_adaptor_configs.clone())
-                    },
-                    // Batch items (empty for now - single message mode)
-                    batch_items: vec![],
+                    batch_items: enclave_batch_items,
                 };
 
                 let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1317,7 +1321,6 @@ impl EnclaveManager {
                 let distribute_cmd = DistributeNoncesCommand {
                     signing_session_id: signing_session_id.clone(),
                     nonces: nonces_vec.clone(),
-                    batch_nonces: vec![], // Single message mode
                 };
 
                 let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1372,7 +1375,7 @@ impl EnclaveManager {
         signing_session_id: &SessionId,
         _participants: &BTreeMap<UserId, ParticipantData>,
         all_partial_signatures: BTreeMap<UserId, String>,
-    ) -> Result<(String, Option<String>), KeyMeldError> {
+    ) -> Result<Vec<keymeld_sdk::BatchItemResult>, KeyMeldError> {
         info!(
             "Finalizing signature for signing session {} with {} partial signatures",
             signing_session_id,
@@ -1396,7 +1399,6 @@ impl EnclaveManager {
         let finalize_cmd = FinalizeSignatureCommand {
             signing_session_id: signing_session_id.clone(),
             partial_signatures: partial_signatures_vec,
-            batch_partial_signatures: vec![], // Single message mode
         };
 
         let command = Command::new(EnclaveCommand::Musig(MusigCommand::Signing(
@@ -1412,14 +1414,24 @@ impl EnclaveManager {
                 final_sig_response,
             ))) => {
                 info!(
-                    "Finalized signature for signing session {}",
+                    "Finalized {} batch results for signing session {}",
+                    final_sig_response.batch_results.len(),
                     signing_session_id
                 );
 
-                // Check if there are adaptor signatures
-                let adaptor_sigs = final_sig_response.encrypted_adaptor_signatures;
+                // Convert EnclaveBatchResult to BatchItemResult
+                let batch_results = final_sig_response
+                    .batch_results
+                    .into_iter()
+                    .map(|r| keymeld_sdk::BatchItemResult {
+                        batch_item_id: r.batch_item_id,
+                        signature: r.encrypted_final_signature,
+                        adaptor_signatures: r.encrypted_adaptor_signatures,
+                        error: r.error,
+                    })
+                    .collect();
 
-                Ok((final_sig_response.encrypted_final_signature, adaptor_sigs))
+                Ok(batch_results)
             }
             other => Err(KeyMeldError::EnclaveError(format!(
                 "Unexpected response when finalizing signature: {:?}",

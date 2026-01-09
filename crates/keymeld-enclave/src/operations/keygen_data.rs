@@ -22,8 +22,15 @@ pub fn create_signing_musig_from_keygen(
 ) -> Result<MusigProcessor, EnclaveError> {
     let session_metadata = keygen_data.musig_processor.get_session_metadata_public();
 
+    // Get the first batch item's encrypted message (single message = batch of 1)
+    let first_batch_item = init_cmd.batch_items.first().ok_or_else(|| {
+        EnclaveError::Session(SessionError::MusigInitialization(
+            "No batch items provided for signing".to_string(),
+        ))
+    })?;
+
     let decrypted_message_hex = decrypt_session_data(
-        &init_cmd.encrypted_message,
+        &first_batch_item.encrypted_message,
         &hex::encode(keygen_data.session_secret.as_bytes()),
     )
     .map_err(|e| {

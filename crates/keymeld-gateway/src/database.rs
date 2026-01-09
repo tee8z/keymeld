@@ -868,8 +868,7 @@ impl Database {
                 let status = SigningSessionStatus::CollectingParticipants(SigningCollectingParticipants {
                     signing_session_id: request.signing_session_id.clone(),
                     keygen_session_id: request.keygen_session_id.clone(),
-                    message_hash: request.message_hash.clone(),
-                    encrypted_message: request.encrypted_message.clone().unwrap_or_default(),
+                    batch_items: request.batch_items.clone(),
                     expected_participants: expected_participants.clone(),
                     registered_participants,
                     coordinator_encrypted_private_key: Some(coordinator_encrypted_private_key.clone()),
@@ -878,7 +877,6 @@ impl Database {
                     expires_at: expires_at as u64,
                     required_enclave_epochs: BTreeMap::new(),
                     encrypted_taproot_tweak: taproot_tweak.clone(),
-                    encrypted_adaptor_configs: request.encrypted_adaptor_configs.clone(),
                     participants_requiring_approval,
                     approved_participants: Vec::new(),
                 });
@@ -890,9 +888,16 @@ impl Database {
                 let correlation_id_bytes: Option<Vec<u8>> = None;
 
                 // Create initial empty signing session data (will be populated after enclave initialization)
+                // Use first batch item's message_hash for database storage
+                let first_message_hash = request
+                    .batch_items
+                    .first()
+                    .map(|item| item.message_hash.clone())
+                    .unwrap_or_default();
+
                 let session_data = SigningSessionData {
                     message: Vec::new(), // Will be populated after decryption in enclave
-                    message_hash: request.message_hash.clone(),
+                    message_hash: first_message_hash.clone(),
                     signed_message: None,
                     adaptor_configs: Vec::new(), // Will be populated after decryption in enclave
                     adaptor_signatures: None,
@@ -911,7 +916,7 @@ impl Database {
                 })?;
 
                 let signing_session_id = &request.signing_session_id;
-                let message_hash = request.message_hash.as_slice();
+                let message_hash = first_message_hash.as_slice();
                 let expected_participants_json = serde_json::to_string(&expected_participants)?;
 
                 sqlx::query!(
@@ -1466,8 +1471,7 @@ impl Database {
                             SigningCollectingParticipants {
                                 signing_session_id: init.signing_session_id,
                                 keygen_session_id: init.keygen_session_id,
-                                message_hash: init.message_hash,
-                                encrypted_message: init.encrypted_message,
+                                batch_items: init.batch_items,
                                 expected_participants: init.expected_participants,
                                 registered_participants: init.registered_participants,
                                 coordinator_encrypted_private_key: init.coordinator_encrypted_private_key,
@@ -1476,7 +1480,6 @@ impl Database {
                                 expires_at: init.expires_at,
                                 required_enclave_epochs: std::collections::BTreeMap::new(),
                                 encrypted_taproot_tweak: init.encrypted_taproot_tweak,
-                                encrypted_adaptor_configs: init.encrypted_adaptor_configs,
                                 participants_requiring_approval,
                                 approved_participants,
                             },

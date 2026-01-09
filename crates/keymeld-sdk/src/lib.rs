@@ -115,17 +115,7 @@ pub struct CreateSigningSessionRequest {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub timeout_secs: u64,
-
-    // Single message fields (backward compat, used if batch_items is empty)
-    #[serde(default)]
-    pub message_hash: Vec<u8>,
-    pub encrypted_message: Option<String>,
-    /// Optional adaptor signature configs. Empty string for regular signatures.
-    #[serde(default)]
-    pub encrypted_adaptor_configs: String,
-
-    // Batch of messages (takes precedence if non-empty)
-    #[serde(default)]
+    /// Batch items to sign (single message = batch of 1)
     pub batch_items: Vec<SigningBatchItem>,
 }
 
@@ -154,13 +144,7 @@ pub struct SigningSessionStatusResponse {
     pub participants_requiring_approval: Vec<UserId>,
     #[serde(default)]
     pub approved_participants: Vec<UserId>,
-
-    // Single signature fields (backward compat / single-item batch)
-    pub final_signature: Option<String>,
-    #[serde(default)]
-    pub adaptor_signatures: String,
-
-    // Batch results (populated for batch sessions)
+    /// Batch results (single message = batch of 1)
     #[serde(default)]
     pub batch_results: Vec<BatchItemResult>,
 }
@@ -550,26 +534,7 @@ pub fn validate_create_signing_session_request(
     request: &CreateSigningSessionRequest,
 ) -> Result<(), keymeld_core::KeyMeldError> {
     validation::Validator::validate_timeout_range(Some(request.timeout_secs))?;
-
-    // If batch_items is non-empty, validate batch mode
-    if !request.batch_items.is_empty() {
-        validate_batch_signing_request(&request.batch_items)?;
-    } else {
-        // Single message mode (backward compat)
-        validation::Validator::validate_vec_length(
-            &request.message_hash,
-            Some(32),
-            Some(32),
-            "Message hash",
-        )?;
-        if let Some(encrypted_message) = &request.encrypted_message {
-            validation::Validator::validate_non_empty_string(
-                encrypted_message,
-                "Encrypted message",
-            )?;
-        }
-    }
-
+    validate_batch_signing_request(&request.batch_items)?;
     Ok(())
 }
 

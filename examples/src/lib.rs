@@ -1654,14 +1654,23 @@ impl KeyMeldE2ETest {
             &session_secret,
         )?;
 
+        // Create a batch item for the single message
+        let batch_item = keymeld_sdk::SigningBatchItem {
+            batch_item_id: uuid::Uuid::now_v7(),
+            message_hash: sighash.to_vec(),
+            encrypted_message: Some(encrypted_message),
+            encrypted_adaptor_configs: if encrypted_adaptor_configs.is_empty() {
+                None
+            } else {
+                Some(encrypted_adaptor_configs)
+            },
+        };
+
         let request = CreateSigningSessionRequest {
             signing_session_id: signing_session_id.clone(),
             keygen_session_id: keygen_session_id.clone(),
             timeout_secs: 1800,
-            message_hash: sighash.to_vec(),
-            encrypted_message: Some(encrypted_message),
-            encrypted_adaptor_configs,
-            batch_items: vec![], // Single message mode
+            batch_items: vec![batch_item],
         };
 
         let session_signature = self.generate_session_signature(keygen_session_id)?;
@@ -1721,21 +1730,30 @@ impl KeyMeldE2ETest {
 
             match status.status {
                 SigningStatusKind::Completed => {
-                    if let Some(encrypted_sig) = status.final_signature {
-                        let session_secret =
-                            self.session_secrets.get(keygen_session_id).ok_or(anyhow!(
+                    // Get the first batch result (single message = batch of 1)
+                    if let Some(first_result) = status.batch_results.first() {
+                        if let Some(ref encrypted_sig) = first_result.signature {
+                            let session_secret = self
+                                .session_secrets
+                                .get(keygen_session_id)
+                                .ok_or(anyhow!(
                                 "Session secret not found for keygen session: {keygen_session_id}"
                             ))?;
 
-                        let signature_bytes =
-                            keymeld_sdk::validation::decrypt_signature_with_secret(
-                                &encrypted_sig,
-                                session_secret,
-                            )?;
+                            let signature_bytes =
+                                keymeld_sdk::validation::decrypt_signature_with_secret(
+                                    encrypted_sig,
+                                    session_secret,
+                                )?;
 
-                        return Ok(signature_bytes);
+                            return Ok(signature_bytes);
+                        } else if let Some(ref error) = first_result.error {
+                            return Err(anyhow!("Signing failed: {}", error));
+                        } else {
+                            return Err(anyhow!("Signing completed but no signature found"));
+                        }
                     } else {
-                        return Err(anyhow!("Signing completed but no signature found"));
+                        return Err(anyhow!("Signing completed but no batch results found"));
                     }
                 }
                 SigningStatusKind::Failed => {

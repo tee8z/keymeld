@@ -260,14 +260,19 @@ async fn test_signing_session_with_adaptors(
     let encrypted_message =
         keymeld_sdk::validation::encrypt_session_data(&hex::encode(&sighash[..]), &session_secret)?;
 
+    // Create a batch item for the single message with adaptor configs
+    let batch_item = keymeld_sdk::SigningBatchItem {
+        batch_item_id: uuid::Uuid::now_v7(),
+        message_hash: sighash.to_vec(),
+        encrypted_message: Some(encrypted_message),
+        encrypted_adaptor_configs: Some(encrypted_adaptor_configs),
+    };
+
     let request = CreateSigningSessionRequest {
         signing_session_id: signing_session_id.clone(),
         keygen_session_id: keygen_session_id.clone(),
         timeout_secs: 1800,
-        message_hash: sighash.to_vec(),
-        encrypted_message: Some(encrypted_message),
-        encrypted_adaptor_configs,
-        batch_items: vec![], // Single message mode
+        batch_items: vec![batch_item],
     };
 
     let session_signature = test.generate_session_signature(keygen_session_id)?;
@@ -333,39 +338,48 @@ async fn wait_for_signing_with_adaptors(
 
         match status.status {
             SigningStatusKind::Completed => {
-                let signature = if let Some(encrypted_sig) = status.final_signature {
+                // Get the first batch result (single message = batch of 1)
+                let first_result = status
+                    .batch_results
+                    .first()
+                    .ok_or(anyhow!("Signing completed but no batch results found"))?;
+
+                let signature = if let Some(ref encrypted_sig) = first_result.signature {
                     let session_secret = test
                         .session_secrets
                         .get(keygen_session_id)
                         .ok_or(anyhow!("Session secret not found"))?;
 
                     keymeld_sdk::validation::decrypt_signature_with_secret(
-                        &encrypted_sig,
+                        encrypted_sig,
                         session_secret,
                     )?
+                } else if let Some(ref error) = first_result.error {
+                    return Err(anyhow!("Signing failed: {}", error));
                 } else {
                     return Err(anyhow!("Signing completed but no signature found"));
                 };
 
-                let adaptor_signatures = if !status.adaptor_signatures.is_empty() {
-                    let session_secret = test
-                        .session_secrets
-                        .get(keygen_session_id)
-                        .ok_or(anyhow!("Session secret not found"))?;
+                let adaptor_signatures =
+                    if let Some(ref encrypted_adaptors) = first_result.adaptor_signatures {
+                        let session_secret = test
+                            .session_secrets
+                            .get(keygen_session_id)
+                            .ok_or(anyhow!("Session secret not found"))?;
 
-                    info!("🔓 Decrypting adaptor signatures on client side");
-                    keymeld_sdk::validation::decrypt_adaptor_signatures_with_secret(
-                        &status.adaptor_signatures,
-                        session_secret,
-                    )?
-                } else {
-                    std::collections::BTreeMap::new()
-                };
+                        info!("Decrypting adaptor signatures on client side");
+                        keymeld_sdk::validation::decrypt_adaptor_signatures_with_secret(
+                            encrypted_adaptors,
+                            session_secret,
+                        )?
+                    } else {
+                        std::collections::BTreeMap::new()
+                    };
 
-                info!("✅ Regular MuSig2 signing completed");
-                info!("🎉 Adaptor signatures processed automatically!");
+                info!("Regular MuSig2 signing completed");
+                info!("Adaptor signatures processed automatically!");
                 info!(
-                    "🔓 Successfully decrypted {} adaptor signatures",
+                    "Successfully decrypted {} adaptor signatures",
                     adaptor_signatures.len()
                 );
 

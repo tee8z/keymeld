@@ -1003,12 +1003,15 @@ pub async fn get_signing_status(
     let (
         status,
         expected_participants,
-        final_signature,
         expires_at,
         participants_requiring_approval,
         approved_participants,
-        adaptor_signatures,
     ) = session_status.extract_status_info();
+
+    let batch_results = session_status
+        .get_batch_results()
+        .cloned()
+        .unwrap_or_default();
 
     let response = SigningSessionStatusResponse {
         signing_session_id,
@@ -1019,9 +1022,7 @@ pub async fn get_signing_status(
         expires_at,
         participants_requiring_approval,
         approved_participants,
-        final_signature,
-        adaptor_signatures,
-        batch_results: vec![], // Single message mode for now
+        batch_results,
     };
 
     Ok(Json(response))
