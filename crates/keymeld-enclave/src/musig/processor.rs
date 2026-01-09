@@ -198,6 +198,10 @@ impl MusigProcessor {
                 second_round: None,
                 adaptor_first_rounds: BTreeMap::new(),
                 adaptor_second_rounds: BTreeMap::new(),
+                batch_first_rounds: BTreeMap::new(),
+                batch_second_rounds: BTreeMap::new(),
+                batch_adaptor_first_rounds: BTreeMap::new(),
+                batch_adaptor_second_rounds: BTreeMap::new(),
             }
         })
     }
@@ -271,6 +275,10 @@ impl MusigProcessor {
                         second_round: None,
                         adaptor_first_rounds: BTreeMap::new(),
                         adaptor_second_rounds: BTreeMap::new(),
+                        batch_first_rounds: BTreeMap::new(),
+                        batch_second_rounds: BTreeMap::new(),
+                        batch_adaptor_first_rounds: BTreeMap::new(),
+                        batch_adaptor_second_rounds: BTreeMap::new(),
                     },
                 );
             }
@@ -302,6 +310,10 @@ impl MusigProcessor {
             second_round: None,
             adaptor_first_rounds: BTreeMap::new(),
             adaptor_second_rounds: BTreeMap::new(),
+            batch_first_rounds: BTreeMap::new(),
+            batch_second_rounds: BTreeMap::new(),
+            batch_adaptor_first_rounds: BTreeMap::new(),
+            batch_adaptor_second_rounds: BTreeMap::new(),
         };
 
         self.user_sessions.insert(user_id.clone(), user_session);
