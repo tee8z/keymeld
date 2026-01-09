@@ -6,7 +6,7 @@ KeyMeld is a distributed MuSig2 signing system using AWS Nitro Enclaves for secu
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│    Clients      │────▶│    Gateway      │────▶│    Enclaves     │
+│       SDK       │────▶│    Gateway      │────▶│    Enclaves     │
 │  (Coordinator   │     │  (REST API +    │     │  (MuSig2 ops    │
 │  + Participants)│     │   Coordinator)  │     │   in isolation) │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
@@ -33,7 +33,7 @@ KeyMeld is a distributed MuSig2 signing system using AWS Nitro Enclaves for secu
 - ECIES decryption of private keys
 - KMS integration for key persistence
 
-### Clients
+### SDK
 - Coordinator: Creates sessions, provides first key
 - Participants: Register with encrypted keys
 
@@ -114,23 +114,14 @@ Reserved ──▶ CollectingParticipants ──▶ KeyGeneration ──▶ Comp
 
 ### Signing States
 ```
-CollectingParticipants ──▶ GeneratingNonces ──▶ CollectingNonces
-         │                                            │
-         ▼                                            ▼
-    [Wait for                              AggregatingNonces
-     approvals]                                       │
-                                                      ▼
-                                         GeneratingPartialSignatures
-                                                      │
-                                                      ▼
-                                         CollectingPartialSignatures
-                                                      │
-                                                      ▼
-                                            FinalizingSignature
-                                                      │
-                                               ┌──────┴──────┐
-                                               ▼             ▼
-                                           Completed      Failed
+CollectingParticipants ──▶ InitializingSession ──▶ DistributingNonces
+         │                                                │
+         ▼                                                ▼
+    [Wait for                                    FinalizingSignature
+     approvals]                                           │
+                                                   ┌──────┴──────┐
+                                                   ▼             ▼
+                                               Completed      Failed
 ```
 
 ## Security Model

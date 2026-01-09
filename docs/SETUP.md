@@ -408,7 +408,7 @@ After setup, try these to understand KeyMeld:
 
 1. **Run the demo**: `just demo` - See complete 2-phase MuSig2 workflow
 2. **Try adaptor signatures**: `just demo-adaptors` - Advanced cryptographic features
-3. **Explore the API**: Visit http://localhost:8080/scalar after `just start`
+3. **Explore the API**: Visit http://localhost:8080/api/v1/docs after `just start`
 4. **Read the examples**: Check `examples/README.md` for detailed explanations
 5. **Study the architecture**: Main README has comprehensive Mermaid diagrams
 

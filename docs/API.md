@@ -45,7 +45,11 @@
 | `GET /api/v1/enclaves` | None | List all enclaves |
 | `GET /api/v1/enclaves/{enclave_id}/public-key` | None | Get enclave public key for ECIES |
 | `GET /api/v1/health` | None | Health check |
+| `GET /api/v1/health/detail` | None | Detailed health check with enclave status |
 | `GET /api/v1/version` | None | API version info |
+| `GET /api/v1/metrics` | None | Prometheus metrics |
+| `GET /api/v1/openapi.json` | None | OpenAPI specification |
+| `GET /api/v1/docs` | None | Interactive API documentation (Scalar) |
 
 ## Keygen Workflow
 
@@ -108,6 +112,8 @@ X-Session-Signature: nonce:signature
 
 ## Signing Workflow
 
+All signing requests use batch items, where a single message is simply a batch of one.
+
 ### 1. Create Signing Session
 
 ```
@@ -117,12 +123,23 @@ X-Session-Signature: nonce:signature
 {
   "signing_session_id": "uuid-v7",
   "keygen_session_id": "uuid-v7",
-  "message_hash": [32 bytes],
-  "encrypted_message": "hex-optional",
   "timeout_secs": 1800,
-  "encrypted_adaptor_configs": "hex-optional"
+  "batch_items": [
+    {
+      "batch_item_id": "uuid-v7",
+      "message_hash": [32 bytes],
+      "encrypted_message": "hex-session-encrypted",
+      "encrypted_adaptor_configs": "hex-optional"
+    }
+  ]
 }
 ```
+
+**Batch Item Fields:**
+- `batch_item_id`: UUIDv7 identifier for this item (returned in results)
+- `message_hash`: 32-byte hash of the message to sign
+- `encrypted_message`: Session-key encrypted message (for enclave verification)
+- `encrypted_adaptor_configs`: Optional adaptor signature configurations
 
 ### 2. Approve (if required)
 
@@ -138,7 +155,39 @@ GET /api/v1/signing/{signing_session_id}/status/{user_id}
 X-User-Signature: nonce:signature
 ```
 
-Response includes `final_signature` when complete.
+Response when complete:
+```json
+{
+  "signing_session_id": "uuid-v7",
+  "keygen_session_id": "uuid-v7",
+  "status": "completed",
+  "batch_results": [
+    {
+      "batch_item_id": "uuid-v7",
+      "signature": "hex-encrypted-signature",
+      "adaptor_signatures": [...],
+      "error": null
+    }
+  ]
+}
+```
+
+**Batch Result Fields:**
+- `batch_item_id`: Matches the ID from the request
+- `signature`: Encrypted final Schnorr signature (64 bytes when decrypted)
+- `adaptor_signatures`: Optional adaptor signatures if configured
+- `error`: Error message if this item failed
+
+### Signing Statuses
+
+| Status | Description |
+|--------|-------------|
+| `collecting_participants` | Waiting for all participants to join |
+| `initializing_session` | Generating nonces |
+| `distributing_nonces` | Collecting partial signatures |
+| `finalizing_signature` | Aggregating final signatures |
+| `completed` | All signatures ready in `batch_results` |
+| `failed` | Session failed |
 
 ## Single-Signer Workflow
 
