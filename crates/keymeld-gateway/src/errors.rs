@@ -16,6 +16,8 @@ pub enum ApiError {
     Database(#[from] sqlx::Error),
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
     #[error("Not found: {0}")]
     NotFound(String),
     #[error("Configuration error: {0}")]
@@ -41,6 +43,10 @@ impl ApiError {
         Self::NotFound(msg.into())
     }
 
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::Unauthorized(msg.into())
+    }
+
     pub fn database(msg: impl Into<String>) -> Self {
         Self::Database(sqlx::Error::Configuration(msg.into().into()))
     }
@@ -52,6 +58,7 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::KeyMeld(e) => match e {
                 KeyMeldError::InvalidConfiguration(_) => StatusCode::BAD_REQUEST,
@@ -70,6 +77,7 @@ impl ApiError {
             ApiError::KeyMeld(_) => "keymeld_error",
             ApiError::Database(_) => "database_error",
             ApiError::BadRequest(_) => "bad_request",
+            ApiError::Unauthorized(_) => "unauthorized",
             ApiError::NotFound(_) => "not_found",
             ApiError::Configuration(_) => "configuration_error",
             ApiError::Serialization(_) => "serialization_error",
@@ -91,6 +99,7 @@ impl ApiError {
     pub fn client_message(&self) -> String {
         match self {
             ApiError::BadRequest(msg) => msg.clone(),
+            ApiError::Unauthorized(msg) => msg.clone(),
             ApiError::NotFound(msg) => msg.clone(),
 
             ApiError::Database(_) => "Database operation failed".to_string(),

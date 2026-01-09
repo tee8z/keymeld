@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_key_imports\n                     SET status_name = 'processing', processing_started_at = ?,\n                         last_processing_attempt = ?, updated_at = ?\n                     WHERE key_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a1888b08b87aa81efa740b670f49392edda6c9c9c78f7fe4ef1a75db1cc8be97"
+}

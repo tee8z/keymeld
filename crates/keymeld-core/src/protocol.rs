@@ -1,5 +1,5 @@
 use crate::{
-    identifiers::{EnclaveId, SessionId, UserId},
+    identifiers::{EnclaveId, KeyId, SessionId, UserId},
     AttestationDocument, KeyMeldError,
 };
 use musig2::{PartialSignature, PubNonce};
@@ -124,6 +124,7 @@ pub struct AdaptorSignatureResult {
 pub enum EnclaveCommandKind {
     System(SystemCommandKind),
     Musig(MusigCommandKind),
+    UserKey(UserKeyCommandKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -158,9 +159,20 @@ pub enum SigningCommandKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserKeyCommandKind {
+    ImportKey,
+    ListKeys,
+    DeleteKey,
+    SignSingle,
+    StoreKeyFromKeygen,
+    RestoreKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnclaveOutcomeKind {
     System(SystemOutcomeKind),
     Musig(MusigOutcomeKind),
+    UserKey(UserKeyOutcomeKind),
     Error,
 }
 
@@ -197,6 +209,17 @@ pub enum SigningOutcomeKind {
     AdaptorSignatures,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserKeyOutcomeKind {
+    Success,
+    KeyImported,
+    KeyList,
+    KeyDeleted,
+    SingleSignature,
+    KeyStoredFromKeygen,
+    KeyRestored,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub command_id: Uuid,
@@ -216,6 +239,7 @@ pub struct Outcome {
 pub enum EnclaveCommand {
     System(SystemCommand),
     Musig(MusigCommand),
+    UserKey(UserKeyCommand),
 }
 
 impl Command {
@@ -258,6 +282,17 @@ pub enum SigningCommand {
     FinalizeSignature(FinalizeSignatureCommand),
 }
 
+/// Commands for user key management and single-signer operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UserKeyCommand {
+    ImportKey(ImportUserKeyCommand),
+    ListKeys(ListUserKeysCommand),
+    DeleteKey(DeleteUserKeyCommand),
+    SignSingle(SignSingleCommand),
+    StoreKeyFromKeygen(StoreKeyFromKeygenCommand),
+    RestoreKey(RestoreUserKeyCommand),
+}
+
 impl From<EnclaveCommand> for Command {
     fn from(command: EnclaveCommand) -> Self {
         Self {
@@ -279,6 +314,22 @@ impl From<&EnclaveCommand> for EnclaveCommandKind {
         match command {
             EnclaveCommand::System(system_cmd) => EnclaveCommandKind::System(system_cmd.into()),
             EnclaveCommand::Musig(musig_cmd) => EnclaveCommandKind::Musig(musig_cmd.into()),
+            EnclaveCommand::UserKey(user_key_cmd) => {
+                EnclaveCommandKind::UserKey(user_key_cmd.into())
+            }
+        }
+    }
+}
+
+impl From<&UserKeyCommand> for UserKeyCommandKind {
+    fn from(command: &UserKeyCommand) -> Self {
+        match command {
+            UserKeyCommand::ImportKey(_) => UserKeyCommandKind::ImportKey,
+            UserKeyCommand::ListKeys(_) => UserKeyCommandKind::ListKeys,
+            UserKeyCommand::DeleteKey(_) => UserKeyCommandKind::DeleteKey,
+            UserKeyCommand::SignSingle(_) => UserKeyCommandKind::SignSingle,
+            UserKeyCommand::StoreKeyFromKeygen(_) => UserKeyCommandKind::StoreKeyFromKeygen,
+            UserKeyCommand::RestoreKey(_) => UserKeyCommandKind::RestoreKey,
         }
     }
 }
@@ -375,6 +426,14 @@ impl fmt::Display for EnclaveCommand {
                     }
                 },
             },
+            EnclaveCommand::UserKey(user_key_cmd) => match user_key_cmd {
+                UserKeyCommand::ImportKey(_) => write!(f, "import_user_key"),
+                UserKeyCommand::ListKeys(_) => write!(f, "list_user_keys"),
+                UserKeyCommand::DeleteKey(_) => write!(f, "delete_user_key"),
+                UserKeyCommand::SignSingle(_) => write!(f, "sign_single"),
+                UserKeyCommand::StoreKeyFromKeygen(_) => write!(f, "store_key_from_keygen"),
+                UserKeyCommand::RestoreKey(_) => write!(f, "restore_user_key"),
+            },
         }
     }
 }
@@ -410,6 +469,9 @@ impl EnclaveCommand {
                     SigningCommand::FinalizeSignature(cmd) => Ok(cmd.signing_session_id.clone()),
                 },
             },
+            EnclaveCommand::UserKey(_) => Err(EnclaveError::Session(SessionError::InvalidId(
+                "UserKey commands do not have a session ID".to_string(),
+            ))),
         }
     }
 
@@ -439,6 +501,7 @@ impl EnclaveCommand {
 pub enum EnclaveOutcome {
     System(SystemOutcome),
     Musig(MusigOutcome),
+    UserKey(UserKeyOutcome),
     Error(ErrorResponse),
 }
 
@@ -489,6 +552,18 @@ pub enum SigningOutcome {
     AdaptorSignatures(AdaptorSignaturesResponse),
 }
 
+/// Outcomes for user key management and single-signer operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UserKeyOutcome {
+    Success,
+    KeyImported(KeyImportedResponse),
+    KeyList(KeyListResponse),
+    KeyDeleted(KeyDeletedResponse),
+    SingleSignature(SingleSignatureResponse),
+    KeyStoredFromKeygen(KeyStoredFromKeygenResponse),
+    KeyRestored(KeyRestoredResponse),
+}
+
 impl From<Outcome> for EnclaveOutcome {
     fn from(value: Outcome) -> Self {
         value.response
@@ -517,7 +592,24 @@ impl From<&EnclaveOutcome> for EnclaveOutcomeKind {
                 EnclaveOutcomeKind::System(system_outcome.into())
             }
             EnclaveOutcome::Musig(musig_outcome) => EnclaveOutcomeKind::Musig(musig_outcome.into()),
+            EnclaveOutcome::UserKey(user_key_outcome) => {
+                EnclaveOutcomeKind::UserKey(user_key_outcome.into())
+            }
             EnclaveOutcome::Error(_) => EnclaveOutcomeKind::Error,
+        }
+    }
+}
+
+impl From<&UserKeyOutcome> for UserKeyOutcomeKind {
+    fn from(outcome: &UserKeyOutcome) -> Self {
+        match outcome {
+            UserKeyOutcome::Success => UserKeyOutcomeKind::Success,
+            UserKeyOutcome::KeyImported(_) => UserKeyOutcomeKind::KeyImported,
+            UserKeyOutcome::KeyList(_) => UserKeyOutcomeKind::KeyList,
+            UserKeyOutcome::KeyDeleted(_) => UserKeyOutcomeKind::KeyDeleted,
+            UserKeyOutcome::SingleSignature(_) => UserKeyOutcomeKind::SingleSignature,
+            UserKeyOutcome::KeyStoredFromKeygen(_) => UserKeyOutcomeKind::KeyStoredFromKeygen,
+            UserKeyOutcome::KeyRestored(_) => UserKeyOutcomeKind::KeyRestored,
         }
     }
 }
@@ -607,6 +699,15 @@ impl fmt::Display for EnclaveOutcome {
                     }
                 },
             },
+            EnclaveOutcome::UserKey(user_key_outcome) => match user_key_outcome {
+                UserKeyOutcome::Success => write!(f, "user_key_success"),
+                UserKeyOutcome::KeyImported(_) => write!(f, "key_imported"),
+                UserKeyOutcome::KeyList(_) => write!(f, "key_list"),
+                UserKeyOutcome::KeyDeleted(_) => write!(f, "key_deleted"),
+                UserKeyOutcome::SingleSignature(_) => write!(f, "single_signature"),
+                UserKeyOutcome::KeyStoredFromKeygen(_) => write!(f, "key_stored_from_keygen"),
+                UserKeyOutcome::KeyRestored(_) => write!(f, "key_restored"),
+            },
             EnclaveOutcome::Error(_) => write!(f, "error"),
         }
     }
@@ -637,6 +738,19 @@ pub struct InitKeygenSessionCommand {
     pub encrypted_taproot_tweak: String,
 }
 
+/// Approval signature for a user who requires signing approval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningApproval {
+    pub user_id: UserId,
+    /// The auth public key to verify the signature against
+    /// Included so the enclave can verify independently without trusting stored state
+    pub auth_pubkey: Vec<u8>,
+    /// Signature of (message_hash || signing_session_id || timestamp) with auth_privkey
+    pub signature: Vec<u8>,
+    /// Timestamp used in the signature
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitSigningSessionCommand {
     pub keygen_session_id: SessionId,
@@ -648,6 +762,10 @@ pub struct InitSigningSessionCommand {
     pub encrypted_taproot_tweak: String,
     pub expected_participant_count: usize,
     pub encrypted_adaptor_configs: Option<String>,
+    /// Approval signatures from users who require signing approval
+    /// Enclave verifies these against stored auth_pubkey before proceeding
+    #[serde(default)]
+    pub approval_signatures: Vec<SigningApproval>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,10 +784,23 @@ pub struct FinalizeSignatureCommand {
     pub partial_signatures: Vec<(UserId, String)>,
 }
 
+/// Participant data for keygen registration including auth info for signing approval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantRegistrationData {
+    pub user_id: UserId,
+    /// ECIES-encrypted private key for this enclave
+    pub enclave_encrypted_data: String,
+    /// Auth public key for verifying signing approval signatures
+    pub auth_pubkey: Vec<u8>,
+    /// Whether this user requires explicit approval before signing
+    pub require_signing_approval: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddParticipantsBatchCommand {
     pub keygen_session_id: SessionId,
-    pub participants: Vec<(UserId, String)>, // (user_id, enclave_encrypted_data)
+    /// Participant registration data including auth info
+    pub participants: Vec<ParticipantRegistrationData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -698,6 +829,110 @@ pub struct DistributeSessionSecretCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetEnclavePublicKeysCommand {
     pub enclave_ids: Vec<EnclaveId>,
+}
+
+// ============================================================================
+// User Key Commands
+// ============================================================================
+
+/// Signature type for single-signer operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureType {
+    /// BIP-340 Schnorr signature (for taproot)
+    SchnorrBip340,
+    /// ECDSA signature
+    Ecdsa,
+}
+
+impl AsRef<str> for SignatureType {
+    fn as_ref(&self) -> &str {
+        match self {
+            SignatureType::SchnorrBip340 => "schnorr_bip340",
+            SignatureType::Ecdsa => "ecdsa",
+        }
+    }
+}
+
+impl fmt::Display for SignatureType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+impl std::str::FromStr for SignatureType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "schnorr_bip340" => Ok(SignatureType::SchnorrBip340),
+            "ecdsa" => Ok(SignatureType::Ecdsa),
+            _ => Err(format!("Unknown signature type: {}", s)),
+        }
+    }
+}
+
+/// Import a user's private key into the enclave
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportUserKeyCommand {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    /// Private key ECIES-encrypted to enclave's public key
+    pub encrypted_private_key: String,
+    /// Auth public key for authenticating future requests
+    pub auth_pubkey: Vec<u8>,
+}
+
+/// List keys for a user
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListUserKeysCommand {
+    pub user_id: UserId,
+}
+
+/// Delete a user's key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteUserKeyCommand {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+}
+
+/// Sign a message with a stored key (single-signer)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignSingleCommand {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    /// Message encrypted with session secret
+    pub encrypted_message: String,
+    pub signature_type: SignatureType,
+    /// Session secret ECIES-encrypted to enclave's public key
+    pub encrypted_session_secret: String,
+    /// Proof user approved this specific message: Sign(auth_privkey, message_hash || key_id || timestamp)
+    pub approval_signature: Vec<u8>,
+    /// Timestamp used in approval signature (enclave checks this is recent)
+    pub approval_timestamp: u64,
+}
+
+/// Store a key from a completed keygen session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreKeyFromKeygenCommand {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub keygen_session_id: SessionId,
+}
+
+/// Restore a user key from encrypted blob (for enclave restart)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreUserKeyCommand {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    /// Private key ECIES-encrypted to enclave's public key
+    pub encrypted_private_key: String,
+    /// Auth public key for authenticating requests
+    pub auth_pubkey: Vec<u8>,
+    /// Original keygen session ID if key came from keygen
+    pub origin_keygen_session_id: Option<SessionId>,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -831,6 +1066,69 @@ pub struct EnclavePublicKeyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclavePublicKeysResponse {
     pub enclave_keys: Vec<EnclavePublicKeyInfo>,
+}
+
+// ============================================================================
+// User Key Responses
+// ============================================================================
+
+/// Response after successfully importing a key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyImportedResponse {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+}
+
+/// Key info returned to user (NO public key - treated as secret)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct UserKeyInfo {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub created_at: u64,
+    /// None = imported, Some = from keygen
+    pub origin_keygen_session_id: Option<SessionId>,
+}
+
+/// Response listing user's keys
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyListResponse {
+    pub user_id: UserId,
+    pub keys: Vec<UserKeyInfo>,
+}
+
+/// Response after deleting a key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyDeletedResponse {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+}
+
+/// Response with single-signer signature
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SingleSignatureResponse {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    /// Signature encrypted with session secret
+    pub encrypted_signature: String,
+    pub signature_type: SignatureType,
+}
+
+/// Response after storing key from keygen
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyStoredFromKeygenResponse {
+    pub user_id: UserId,
+    pub key_id: KeyId,
+    pub keygen_session_id: SessionId,
+    /// Re-encrypted private key for gateway persistence (ECIES to enclave pubkey)
+    pub encrypted_private_key: String,
+}
+
+/// Response after restoring a key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRestoredResponse {
+    pub user_id: UserId,
+    pub key_id: KeyId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1032,6 +1330,25 @@ pub enum ParticipantError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum UserKeyError {
+    #[error("Key not found: user={user_id}, key={key_id}")]
+    KeyNotFound { user_id: UserId, key_id: KeyId },
+    #[error("Key already exists: user={user_id}, key={key_id}")]
+    KeyAlreadyExists { user_id: UserId, key_id: KeyId },
+    #[error("Keygen session not found or not completed: {session_id}")]
+    KeygenSessionNotFound { session_id: SessionId },
+    #[error("User not found in keygen session: user={user_id}, session={session_id}")]
+    UserNotInKeygenSession {
+        user_id: UserId,
+        session_id: SessionId,
+    },
+    #[error("Failed to sign message: {0}")]
+    SigningFailed(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 pub enum EnclaveError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
@@ -1055,6 +1372,8 @@ pub enum EnclaveError {
     DataDecoding(#[from] DataDecodingError),
     #[error(transparent)]
     Participant(#[from] ParticipantError),
+    #[error(transparent)]
+    UserKey(#[from] UserKeyError),
     #[error("MuSig error: {0}")]
     Musig(String),
     #[error("KeyMeld error: {0}")]

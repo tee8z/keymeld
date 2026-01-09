@@ -10,18 +10,13 @@ license = "MIT"
 keymeld-core = { path = "../keymeld-core", features = ["enclave"] }
 musig2 = { workspace = true }
 secp256k1 = { workspace = true }
-bitcoin = { workspace = true, features = ["serde", "rand", "std"] }
-axum = { workspace = true, features = ["macros"] }
-tower = { workspace = true }
-hyper = { workspace = true }
+
 tokio = { workspace = true }
 tokio-vsock = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_cbor = { workspace = true }
 serde_bytes = "0.11"
-bincode = { workspace = true }
 aws-nitro-enclaves-nsm-api = "0.4"
 aws-nitro-enclaves-cose = "0.5"
 aws-config = { workspace = true }
@@ -30,13 +25,10 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 aes-gcm = { workspace = true }
-hkdf = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-log = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }

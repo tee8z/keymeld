@@ -1,5 +1,5 @@
 pub use crypto::{EncryptedData, KeyMaterial, SessionSecret};
-pub use identifiers::{CorrelationId, EnclaveId, SessionId, UserId};
+pub use identifiers::{CorrelationId, EnclaveId, KeyId, SessionId, UserId};
 pub use musig2::{
     secp256k1::PublicKey, AggNonce, BinaryEncoding, CompactSignature, FirstRound, KeyAggContext,
     PartialSignature, PubNonce, SecNonce, SecondRound,

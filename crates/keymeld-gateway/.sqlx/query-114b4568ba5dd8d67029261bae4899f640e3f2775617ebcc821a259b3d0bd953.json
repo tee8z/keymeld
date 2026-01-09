@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT DISTINCT ks.keygen_session_id, ks.status\n            FROM keygen_sessions ks\n            LEFT JOIN user_keys uk ON ks.keygen_session_id = uk.origin_keygen_session_id\n            WHERE ks.status_name = 'completed'\n              AND (ks.coordinator_enclave_id = $1 OR uk.enclave_id = $1)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "keygen_session_id",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "114b4568ba5dd8d67029261bae4899f640e3f2775617ebcc821a259b3d0bd953"
+}

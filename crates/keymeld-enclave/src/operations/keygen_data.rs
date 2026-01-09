@@ -74,6 +74,8 @@ pub fn create_signing_musig_from_keygen(
                         private_key,
                         signer_index,
                         user_session.coordinator,
+                        user_session.auth_pubkey.clone(),
+                        user_session.require_signing_approval,
                     )
                     .map_err(|e| {
                         EnclaveError::Session(SessionError::MusigInitialization(format!(

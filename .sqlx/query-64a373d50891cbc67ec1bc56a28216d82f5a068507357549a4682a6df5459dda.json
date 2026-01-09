@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_key_imports (\n                        key_id, user_id, enclave_id, enclave_key_epoch,\n                        encrypted_private_key, auth_pubkey, status_name,\n                        created_at, updated_at, expires_at\n                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "64a373d50891cbc67ec1bc56a28216d82f5a068507357549a4682a6df5459dda"
+}

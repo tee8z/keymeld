@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT user_id FROM signing_approvals\n             WHERE signing_session_id = $1",
+  "query": "SELECT user_id as \"user_id: UserId\" FROM signing_approvals WHERE signing_session_id = $1",
   "describe": {
     "columns": [
       {
-        "name": "user_id",
+        "name": "user_id: UserId",
         "ordinal": 0,
         "type_info": "Blob"
       }
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "acd2c5d46ecfa3e4600da393b905f1bc5a9a9cb52a68e45aaea9f1ddd435d1e9"
+  "hash": "5932d7f26b669922d2d4a6917a5cfff0ee87bfd19ef33f360d6bf2254f1624e7"
 }

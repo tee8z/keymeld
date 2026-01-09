@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT uk.auth_pubkey\n             FROM keygen_participants kp\n             JOIN user_keys uk ON kp.user_key_id = uk.id\n             WHERE kp.user_id = $1 AND kp.keygen_session_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "name": "auth_pubkey",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a6feb65c098c4800ff59574a54d0bb8511dbcd48cff31b6c31be6c66fc076134"
+}

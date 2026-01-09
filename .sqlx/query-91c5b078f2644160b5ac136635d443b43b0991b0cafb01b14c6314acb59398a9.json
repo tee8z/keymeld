@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_key_stores (\n                        key_id, user_id, keygen_session_id, enclave_id, status_name,\n                        created_at, updated_at, expires_at\n                    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "91c5b078f2644160b5ac136635d443b43b0991b0cafb01b14c6314acb59398a9"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                kp.user_id as \"user_id!: UserId\",\n                kp.user_key_id as \"user_key_id!\",\n                uk.enclave_id as \"enclave_id!: EnclaveId\",\n                uk.enclave_key_epoch as \"enclave_key_epoch!: u64\",\n                kp.require_signing_approval as \"require_signing_approval!: bool\",\n                uk.auth_pubkey as \"auth_pubkey!\",\n                kp.session_encrypted_data,\n                hex(uk.encrypted_private_key) as \"enclave_encrypted_data!: String\"\n             FROM keygen_participants kp\n             JOIN user_keys uk ON kp.user_key_id = uk.id\n             WHERE kp.keygen_session_id = $1\n             ORDER BY kp.registered_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!: UserId",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "user_key_id!",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "enclave_id!: EnclaveId",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "enclave_key_epoch!: u64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "require_signing_approval!: bool",
+        "ordinal": 4,
+        "type_info": "Bool"
+      },
+      {
+        "name": "auth_pubkey!",
+        "ordinal": 5,
+        "type_info": "Blob"
+      },
+      {
+        "name": "session_encrypted_data",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "enclave_encrypted_data!: String",
+        "ordinal": 7,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "3b98cf5e55fcfd0098aea5e507e98784a7c2e752d88fa423e769aa354fe0ea8c"
+}

@@ -17,6 +17,20 @@ use keymeld_core::protocol::{
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, warn};
 
+use KeygenCommand::{
+    AddParticipantsBatch, DistributeParticipantPublicKeysBatch, GetAggregatePublicKey,
+    InitSession as KgInitSession,
+};
+use KeygenStatus::{
+    Completed as KgCompleted, Distributing, Failed as KgFailed, Initialized as KgInitialized,
+};
+use SigningCommand::{DistributeNonces, FinalizeSignature, InitSession as SigInitSession};
+use SigningStatus::{
+    CollectingNonces, CollectingPartialSignatures, Completed as SigCompleted, Failed as SigFailed,
+    FinalizingSignature, GeneratingNonces, GeneratingPartialSignatures,
+    Initialized as SigInitialized,
+};
+
 fn extract_keygen_command(cmd: &EnclaveCommand) -> Result<&KeygenCommand, EnclaveError> {
     match cmd {
         EnclaveCommand::Musig(MusigCommand::Keygen(keygen_cmd)) => Ok(keygen_cmd),
@@ -65,9 +79,6 @@ impl KeygenStatus {
         enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
         cmd: &EnclaveCommand,
     ) -> Result<KeygenStatus, EnclaveError> {
-        use KeygenCommand::*;
-        use KeygenStatus::*;
-
         let keygen_cmd = extract_keygen_command(cmd)?;
         let session_id = self.session_id().clone();
         let created_at = self.created_at();
@@ -76,7 +87,7 @@ impl KeygenStatus {
 
         let result = match (self, keygen_cmd) {
             // Initialized + InitSession => Distributing | Initialized
-            (Initialized(s), InitSession(c)) => s.init_session(c, keygen_ctx, enclave_ctx),
+            (KgInitialized(s), KgInitSession(c)) => s.init_session(c, keygen_ctx, enclave_ctx),
 
             // Distributing + AddParticipantsBatch => Distributing | Completed
             (Distributing(s), AddParticipantsBatch(c)) => {
@@ -89,18 +100,18 @@ impl KeygenStatus {
             }
 
             // Completed + GetAggregatePublicKey => Completed
-            (Completed(s), GetAggregatePublicKey(c)) => s.get_aggregate_key(c),
+            (KgCompleted(s), GetAggregatePublicKey(c)) => s.get_aggregate_key(c),
 
             // Idempotent: late-arriving commands on completed session
-            (Completed(s), InitSession(_))
-            | (Completed(s), AddParticipantsBatch(_))
-            | (Completed(s), DistributeParticipantPublicKeysBatch(_)) => {
+            (KgCompleted(s), KgInitSession(_))
+            | (KgCompleted(s), AddParticipantsBatch(_))
+            | (KgCompleted(s), DistributeParticipantPublicKeysBatch(_)) => {
                 debug!("Idempotent command on completed session {}", session_id);
-                Ok(Completed(s))
+                Ok(KgCompleted(s))
             }
 
             // Terminal state
-            (Failed(_), _) => return Err(terminal_state_error("keygen failed")),
+            (KgFailed(_), _) => return Err(terminal_state_error("keygen failed")),
 
             // Invalid transition
             (state, cmd) => return Err(invalid_transition(&state, cmd, &session_id)),
@@ -124,9 +135,6 @@ impl SigningStatus {
         enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
         cmd: &EnclaveCommand,
     ) -> Result<SigningStatus, EnclaveError> {
-        use SigningCommand::*;
-        use SigningStatus::*;
-
         let signing_cmd = extract_signing_command(cmd)?;
         let session_id = self.session_id().clone();
         let created_at = self.created_at();
@@ -143,7 +151,7 @@ impl SigningStatus {
 
         let result = match (self, signing_cmd) {
             // Initialized + InitSession => GeneratingNonces
-            (Initialized(s), InitSession(c)) => s.init_session(c, signing_ctx, enclave_ctx),
+            (SigInitialized(s), SigInitSession(c)) => s.init_session(c, signing_ctx, enclave_ctx),
 
             // GeneratingNonces (auto-processing) => CollectingNonces
             (GeneratingNonces(s), _) => s.generate_nonces(signing_ctx, enclave_ctx),
@@ -169,13 +177,15 @@ impl SigningStatus {
             }
 
             // Completed + FinalizeSignature => Completed (return cached signature)
-            (Completed(s), FinalizeSignature(_)) => Ok(Completed(s)),
+            (SigCompleted(s), FinalizeSignature(_)) => Ok(SigCompleted(s)),
 
             // Completed + other => Error
-            (Completed(_), cmd) => return Err(invalid_transition(&"Completed", cmd, &session_id)),
+            (SigCompleted(_), cmd) => {
+                return Err(invalid_transition(&"Completed", cmd, &session_id))
+            }
 
             // Terminal state
-            (Failed(_), _) => return Err(terminal_state_error("signing failed")),
+            (SigFailed(_), _) => return Err(terminal_state_error("signing failed")),
 
             // Invalid transition
             (state, cmd) => return Err(invalid_transition(&state, cmd, &session_id)),

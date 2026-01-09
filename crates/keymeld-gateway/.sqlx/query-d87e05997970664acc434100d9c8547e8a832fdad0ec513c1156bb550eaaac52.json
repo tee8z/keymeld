@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE single_signing_sessions\n                     SET status_name = 'processing', processing_started_at = $1,\n                         last_processing_attempt = $2, updated_at = $3\n                     WHERE signing_session_id = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "d87e05997970664acc434100d9c8547e8a832fdad0ec513c1156bb550eaaac52"
+}

@@ -137,38 +137,40 @@ impl DistributingSecrets {
         let mut all_encrypted_public_keys = Vec::new();
         let mut processed_user_ids = Vec::new();
 
-        // Process each participant in the batch
-        for (user_id, enclave_encrypted_data) in &add_batch_cmd.participants {
+        // Process participants with auth info
+        for participant in &add_batch_cmd.participants {
             info!(
                 "Processing participant {} in batch for session {}",
-                user_id, updated_state.session_id
+                participant.user_id, updated_state.session_id
             );
 
-            // Reuse existing add_participant_and_generate_keys logic
             let encrypted_public_keys = updated_state.add_participant_and_generate_keys_for_user(
-                user_id,
-                enclave_encrypted_data,
+                &participant.user_id,
+                &participant.enclave_encrypted_data,
                 keygen_ctx,
                 enclave_ctx,
+                Some(participant.auth_pubkey.clone()),
+                participant.require_signing_approval,
             )?;
 
             if !encrypted_public_keys.is_empty() {
-                all_encrypted_public_keys.push((user_id.clone(), encrypted_public_keys));
+                all_encrypted_public_keys
+                    .push((participant.user_id.clone(), encrypted_public_keys));
             }
-            processed_user_ids.push(user_id.clone());
+            processed_user_ids.push(participant.user_id.clone());
 
             // Check coordinator data
             if let Some(ref coordinator_data) = updated_state.coordinator_data {
-                if coordinator_data.user_id == *user_id
-                    && !enclave_encrypted_data.is_empty()
+                if coordinator_data.user_id == participant.user_id
+                    && !participant.enclave_encrypted_data.is_empty()
                     && updated_state
                         .musig_processor
-                        .get_private_key(user_id)
+                        .get_private_key(&participant.user_id)
                         .is_some()
                 {
                     debug!(
                         "Confirmed coordinator user {} in session {}",
-                        user_id, updated_state.session_id
+                        participant.user_id, updated_state.session_id
                     );
                 }
             }
@@ -324,6 +326,8 @@ impl DistributingSecrets {
         enclave_encrypted_data: &str,
         keygen_ctx: &KeygenSessionContext,
         enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
+        auth_pubkey: Option<Vec<u8>>,
+        require_signing_approval: bool,
     ) -> Result<Vec<EncryptedParticipantPublicKey>, EnclaveError> {
         debug!(
             "Processing AddParticipant for user {} - enclave_encrypted_data length: {}",
@@ -413,7 +417,14 @@ impl DistributingSecrets {
                 .unwrap_or(false);
 
             self.musig_processor
-                .store_user_private_key(user_id, private_key, signer_index, is_coordinator)
+                .store_user_private_key(
+                    user_id,
+                    private_key,
+                    signer_index,
+                    is_coordinator,
+                    auth_pubkey.clone(),
+                    require_signing_approval,
+                )
                 .map_err(|e| {
                     EnclaveError::Crypto(CryptoError::Other(format!(
                         "Failed to store private key: {e}"
@@ -421,8 +432,8 @@ impl DistributingSecrets {
                 })?;
 
             debug!(
-                "Stored private key for user {} in MusigProcessor for session {} with signer_index {}",
-                user_id, self.session_id, signer_index
+                "Stored private key for user {} in MusigProcessor for session {} with signer_index {}, require_approval={}",
+                user_id, self.session_id, signer_index, require_signing_approval
             );
 
             public_key

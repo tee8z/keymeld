@@ -49,6 +49,18 @@ enum Commands {
         #[arg(long)]
         skip_regular_signing: bool,
     },
+    /// Single-signer key management and signing test
+    SingleSigner {
+        /// Configuration file path
+        #[arg(long)]
+        config: String,
+    },
+    /// Keygen with stored key test
+    KeygenWithStoredKey {
+        /// Configuration file path
+        #[arg(long)]
+        config: String,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +92,30 @@ async fn main() -> Result<()> {
                 skip_regular_signing,
             )
             .await
+        }
+        Commands::SingleSigner { config } => {
+            use keymeld_examples::ExampleConfig;
+            use std::fs::read_to_string;
+            use tracing_subscriber::fmt::init;
+
+            init();
+
+            let config_content = read_to_string(&config)?;
+            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+
+            keymeld_examples::single_signer::run_single_signer_test(config).await
+        }
+        Commands::KeygenWithStoredKey { config } => {
+            use keymeld_examples::ExampleConfig;
+            use std::fs::read_to_string;
+            use tracing_subscriber::fmt::init;
+
+            init();
+
+            let config_content = read_to_string(&config)?;
+            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+
+            keymeld_examples::keygen_with_stored_key::run_keygen_with_stored_key_test(config).await
         }
     }
 }

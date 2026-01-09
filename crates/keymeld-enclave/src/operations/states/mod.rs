@@ -3,7 +3,7 @@ use crate::musig::MusigProcessor;
 use keymeld_core::{
     crypto::SessionSecret,
     identifiers::{SessionId, UserId},
-    protocol::{EnclaveError, InternalError},
+    protocol::{EnclaveError, InternalError, NonceData},
 };
 use std::time::SystemTime;
 
@@ -27,17 +27,13 @@ pub enum SessionKind {
 }
 
 pub struct ParticipantInfo {
-    pub user_id: keymeld_core::identifiers::UserId,
+    pub user_id: UserId,
     pub public_key: Vec<u8>,
     pub has_private_key: bool,
 }
 
 impl ParticipantInfo {
-    pub fn new(
-        user_id: keymeld_core::identifiers::UserId,
-        public_key: Vec<u8>,
-        has_private_key: bool,
-    ) -> Self {
+    pub fn new(user_id: UserId, public_key: Vec<u8>, has_private_key: bool) -> Self {
         Self {
             user_id,
             public_key,
@@ -145,10 +141,7 @@ impl std::fmt::Display for SigningStatus {
 }
 
 impl SigningStatus {
-    pub fn get_user_nonce_data(
-        &self,
-        user_id: &keymeld_core::identifiers::UserId,
-    ) -> Option<keymeld_core::protocol::NonceData> {
+    pub fn get_user_nonce_data(&self, user_id: &UserId) -> Option<NonceData> {
         match self {
             SigningStatus::Initialized(state) => {
                 state.musig_processor().get_user_nonce_data(user_id)
@@ -190,10 +183,7 @@ impl SigningStatus {
         }
     }
 
-    pub fn get_user_partial_signature(
-        &self,
-        user_id: &keymeld_core::identifiers::UserId,
-    ) -> Option<musig2::PartialSignature> {
+    pub fn get_user_partial_signature(&self, user_id: &UserId) -> Option<musig2::PartialSignature> {
         match self {
             SigningStatus::Initialized(_) => None,
             SigningStatus::GeneratingNonces(_) => None,

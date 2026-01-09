@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id as \"user_id: UserId\" FROM keygen_participants\n             WHERE keygen_session_id = $1 AND require_signing_approval = true",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id: UserId",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7083edc6746fc9a5766edbdda12bd9550adef6bd9d3d7a7878ba9158e6f4a722"
+}

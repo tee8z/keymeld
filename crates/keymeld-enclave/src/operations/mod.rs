@@ -4,11 +4,16 @@ pub mod enclave_context;
 pub mod keygen_data;
 pub mod session_context;
 pub mod states;
+pub mod user_key_handler;
+pub mod user_key_store;
+
+use std::collections::BTreeMap;
 
 // New exports for the refactored architecture
 pub use context::EnclaveSharedContext;
 pub use context_aware_session::ContextAwareSession;
 pub use keygen_data::{create_signing_musig_from_keygen, KeygenSessionData};
+use keymeld_core::UserId;
 pub use session_context::{
     decrypt_coordinator_data_from_enclave, decrypt_session_secret_from_enclave,
     KeygenSessionContext, SessionContext, SigningSessionContext,
@@ -31,8 +36,8 @@ pub struct InitConfig {
     pub session_secret: Option<keymeld_core::SessionSecret>,
     pub message: Vec<u8>,
     pub message_hash: Vec<u8>,
-    pub participant_keys: std::collections::BTreeMap<keymeld_core::identifiers::UserId, Vec<u8>>,
-    pub participants: Vec<keymeld_core::identifiers::UserId>,
-    pub expected_participants: Vec<keymeld_core::identifiers::UserId>,
+    pub participant_keys: BTreeMap<UserId, Vec<u8>>,
+    pub participants: Vec<UserId>,
+    pub expected_participants: Vec<UserId>,
     pub expected_participant_count: usize,
 }

@@ -192,6 +192,8 @@ impl MusigProcessor {
                 coordinator: session.coordinator,
                 signer_index: session.signer_index,
                 private_key: session.private_key.clone(),
+                auth_pubkey: session.auth_pubkey.clone(),
+                require_signing_approval: session.require_signing_approval,
                 first_round: None,
                 second_round: None,
                 adaptor_first_rounds: BTreeMap::new(),
@@ -227,6 +229,11 @@ impl MusigProcessor {
         self.user_sessions.len()
     }
 
+    /// Get an iterator over all user sessions for approval verification
+    pub fn get_all_user_sessions(&self) -> impl Iterator<Item = (&UserId, &UserMusigSession)> {
+        self.user_sessions.iter()
+    }
+
     pub(crate) fn update_session_phase(&mut self, phase: SessionPhase) -> Result<(), MusigError> {
         debug!(
             "Updating session {} phase from {:?} to {:?}",
@@ -244,12 +251,12 @@ impl MusigProcessor {
             .session_metadata
             .copy_for_signing_session(signing_session_id.clone())?;
 
-        // Create new user_sessions for the signing session, copying only private keys
-        // and signer_index. Nonce rounds must NOT be copied to prevent nonce reuse
+        // Create new user_sessions for the signing session, copying private keys,
+        // signer_index, and auth info. Nonce rounds must NOT be copied to prevent nonce reuse
         // across multiple signing sessions from the same keygen session.
         let mut signing_user_sessions = HashMap::new();
         for (user_id, user_session) in &self.user_sessions {
-            // Only copy private key and signer_index - no nonce rounds
+            // Only copy private key, signer_index, and auth info - no nonce rounds
             if let Some(private_key) = &user_session.private_key {
                 signing_user_sessions.insert(
                     user_id.clone(),
@@ -258,6 +265,8 @@ impl MusigProcessor {
                         signer_index: user_session.signer_index,
                         private_key: Some(private_key.clone()),
                         coordinator: user_session.coordinator,
+                        auth_pubkey: user_session.auth_pubkey.clone(),
+                        require_signing_approval: user_session.require_signing_approval,
                         first_round: None, // Must be None - will be generated fresh for this signing session
                         second_round: None,
                         adaptor_first_rounds: BTreeMap::new(),
@@ -279,12 +288,16 @@ impl MusigProcessor {
         private_key: KeyMaterial,
         signer_index: usize,
         coordinator: bool,
+        auth_pubkey: Option<Vec<u8>>,
+        require_signing_approval: bool,
     ) -> Result<(), MusigError> {
         let user_session = UserMusigSession {
             user_id: user_id.clone(),
             signer_index,
             private_key: Some(private_key),
             coordinator,
+            auth_pubkey,
+            require_signing_approval,
             first_round: None,
             second_round: None,
             adaptor_first_rounds: BTreeMap::new(),
@@ -294,8 +307,8 @@ impl MusigProcessor {
         self.user_sessions.insert(user_id.clone(), user_session);
 
         info!(
-            "Stored private key for user {} with signer_index {}",
-            user_id, signer_index
+            "Stored private key for user {} with signer_index {}, require_approval={}",
+            user_id, signer_index, require_signing_approval
         );
 
         Ok(())

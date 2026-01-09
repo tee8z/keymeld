@@ -29,11 +29,14 @@ use zeroize::Zeroize;
 
 use crate::{
     attestation::AttestationManager,
+    musig::MusigProcessor,
     operations::{
         context_aware_session::ContextAwareSession,
         create_signing_musig_from_keygen,
         session_context::{create_signing_session_context, KeygenSessionContext, SessionContext},
         states::{KeygenStatus, OperatorStatus, SigningStatus},
+        user_key_handler::handle_user_key_command,
+        user_key_store::UserKeyStore,
         EnclaveSharedContext, KeygenInitialized, SigningInitialized,
     },
     queue::Queue,
@@ -71,6 +74,10 @@ impl ServerCommandHandler<Command, Outcome> for EnclaveCommandHandler {
 pub struct EnclaveOperator {
     pub enclave_id: EnclaveId,
     pub sessions: Arc<DashMap<SessionId, ContextAwareSession>>,
+    /// Keygen sessions for accessing participant data (used by UserKey commands)
+    pub keygen_sessions: Arc<DashMap<SessionId, Arc<MusigProcessor>>>,
+    /// User key store for single-signer operations
+    pub user_key_store: Arc<UserKeyStore>,
     pub attestation_manager: Option<AttestationManager>,
     pub public_key: Arc<RwLock<Vec<u8>>>,
     pub private_key: Arc<RwLock<Vec<u8>>>,
@@ -95,6 +102,21 @@ impl EnclaveOperator {
             EnclaveCommand::Musig(musig_cmd) => {
                 self.handle_musig_command(command.clone(), musig_cmd.clone())
                     .await
+            }
+            EnclaveCommand::UserKey(user_key_cmd) => {
+                // Get the enclave context for crypto operations
+                let enclave_ctx = self.context.read().unwrap().clone();
+
+                // Handle user key command
+                let outcome = handle_user_key_command(
+                    user_key_cmd.clone(),
+                    &self.user_key_store,
+                    &enclave_ctx,
+                    Some(&self.keygen_sessions),
+                )
+                .await?;
+
+                Ok(EnclaveOutcome::UserKey(outcome))
             }
         }?;
 
@@ -624,6 +646,9 @@ impl EnclaveOperator {
         );
 
         let sessions: Arc<DashMap<SessionId, ContextAwareSession>> = Arc::new(DashMap::new());
+        let keygen_sessions: Arc<DashMap<SessionId, Arc<MusigProcessor>>> =
+            Arc::new(DashMap::new());
+        let user_key_store = Arc::new(UserKeyStore::new());
         let enclave_public_keys = Arc::new(DashMap::new());
         let queue = Queue::new(sessions.clone());
 
@@ -639,6 +664,8 @@ impl EnclaveOperator {
         Ok(EnclaveOperator {
             enclave_id,
             sessions,
+            keygen_sessions,
+            user_key_store,
             attestation_manager: None,
             public_key: Arc::new(RwLock::new(Vec::new())),
             private_key: Arc::new(RwLock::new(Vec::new())),

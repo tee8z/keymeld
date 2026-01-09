@@ -10,6 +10,7 @@ use crate::{
 use dashmap::DashSet;
 use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::identifiers::{EnclaveId, SessionId};
+use keymeld_core::protocol::{KeygenStatusKind, SigningStatusKind};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -211,12 +212,13 @@ impl Coordinator {
             warn!("Database health check failed: {}", e);
         }
 
-        // Process both keygen and signing sessions in parallel
-        debug!("Starting parallel processing of keygen and signing sessions");
+        // Process keygen, signing, and single-signer operations in parallel
+        debug!("Starting parallel processing of keygen, signing, and single-signer operations");
         let parallel_start = Instant::now();
-        let (keygen_result, signing_result) = tokio::join!(
+        let (keygen_result, signing_result, single_signer_result) = tokio::join!(
             self.process_sessions_by_kind_with_recovery(SessionKind::Keygen),
-            self.process_sessions_by_kind_with_recovery(SessionKind::Signing)
+            self.process_sessions_by_kind_with_recovery(SessionKind::Signing),
+            self.process_single_signer_operations()
         );
         let parallel_duration = parallel_start.elapsed();
         debug!(
@@ -252,14 +254,30 @@ impl Coordinator {
             }
         };
 
-        let total_processed = keygen_processed + signing_processed;
+        let single_signer_processed = match single_signer_result {
+            Ok(count) => {
+                if count > 0 {
+                    self.circuit_breaker.record_success();
+                }
+                count
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure();
+                self.metrics
+                    .record_session_error("coordinator", "single_signer_processing_failed");
+                warn!("Single-signer processing failed: {}", e);
+                0
+            }
+        };
+
+        let total_processed = keygen_processed + signing_processed + single_signer_processed;
 
         timer.finish();
 
         if total_processed > 0 {
             info!(
-                "Processed {} total sessions (keygen: {}, signing: {}) in parallel in {:?}",
-                total_processed, keygen_processed, signing_processed, parallel_duration
+                "Processed {} total sessions (keygen: {}, signing: {}, single-signer: {}) in parallel in {:?}",
+                total_processed, keygen_processed, signing_processed, single_signer_processed, parallel_duration
             );
         } else {
             debug!("No sessions processed this cycle");
@@ -460,7 +478,6 @@ impl Coordinator {
     ) -> Result<Vec<ProcessableSessionRecord>, ApiError> {
         match kind {
             SessionKind::Keygen => {
-                use keymeld_core::protocol::KeygenStatusKind;
                 let active_states = vec![KeygenStatusKind::CollectingParticipants];
                 self.db
                     .get_processable_keygen_sessions_cursor(
@@ -473,7 +490,6 @@ impl Coordinator {
                     .await
             }
             SessionKind::Signing => {
-                use keymeld_core::protocol::SigningStatusKind;
                 let active_states = vec![
                     SigningStatusKind::CollectingParticipants,
                     SigningStatusKind::InitializingSession,
@@ -930,7 +946,7 @@ impl Coordinator {
             let current_time = DbUtils::current_timestamp();
 
             let startup_time = if existing_enclave.is_none() && health {
-                Some(current_time as u64)
+                Some(current_time)
             } else {
                 existing_enclave.map(|e| e.startup_time)
             };
@@ -944,9 +960,15 @@ impl Coordinator {
                 active_sessions,
             ) = if health {
                 // First validate epochs to detect any enclave restarts
+                // Use validate_enclave_epoch_with_kms to ensure the enclave gets its KMS keys
+                // back on restart, which is required for session restoration
                 let epoch_check_result = self
                     .enclave_manager
-                    .validate_enclave_epoch(&enclave_id)
+                    .validate_enclave_epoch_with_kms(
+                        &enclave_id,
+                        Some(&self.db),
+                        Some(&self.kms_config),
+                    )
                     .await;
 
                 match epoch_check_result {
@@ -1012,9 +1034,9 @@ impl Coordinator {
                                     Some(key),
                                     attestation
                                         .map(|att| serde_json::to_string(&att).unwrap_or_default()),
-                                    Some(epoch),
-                                    Some(key_time),
-                                    Some(sessions),
+                                    Some(epoch as i64),
+                                    Some(key_time as i64),
+                                    Some(sessions as i32),
                                 )
                             }
                             Err(e) => {
@@ -1170,9 +1192,9 @@ impl Coordinator {
                     (
                         Some(key),
                         attestation.map(|att| serde_json::to_string(&att).unwrap_or_default()),
-                        Some(epoch),
-                        Some(key_time),
-                        Some(sessions),
+                        Some(epoch as i64),
+                        Some(key_time as i64),
+                        Some(sessions as i32),
                     )
                 }
                 Err(e) => {
@@ -1236,9 +1258,14 @@ impl Coordinator {
                                 healthy_enclaves_count += 1;
 
                                 // Additional check: validate that epoch is synchronized
+                                // Use validate_enclave_epoch_with_kms to ensure KMS keys are restored on restart
                                 match self
                                     .enclave_manager
-                                    .validate_enclave_epoch(enclave_id)
+                                    .validate_enclave_epoch_with_kms(
+                                        enclave_id,
+                                        Some(&self.db),
+                                        Some(&self.kms_config),
+                                    )
                                     .await
                                 {
                                     Ok(false) => {
@@ -1426,5 +1453,405 @@ impl Coordinator {
         }
 
         debug!("Prometheus connection stats updated successfully");
+    }
+
+    // ============================================================
+    // Single-Signer Operations Processing
+    // ============================================================
+
+    /// Process all single-signer operations (key imports, key stores, single signing)
+    async fn process_single_signer_operations(&self) -> Result<u32, ApiError> {
+        let (imports_result, stores_result, signing_result) = tokio::join!(
+            self.process_pending_key_imports(),
+            self.process_pending_key_stores(),
+            self.process_single_signing_sessions()
+        );
+
+        let imports_count = imports_result.unwrap_or_else(|e| {
+            warn!("Failed to process pending key imports: {}", e);
+            0
+        });
+
+        let stores_count = stores_result.unwrap_or_else(|e| {
+            warn!("Failed to process pending key stores: {}", e);
+            0
+        });
+
+        let signing_count = signing_result.unwrap_or_else(|e| {
+            warn!("Failed to process single signing sessions: {}", e);
+            0
+        });
+
+        let total = imports_count + stores_count + signing_count;
+        if total > 0 {
+            debug!(
+                "Single-signer operations: {} imports, {} stores, {} signings",
+                imports_count, stores_count, signing_count
+            );
+        }
+
+        Ok(total)
+    }
+
+    /// Process pending key imports - send ImportUserKeyCommand to enclaves
+    async fn process_pending_key_imports(&self) -> Result<u32, ApiError> {
+        let pending = self.db.get_processable_pending_key_imports(20).await?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        debug!("Processing {} pending key imports", pending.len());
+        let mut processed = 0;
+
+        for record in pending {
+            // Mark as processing
+            if let Err(e) = self
+                .db
+                .mark_pending_key_import_processing(&record.key_id)
+                .await
+            {
+                warn!(
+                    "Failed to mark key import {} as processing: {}",
+                    record.key_id, e
+                );
+                continue;
+            }
+
+            // Build the command
+            let command = keymeld_core::protocol::EnclaveCommand::UserKey(
+                keymeld_core::protocol::UserKeyCommand::ImportKey(
+                    keymeld_core::protocol::ImportUserKeyCommand {
+                        user_id: record.user_id.clone(),
+                        key_id: record.key_id.clone(),
+                        encrypted_private_key: hex::encode(&record.encrypted_private_key),
+                        auth_pubkey: record.auth_pubkey.clone(),
+                    },
+                ),
+            );
+
+            // Send to enclave
+            match self
+                .enclave_manager
+                .send_command_to_enclave(&record.enclave_id, command.into())
+                .await
+            {
+                Ok(outcome) => {
+                    // Check outcome type
+                    match outcome.response {
+                        keymeld_core::protocol::EnclaveOutcome::UserKey(
+                            keymeld_core::protocol::UserKeyOutcome::KeyImported(_info),
+                        ) => {
+                            info!(
+                                "Key {} imported successfully for user {}",
+                                record.key_id, record.user_id
+                            );
+                            // Complete the import - moves to user_keys table
+                            if let Err(e) =
+                                self.db.complete_pending_key_import(&record.key_id).await
+                            {
+                                error!("Failed to complete key import {}: {}", record.key_id, e);
+                            } else {
+                                processed += 1;
+                            }
+                        }
+                        other => {
+                            let error_msg = format!("Unexpected outcome: {:?}", other);
+                            warn!("Key import {} failed: {}", record.key_id, error_msg);
+                            let _ = self
+                                .db
+                                .fail_pending_key_import(&record.key_id, &error_msg)
+                                .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Enclave error: {}", e);
+                    warn!("Key import {} failed: {}", record.key_id, error_msg);
+                    let _ = self
+                        .db
+                        .fail_pending_key_import(&record.key_id, &error_msg)
+                        .await;
+                }
+            }
+        }
+
+        Ok(processed)
+    }
+
+    /// Process pending key stores - send StoreKeyFromKeygenCommand to enclaves
+    async fn process_pending_key_stores(&self) -> Result<u32, ApiError> {
+        let pending = self.db.get_processable_pending_key_stores(20).await?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        debug!("Processing {} pending key stores", pending.len());
+        let mut processed = 0;
+
+        for record in pending {
+            // Mark as processing
+            if let Err(e) = self
+                .db
+                .mark_pending_key_store_processing(&record.key_id)
+                .await
+            {
+                warn!(
+                    "Failed to mark key store {} as processing: {}",
+                    record.key_id, e
+                );
+                continue;
+            }
+
+            // Get the keygen participant data to retrieve auth_pubkey and enclave_key_epoch
+            let participant = match self
+                .db
+                .get_keygen_participant(&record.keygen_session_id, &record.user_id)
+                .await
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    let error_msg = "Keygen participant not found";
+                    warn!("Key store {} failed: {}", record.key_id, error_msg);
+                    let _ = self
+                        .db
+                        .fail_pending_key_store(&record.key_id, error_msg)
+                        .await;
+                    continue;
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to get keygen participant: {}", e);
+                    warn!("Key store {} failed: {}", record.key_id, error_msg);
+                    let _ = self
+                        .db
+                        .fail_pending_key_store(&record.key_id, &error_msg)
+                        .await;
+                    continue;
+                }
+            };
+
+            // Build the command
+            let command = keymeld_core::protocol::EnclaveCommand::UserKey(
+                keymeld_core::protocol::UserKeyCommand::StoreKeyFromKeygen(
+                    keymeld_core::protocol::StoreKeyFromKeygenCommand {
+                        user_id: record.user_id.clone(),
+                        key_id: record.key_id.clone(),
+                        keygen_session_id: record.keygen_session_id.clone(),
+                    },
+                ),
+            );
+
+            // Send to enclave
+            match self
+                .enclave_manager
+                .send_command_to_enclave(&record.enclave_id, command.into())
+                .await
+            {
+                Ok(outcome) => {
+                    match outcome.response {
+                        keymeld_core::protocol::EnclaveOutcome::UserKey(
+                            keymeld_core::protocol::UserKeyOutcome::KeyStoredFromKeygen(result),
+                        ) => {
+                            info!(
+                                "Key {} stored from keygen {} for user {}",
+                                record.key_id, record.keygen_session_id, record.user_id
+                            );
+                            // Complete the store - creates user_keys entry with encrypted key from enclave
+                            // auth_pubkey and enclave_key_epoch come from the keygen participant
+                            let encrypted_key_bytes = hex::decode(&result.encrypted_private_key)
+                                .unwrap_or_else(|_| {
+                                    result.encrypted_private_key.as_bytes().to_vec()
+                                });
+                            if let Err(e) = self
+                                .db
+                                .complete_pending_key_store(
+                                    &record.key_id,
+                                    &encrypted_key_bytes,
+                                    &participant.auth_pubkey,
+                                    participant.enclave_key_epoch,
+                                )
+                                .await
+                            {
+                                error!("Failed to complete key store {}: {}", record.key_id, e);
+                            } else {
+                                processed += 1;
+                            }
+                        }
+                        other => {
+                            let error_msg = format!("Unexpected outcome: {:?}", other);
+                            warn!("Key store {} failed: {}", record.key_id, error_msg);
+                            let _ = self
+                                .db
+                                .fail_pending_key_store(&record.key_id, &error_msg)
+                                .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Enclave error: {}", e);
+                    warn!("Key store {} failed: {}", record.key_id, error_msg);
+                    let _ = self
+                        .db
+                        .fail_pending_key_store(&record.key_id, &error_msg)
+                        .await;
+                }
+            }
+        }
+
+        Ok(processed)
+    }
+
+    /// Process single signing sessions - send SignSingleCommand to enclaves
+    async fn process_single_signing_sessions(&self) -> Result<u32, ApiError> {
+        let pending = self.db.get_processable_single_signing_sessions(20).await?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        debug!("Processing {} single signing sessions", pending.len());
+        let mut processed = 0;
+
+        for record in pending {
+            // Mark as processing
+            if let Err(e) = self
+                .db
+                .mark_single_signing_processing(&record.signing_session_id)
+                .await
+            {
+                warn!(
+                    "Failed to mark single signing {} as processing: {}",
+                    record.signing_session_id, e
+                );
+                continue;
+            }
+
+            // Get the encrypted message and session secret
+            let encrypted_message = match &record.encrypted_message {
+                Some(msg) => hex::encode(msg),
+                None => {
+                    let _ = self
+                        .db
+                        .update_single_signing_result(
+                            &record.signing_session_id,
+                            None,
+                            Some("Missing encrypted message"),
+                        )
+                        .await;
+                    continue;
+                }
+            };
+
+            let encrypted_session_secret = match &record.encrypted_session_secret {
+                Some(secret) => hex::encode(secret),
+                None => {
+                    let _ = self
+                        .db
+                        .update_single_signing_result(
+                            &record.signing_session_id,
+                            None,
+                            Some("Missing encrypted session secret"),
+                        )
+                        .await;
+                    continue;
+                }
+            };
+
+            // Parse signature type
+            let signature_type: keymeld_core::protocol::SignatureType =
+                match record.signature_type.parse() {
+                    Ok(st) => st,
+                    Err(e) => {
+                        let _ = self
+                            .db
+                            .update_single_signing_result(
+                                &record.signing_session_id,
+                                None,
+                                Some(&format!("Invalid signature type: {}", e)),
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+            // Build the command with approval signature from DB
+            let command = keymeld_core::protocol::EnclaveCommand::UserKey(
+                keymeld_core::protocol::UserKeyCommand::SignSingle(
+                    keymeld_core::protocol::SignSingleCommand {
+                        user_id: record.user_id.clone(),
+                        key_id: record.key_id.clone(),
+                        encrypted_message,
+                        signature_type,
+                        encrypted_session_secret,
+                        approval_signature: record.approval_signature.clone(),
+                        approval_timestamp: record.approval_timestamp as u64,
+                    },
+                ),
+            );
+
+            // Send to enclave
+            match self
+                .enclave_manager
+                .send_command_to_enclave(&record.enclave_id, command.into())
+                .await
+            {
+                Ok(outcome) => match outcome.response {
+                    keymeld_core::protocol::EnclaveOutcome::UserKey(
+                        keymeld_core::protocol::UserKeyOutcome::SingleSignature(result),
+                    ) => {
+                        info!(
+                            "Single signing {} completed for user {}",
+                            record.signing_session_id, record.user_id
+                        );
+                        if let Err(e) = self
+                            .db
+                            .update_single_signing_result(
+                                &record.signing_session_id,
+                                Some(&result.encrypted_signature),
+                                None,
+                            )
+                            .await
+                        {
+                            error!(
+                                "Failed to update signing result {}: {}",
+                                record.signing_session_id, e
+                            );
+                        } else {
+                            processed += 1;
+                        }
+                    }
+                    other => {
+                        let error_msg = format!("Unexpected outcome: {:?}", other);
+                        warn!(
+                            "Single signing {} failed: {}",
+                            record.signing_session_id, error_msg
+                        );
+                        let _ = self
+                            .db
+                            .update_single_signing_result(
+                                &record.signing_session_id,
+                                None,
+                                Some(&error_msg),
+                            )
+                            .await;
+                    }
+                },
+                Err(e) => {
+                    let error_msg = format!("Enclave error: {}", e);
+                    warn!(
+                        "Single signing {} failed: {}",
+                        record.signing_session_id, error_msg
+                    );
+                    let _ = self
+                        .db
+                        .update_single_signing_result(
+                            &record.signing_session_id,
+                            None,
+                            Some(&error_msg),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        Ok(processed)
     }
 }

@@ -19,20 +19,18 @@ use axum::{
 use keymeld_core::managed_vsock::config::TimeoutConfig;
 use keymeld_sdk::{
     ApiFeatures, ApiVersionResponse, AvailableUserSlot, CreateSigningSessionRequest,
-    CreateSigningSessionResponse, DatabaseStats, EnclaveAssignmentResponse, EnclaveHealthResponse,
-    EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse, HealthCheckResponse,
-    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeygenSessionStatusResponse,
-    ListEnclavesResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
-    ReserveKeygenSessionRequest, ReserveKeygenSessionResponse, SigningSessionStatusResponse,
+    CreateSigningSessionResponse, DatabaseStats, DeleteUserKeyResponse, EnclaveAssignmentResponse,
+    EnclaveHealthResponse, EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse,
+    HealthCheckResponse, ImportUserKeyRequest, ImportUserKeyResponse,
+    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeyStatusResponse,
+    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse,
+    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse, ReserveKeySlotRequest,
+    ReserveKeySlotResponse, ReserveKeygenSessionRequest, ReserveKeygenSessionResponse,
+    SignSingleRequest, SignSingleResponse, SigningSessionStatusResponse, SingleSigningStatus,
+    SingleSigningStatusResponse, StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
 };
 
-use std::{
-    io::Error as IoError,
-    net::SocketAddr,
-    str::FromStr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::Error as IoError, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
@@ -75,6 +73,16 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
         handlers::get_signing_status,
         handlers::get_enclave_public_key,
         handlers::api_version,
+        // User key management
+        handlers::reserve_key_slot,
+        handlers::import_user_key,
+        handlers::list_user_keys,
+        handlers::delete_user_key,
+        handlers::get_key_status,
+        handlers::store_key_from_keygen,
+        // Single-signer signing
+        handlers::sign_single,
+        handlers::get_single_signing_status,
     ),
     components(
         schemas(
@@ -105,11 +113,28 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             keymeld_sdk::TaprootTweak,
             keymeld_sdk::KeygenStatusKind,
             keymeld_sdk::SigningStatusKind,
+            // User key management types
+            ReserveKeySlotRequest,
+            ReserveKeySlotResponse,
+            ImportUserKeyRequest,
+            ImportUserKeyResponse,
+            ListUserKeysResponse,
+            DeleteUserKeyResponse,
+            KeyStatusResponse,
+            StoreKeyFromKeygenRequest,
+            StoreKeyFromKeygenResponse,
+            // Single-signer signing types
+            SignSingleRequest,
+            SignSingleResponse,
+            SingleSigningStatus,
+            SingleSigningStatusResponse,
+            keymeld_sdk::KeyId,
         )
     ),
     tags(
         (name = "keygen", description = "Keygen session management endpoints"),
         (name = "signing", description = "Signing session management endpoints"),
+        (name = "keys", description = "User key management endpoints"),
         (name = "enclaves", description = "Enclave management endpoints"),
         (name = "health", description = "Health and status endpoints"),
     ),
@@ -182,7 +207,7 @@ impl Application {
             enclave_manager: enclave_manager.clone(),
             metrics: metrics.clone(),
             gateway_limits: GatewayLimits::default(),
-            nonce_cache: Arc::new(Mutex::new(NonceCache::new())),
+            nonce_cache: NonceCache::new(),
         };
 
         let app = Self::build_router(app_state, &config);
@@ -345,6 +370,7 @@ impl Application {
 
     fn build_router(state: AppState, config: &Config) -> Router {
         let api_routes = Router::new()
+            // Keygen routes
             .route("/keygen/reserve", post(handlers::reserve_keygen_session))
             .route(
                 "/keygen/{session_id}/initialize",
@@ -362,6 +388,7 @@ impl Application {
                 "/keygen/{keygen_session_id}/slots",
                 get(handlers::get_available_slots),
             )
+            // MuSig2 signing routes
             .route("/signing", post(handlers::create_signing_session))
             .route(
                 "/signing/{signing_session_id}/approve/{user_id}",
@@ -371,11 +398,35 @@ impl Application {
                 "/signing/{signing_session_id}/status/{user_id}",
                 get(handlers::get_signing_status),
             )
+            // User key management routes
+            .route("/keys/reserve", post(handlers::reserve_key_slot))
+            .route("/keys/import", post(handlers::import_user_key))
+            .route("/keys/{user_id}", get(handlers::list_user_keys))
+            .route(
+                "/keys/{user_id}/{key_id}",
+                axum::routing::delete(handlers::delete_user_key),
+            )
+            .route(
+                "/keys/{user_id}/{key_id}/status",
+                get(handlers::get_key_status),
+            )
+            .route(
+                "/keys/{user_id}/keygen/{keygen_session_id}",
+                post(handlers::store_key_from_keygen),
+            )
+            // Single-signer signing routes
+            .route("/sign/single", post(handlers::sign_single))
+            .route(
+                "/sign/single/{session_id}/status/{user_id}",
+                get(handlers::get_single_signing_status),
+            )
+            // Enclave routes
             .route("/enclaves", get(handlers::list_enclaves))
             .route(
                 "/enclaves/{enclave_id}/public-key",
                 get(handlers::get_enclave_public_key),
             )
+            // Health and utility routes
             .route("/version", get(handlers::api_version))
             .route("/health", get(handlers::health_check))
             .route("/health/detail", get(handlers::health_check_detail))
