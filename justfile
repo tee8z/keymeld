@@ -23,6 +23,7 @@ help:
     @echo "🎮 Demo & Testing:"
     @echo "  demo [amount] [dest] Run MuSig2 demo with optional params"
     @echo "  demo-adaptors       Run adaptor signatures demo"
+    @echo "  test-single-signer  Run single-signer E2E test"
     @echo "  test-kms-e2e        Run KMS end-to-end tests with restart"
     @echo "  mine <blocks>       Mine Bitcoin regtest blocks"
     @echo "  setup-regtest       Setup Bitcoin regtest environment"
@@ -70,8 +71,8 @@ quickstart:
     # Clean first (respects SKIP_BUILD to preserve pre-built binaries)
     ./scripts/clean.sh
 
-    # Build unless SKIP_BUILD is set and binaries exist
-    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ]; then
+    # Build unless SKIP_BUILD is set and all binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
         echo "Building binaries..."
         if [ -n "${IN_NIX_SHELL:-}" ]; then
             cargo build
@@ -108,8 +109,8 @@ quickstart-adaptors:
     # Clean first (respects SKIP_BUILD to preserve pre-built binaries)
     ./scripts/clean.sh
 
-    # Build unless SKIP_BUILD is set and binaries exist
-    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ]; then
+    # Build unless SKIP_BUILD is set and all binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
         echo "Building binaries..."
         if [ -n "${IN_NIX_SHELL:-}" ]; then
             cargo build
@@ -307,6 +308,47 @@ demo-adaptors amount="50000" dest="bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80"
     @echo "🔐 Running KeyMeld Adaptor Signatures Demo..."
     @nix develop -c ./scripts/run-demo.sh adaptor {{amount}} {{dest}}
 
+# Run single-signer E2E test
+test-single-signer:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔑 Running Single-Signer E2E Test..."
+
+    # Clean and setup
+    ./scripts/clean.sh
+
+    # Build unless SKIP_BUILD is set and all binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+        echo "🔨 Building KeyMeld..."
+        if [ -n "${IN_NIX_SHELL:-}" ]; then
+            cargo build
+        else
+            nix develop -c cargo build
+        fi
+    else
+        echo "Using pre-built binaries (SKIP_BUILD=1)"
+    fi
+
+    # Setup regtest and start services
+    echo "🚀 Starting services..."
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        ./scripts/setup-regtest.sh
+        ./scripts/start-services.sh
+    else
+        nix develop -c ./scripts/setup-regtest.sh
+        nix develop -c ./scripts/start-services.sh
+    fi
+
+    # Run the single-signer test
+    echo "🔑 Running single-signer E2E test..."
+    if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
+        ./target/debug/keymeld_demo single-signer --config config/example-nix.yaml
+    elif [ -n "${IN_NIX_SHELL:-}" ]; then
+        cargo run --bin keymeld_demo -- single-signer --config config/example-nix.yaml
+    else
+        nix develop -c cargo run --bin keymeld_demo -- single-signer --config config/example-nix.yaml
+    fi
+
 # Run parallel stress tests
 stress mode count amount="50000":
     #!/usr/bin/env bash
@@ -453,8 +495,12 @@ clean: stop
     sleep 1
 
     # Remove all data, logs, and build artifacts
-    rm -rf data logs target/debug/keymeld-* result
+    rm -rf data logs result
     rm -rf /tmp/keymeld-stress-test
+    # Only clean binaries if not using pre-built (CI sets SKIP_BUILD)
+    if [ -z "${SKIP_BUILD:-}" ]; then
+        rm -rf target/debug/keymeld-* target/debug/keymeld_*
+    fi
 
     # Recreate necessary directories
     mkdir -p data logs
