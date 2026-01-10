@@ -62,11 +62,19 @@ POST /api/v1/keygen/reserve
   "coordinator_user_id": "uuid-v7",
   "expected_participants": ["user1", "user2", "user3"],
   "timeout_secs": 3600,
-  "encrypted_taproot_tweak": "hex-encrypted-tweak"
+  "encrypted_taproot_tweak": "hex-encrypted-tweak",
+  "subset_definitions": [
+    {
+      "subset_id": "uuid-v7",
+      "participants": ["user1", "user2"]
+    }
+  ]
 }
 ```
 
 Response includes `coordinator_enclave_id` and `coordinator_public_key` for ECIES encryption.
+
+**Subset Definitions** (optional): Define participant subsets for 2-of-n signing within the larger group. Each subset gets its own aggregate key computed from BIP327-sorted participant public keys. Used for scenarios like DLC split transactions where only a subset of participants need to sign.
 
 ### 2. Initialize Session
 
@@ -128,8 +136,9 @@ X-Session-Signature: nonce:signature
     {
       "batch_item_id": "uuid-v7",
       "message_hash": [32 bytes],
-      "encrypted_message": "hex-session-encrypted",
-      "encrypted_adaptor_configs": "hex-optional"
+      "signing_mode": { ... },
+      "encrypted_taproot_tweak": "hex-session-encrypted",
+      "subset_id": "uuid-v7 or null"
     }
   ]
 }
@@ -138,8 +147,32 @@ X-Session-Signature: nonce:signature
 **Batch Item Fields:**
 - `batch_item_id`: UUIDv7 identifier for this item (returned in results)
 - `message_hash`: 32-byte hash of the message to sign
-- `encrypted_message`: Session-key encrypted message (for enclave verification)
-- `encrypted_adaptor_configs`: Optional adaptor signature configurations
+- `signing_mode`: Specifies the signature type (see below)
+- `encrypted_taproot_tweak`: Per-item taproot tweak configuration (session-key encrypted)
+- `subset_id`: Optional subset ID for signing with a subset aggregate key instead of the full n-of-n key. Must reference a subset defined during keygen.
+
+### Signing Mode
+
+The `signing_mode` field is a tagged enum that specifies whether to produce a regular Schnorr signature or an adaptor signature:
+
+**Regular Signature** - produces a standard Schnorr signature:
+```json
+{
+  "type": "regular",
+  "encrypted_message": "hex-session-encrypted"
+}
+```
+
+**Adaptor Signature** - produces a signature locked to adaptor point(s):
+```json
+{
+  "type": "adaptor",
+  "encrypted_message": "hex-session-encrypted",
+  "encrypted_adaptor_configs": "hex-encrypted-adaptor-json"
+}
+```
+
+The adaptor signature can only be completed when the corresponding adaptor secret (e.g., oracle attestation) is revealed.
 
 ### 2. Approve (if required)
 
@@ -340,7 +373,65 @@ Private keys encrypted to enclave public keys using ECIES.
 ### Session Key (between participants)
 Session data encrypted with symmetric key derived from shared session secret.
 
+## Subset Signing
+
+Subset signing enables k-of-n signing within a larger MuSig2 group. This is useful for scenarios like DLC split transactions where only a subset of participants need to sign.
+
+### How It Works
+
+1. **Define subsets at keygen time**: Include `subset_definitions` in the reserve request
+2. **Each subset gets its own aggregate key**: Computed from BIP327-sorted participant public keys
+3. **Reference subset in batch items**: Set `subset_id` on batch items that should use subset signing
+4. **Automatic signer index mapping**: The enclave maps participant indices from the full group to subset-relative indices
+
+### Example: DLC with 3 players + 1 market maker (weighted payouts)
+
+For DLCs with weighted payouts where multiple players can win per outcome, subsets must be defined **per-outcome** (not per-player). Each outcome's split transaction key is the aggregate of the market maker + ALL winners for that outcome.
+
+```json
+// At keygen - define subsets per outcome containing all winners + market_maker
+// Outcome 0: Player 0 (60%) + Player 1 (40%)
+// Outcome 1: Player 1 (50%) + Player 2 (50%)
+// Outcome 2: Player 0 (50%) + Player 1 (30%) + Player 2 (20%)
+{
+  "subset_definitions": [
+    {"subset_id": "subset-outcome-0", "participants": ["market_maker", "player_0", "player_1"]},
+    {"subset_id": "subset-outcome-1", "participants": ["market_maker", "player_1", "player_2"]},
+    {"subset_id": "subset-outcome-2", "participants": ["market_maker", "player_0", "player_1", "player_2"]}
+  ]
+}
+
+// At signing - outcome txs use full n-of-n, split txs use per-outcome subsets
+{
+  "batch_items": [
+    // Outcome transactions (n-of-n adaptor signatures)
+    {
+      "batch_item_id": "outcome-0",
+      "message_hash": [...],
+      "signing_mode": {"type": "adaptor", "encrypted_message": "...", "encrypted_adaptor_configs": "..."},
+      "encrypted_taproot_tweak": "...",
+      "subset_id": null
+    },
+    // ... outcome-1, outcome-2 similar
+    
+    // Split transactions (k-of-k per outcome - regular signatures)
+    {
+      "batch_item_id": "split-outcome0-player0",
+      "message_hash": [...],
+      "signing_mode": {"type": "regular", "encrypted_message": "..."},
+      "encrypted_taproot_tweak": "...",
+      "subset_id": "subset-outcome-0"
+    }
+    // ... other split transactions similar, each referencing its outcome's subset
+  ]
+}
+```
+
+**Important**: The subset for each outcome must include ALL winners for that outcome, not just individual players. This is because `dlctix` computes the split transaction's aggregate key from `market_maker + all_winners`.
+
 ## Taproot Configuration
+
+Per-item taproot tweak configuration (encrypted with session key):
 
 ```json
 {"type": "none"}

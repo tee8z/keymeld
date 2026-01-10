@@ -1950,8 +1950,6 @@ impl KeyMeldE2ETest {
         self.session_secrets
             .insert(signing_session_id.clone(), session_secret.clone());
 
-        let encrypted_adaptor_configs = String::new();
-
         let encrypted_message = keymeld_sdk::validation::encrypt_session_data(
             &hex::encode(&sighash[..]),
             &session_secret,
@@ -1963,16 +1961,11 @@ impl KeyMeldE2ETest {
             &session_secret,
         )?;
 
-        // Create a batch item for the single message
+        // Create a batch item for the single message (regular signature, no adaptor)
         let batch_item = keymeld_sdk::SigningBatchItem {
             batch_item_id: uuid::Uuid::now_v7(),
             message_hash: sighash.to_vec(),
-            encrypted_message: Some(encrypted_message),
-            encrypted_adaptor_configs: if encrypted_adaptor_configs.is_empty() {
-                None
-            } else {
-                Some(encrypted_adaptor_configs)
-            },
+            signing_mode: keymeld_sdk::SigningMode::Regular { encrypted_message },
             encrypted_taproot_tweak,
             subset_id: None, // Use full n-of-n aggregate key
         };
