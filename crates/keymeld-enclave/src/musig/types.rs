@@ -1,6 +1,6 @@
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::TaprootTweak,
+    protocol::{SubsetDefinition, TaprootTweak},
     KeyMaterial,
 };
 use musig2::KeyAggContext;
@@ -17,6 +17,10 @@ pub struct BatchItemData {
     pub message: Vec<u8>,
     pub adaptor_configs: Vec<AdaptorConfig>,
     pub adaptor_final_signatures: BTreeMap<Uuid, AdaptorSignatureResult>,
+    /// Per-item taproot tweak for this batch item's KeyAggContext
+    pub taproot_tweak: TaprootTweak,
+    /// Optional subset_id - if set, use the subset's KeyAggContext for signing
+    pub subset_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,13 +46,8 @@ pub struct UserMusigSession {
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
 
-    // === Single message MuSig2 state (backward compat) ===
-    pub first_round: Option<musig2::FirstRound>,
-    pub second_round: Option<musig2::SecondRound<Vec<u8>>>,
-    pub adaptor_first_rounds: BTreeMap<Uuid, musig2::FirstRound>,
-    pub adaptor_second_rounds: BTreeMap<Uuid, musig2::SecondRound<Vec<u8>>>,
-
     // === Batch signing MuSig2 state ===
+    // Single messages are treated as a batch of 1
     /// First rounds per batch item (batch_item_id -> FirstRound)
     pub batch_first_rounds: BTreeMap<Uuid, musig2::FirstRound>,
     /// Second rounds per batch item (batch_item_id -> SecondRound)
@@ -65,15 +64,21 @@ impl std::fmt::Debug for UserMusigSession {
             .field("user_id", &self.user_id)
             .field("signer_index", &self.signer_index)
             .field("private_key", &"<redacted>")
-            .field("first_round", &"<opaque>")
-            .field("second_round", &"<opaque>")
             .field(
-                "adaptor_first_rounds",
-                &format!("<{} entries>", self.adaptor_first_rounds.len()),
+                "batch_first_rounds",
+                &format!("<{} entries>", self.batch_first_rounds.len()),
             )
             .field(
-                "adaptor_second_rounds",
-                &format!("<{} entries>", self.adaptor_second_rounds.len()),
+                "batch_second_rounds",
+                &format!("<{} entries>", self.batch_second_rounds.len()),
+            )
+            .field(
+                "batch_adaptor_first_rounds",
+                &format!("<{} entries>", self.batch_adaptor_first_rounds.len()),
+            )
+            .field(
+                "batch_adaptor_second_rounds",
+                &format!("<{} entries>", self.batch_adaptor_second_rounds.len()),
             )
             .finish()
     }
@@ -82,33 +87,24 @@ impl std::fmt::Debug for UserMusigSession {
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {
     pub session_id: SessionId,
-    /// Single message (backward compat, used if batch_items is empty)
-    pub message: Vec<u8>,
     pub expected_participants: Vec<UserId>,
     pub participant_public_keys: BTreeMap<UserId, musig2::secp256k1::PublicKey>,
     pub expected_participant_count: Option<usize>,
     pub key_agg_ctx: Option<KeyAggContext>,
     pub phase: SessionPhase,
+    /// Session-level taproot tweak (used when batch items don't specify their own)
     pub taproot_tweak: TaprootTweak,
-    /// Single message adaptor configs (backward compat)
-    pub adaptor_configs: Vec<AdaptorConfig>,
-    pub adaptor_final_signatures: BTreeMap<Uuid, AdaptorSignatureResult>,
-    /// Batch items for batch signing (takes precedence if non-empty)
+    /// Batch items for signing (single message = batch of 1)
     pub batch_items: BTreeMap<Uuid, BatchItemData>,
+    /// Subset definitions for computing additional aggregate keys from participant subsets
+    pub subset_definitions: Vec<SubsetDefinition>,
+    /// Computed subset KeyAggContexts (subset_id -> KeyAggContext)
+    pub subset_key_agg_contexts: BTreeMap<Uuid, KeyAggContext>,
 }
 
 impl SessionMetadata {
-    /// Check if this is a batch signing session
-    pub fn is_batch(&self) -> bool {
-        !self.batch_items.is_empty()
-    }
-
-    /// Get the number of items to sign (1 for single, N for batch)
+    /// Get the number of items to sign
     pub fn item_count(&self) -> usize {
-        if self.is_batch() {
-            self.batch_items.len()
-        } else {
-            1
-        }
+        self.batch_items.len()
     }
 }

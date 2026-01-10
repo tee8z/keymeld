@@ -2,11 +2,11 @@ use crate::musig::MusigProcessor;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
     protocol::{CryptoError, EnclaveError, SessionError},
-    SessionSecret,
+    EncryptedData, SessionSecret,
 };
-use musig2::PubNonce;
-use std::time::SystemTime;
+use std::{collections::BTreeMap, time::SystemTime};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::operations::{
     context::EnclaveSharedContext,
@@ -98,92 +98,21 @@ impl FinalizingSignature {
     }
 
     pub fn get_participants(&self) -> Vec<UserId> {
+        // Return participants in BIP327 order (sorted by compressed public key)
+        // This matches the order used in KeyAggContext for consistent signer indices
         self.musig_processor
             .get_session_metadata_public()
-            .expected_participants
-            .clone()
+            .get_all_participant_ids()
     }
 
-    pub fn get_message(&self) -> Vec<u8> {
-        self.musig_processor
-            .get_session_metadata_public()
-            .message
-            .clone()
-    }
-
-    pub fn get_current_partial_signature_count(&self) -> usize {
-        // Always use the standard partial signature count which handles both regular and adaptor signatures
-        self.musig_processor.get_partial_signature_count()
-    }
-
-    pub fn get_current_user_partial_signature(
-        &self,
-        user_id: &UserId,
-    ) -> Result<Vec<u8>, EnclaveError> {
-        // Get the partial signature bytes from the processor
-        self.musig_processor
-            .get_user_partial_signature(user_id)
-            .map_err(|e| EnclaveError::Musig(e.to_string()))
-    }
-
-    pub fn has_all_partial_signatures(&self) -> bool {
-        // Check if this session uses adaptor signatures
-        let session_metadata = self.musig_processor.get_session_metadata_public();
-        let has_adaptor_configs = !session_metadata.adaptor_configs.is_empty();
-
-        if has_adaptor_configs {
-            // For adaptor signatures, use the dedicated method
-            self.musig_processor.has_all_adaptor_signatures()
-        } else {
-            // For regular signatures, check if we have enough count
-            let signature_count = self.musig_processor.get_partial_signature_count();
-            let expected_count = session_metadata.expected_participants.len();
-            signature_count >= expected_count
-        }
-    }
-
-    pub fn finalize_signatures(&mut self) -> Result<Vec<u8>, EnclaveError> {
-        let coordinator_user_id = self
-            .coordinator_data
-            .as_ref()
-            .map(|cd| &cd.user_id)
-            .ok_or_else(|| {
-                EnclaveError::Crypto(CryptoError::Other(
-                    "No coordinator data available for finalization".to_string(),
-                ))
-            })?;
-
-        let signature_bytes = self
-            .musig_processor
-            .finalize(coordinator_user_id)
-            .map_err(|e| {
-                EnclaveError::Crypto(CryptoError::Other(format!(
-                    "Failed to finalize signature: {}",
-                    e
-                )))
-            })?;
-
-        Ok(signature_bytes.to_vec())
-    }
-
-    pub fn get_user_nonce(&self, user_id: &UserId) -> Option<PubNonce> {
-        self.musig_processor.get_user_nonce(user_id)
-    }
-
-    pub fn get_user_nonce_data(
-        &self,
-        user_id: &UserId,
-    ) -> Option<keymeld_core::protocol::NonceData> {
-        self.musig_processor.get_user_nonce_data(user_id)
-    }
-
-    pub fn get_nonce_count(&self) -> usize {
-        self.musig_processor.get_nonce_count()
+    pub fn has_all_batch_signatures(&self) -> bool {
+        self.musig_processor.all_batch_signatures_complete()
     }
 }
 
 impl FinalizingSignature {
     /// Finalize the signature.
+    /// All signing is now batch mode.
     /// Returns: Completed
     pub fn finalize(
         self,
@@ -192,7 +121,7 @@ impl FinalizingSignature {
         _enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
     ) -> Result<SigningStatus, EnclaveError> {
         info!(
-            "Finalizing signature for signing session {}",
+            "Finalizing batch signatures for signing session {}",
             self.session_id
         );
 
@@ -203,98 +132,127 @@ impl FinalizingSignature {
             )));
         };
 
-        // Check if we need adaptor signature handling before consuming self
-        let use_adaptor = {
-            let metadata = self.musig_processor.get_session_metadata_public();
-            !metadata.adaptor_configs.is_empty()
-        };
+        // All signing is now batch mode
+        self.finalize_batch_signatures()
+    }
 
-        // Finalize the signature (works for both regular and adaptor signatures)
-        let mut mutable_self = self;
-        let signature_bytes = mutable_self.finalize_signatures().map_err(|e| {
-            EnclaveError::Crypto(keymeld_core::protocol::CryptoError::Other(format!(
-                "Failed to finalize signature: {}",
-                e
-            )))
-        })?;
+    /// Finalize batch signatures - each batch item gets its own final signature
+    fn finalize_batch_signatures(mut self) -> Result<SigningStatus, EnclaveError> {
+        let coordinator_user_id = self
+            .coordinator_data
+            .as_ref()
+            .map(|cd| &cd.user_id)
+            .ok_or_else(|| {
+                EnclaveError::Crypto(CryptoError::Other(
+                    "No coordinator data available for batch finalization".to_string(),
+                ))
+            })?;
 
-        info!(
-            "Finalized {} signature for signing session {}: {} bytes",
-            if use_adaptor { "adaptor" } else { "regular" },
-            mutable_self.session_id,
-            signature_bytes.len()
-        );
-
-        // Encrypt the finalized signature with session secret
-        let encrypted_signature = mutable_self
-            .session_secret
-            .encrypt_signature(&signature_bytes)
+        // Finalize all batch items
+        let batch_results = self
+            .musig_processor
+            .finalize_batch(coordinator_user_id)
             .map_err(|e| {
-                EnclaveError::Crypto(keymeld_core::protocol::CryptoError::Other(format!(
-                    "Failed to encrypt finalized signature: {}",
+                EnclaveError::Crypto(CryptoError::Other(format!(
+                    "Failed to finalize batch signatures: {}",
                     e
                 )))
             })?;
 
-        // Handle adaptor signatures if present
-        let encrypted_adaptor_signatures = if use_adaptor {
-            // Get adaptor signature results from metadata (they should be populated during finalization)
-            let session_metadata = mutable_self.musig_processor.get_session_metadata_public();
-            let adaptor_results = &session_metadata.adaptor_final_signatures;
+        info!(
+            "Finalized {} batch signatures for signing session {}",
+            batch_results.len(),
+            self.session_id
+        );
 
-            if !adaptor_results.is_empty() {
-                info!(
-                    "Encrypting {} adaptor signature results for session {}",
-                    adaptor_results.len(),
-                    mutable_self.session_id
-                );
+        // Encrypt each batch result
+        let mut encrypted_batch_results: BTreeMap<Uuid, EncryptedData> = BTreeMap::new();
+        let mut encrypted_batch_adaptor_results: BTreeMap<Uuid, EncryptedData> = BTreeMap::new();
 
-                // Serialize adaptor results as BTreeMap<Uuid, AdaptorSignatureResult>
-                let adaptor_bytes = serde_json::to_vec(adaptor_results).map_err(|e| {
-                    EnclaveError::Crypto(keymeld_core::protocol::CryptoError::Other(format!(
-                        "Failed to serialize adaptor signatures: {}",
-                        e
-                    )))
-                })?;
+        for (batch_item_id, finalized_data) in batch_results {
+            match finalized_data {
+                keymeld_core::protocol::FinalizedData::FinalSignature(sig_bytes) => {
+                    let encrypted =
+                        self.session_secret
+                            .encrypt_signature(&sig_bytes)
+                            .map_err(|e| {
+                                EnclaveError::Crypto(CryptoError::Other(format!(
+                                    "Failed to encrypt batch signature for {}: {}",
+                                    batch_item_id, e
+                                )))
+                            })?;
+                    encrypted_batch_results.insert(batch_item_id, encrypted);
+                }
+                keymeld_core::protocol::FinalizedData::AdaptorSignatures(_adaptor_results) => {
+                    // Get the full AdaptorSignatureResult data from the batch item metadata
+                    // This contains all the fields needed for signature verification
+                    let batch_item = self
+                        .musig_processor
+                        .get_session_metadata()
+                        .batch_items
+                        .get(&batch_item_id)
+                        .ok_or_else(|| {
+                            EnclaveError::Crypto(CryptoError::Other(format!(
+                                "Batch item {} not found for adaptor signature",
+                                batch_item_id
+                            )))
+                        })?;
 
-                // Encrypt with session secret
-                let encrypted = keymeld_core::crypto::SecureCrypto::encrypt_adaptor_signatures(
-                    &adaptor_bytes,
-                    &hex::encode(mutable_self.session_secret.as_bytes()),
-                )
-                .map_err(|e| {
-                    EnclaveError::Crypto(keymeld_core::protocol::CryptoError::Other(format!(
-                        "Failed to encrypt adaptor signatures: {}",
-                        e
-                    )))
-                })?;
+                    // Use the full AdaptorSignatureResult map which contains all required fields
+                    let adaptor_bytes = serde_json::to_vec(&batch_item.adaptor_final_signatures)
+                        .map_err(|e| {
+                            EnclaveError::Crypto(CryptoError::Other(format!(
+                                "Failed to serialize batch adaptor signature for {}: {}",
+                                batch_item_id, e
+                            )))
+                        })?;
 
-                Some(encrypted)
-            } else {
-                None
+                    let encrypted = keymeld_core::crypto::SecureCrypto::encrypt_adaptor_signatures(
+                        &adaptor_bytes,
+                        &hex::encode(self.session_secret.as_bytes()),
+                    )
+                    .map_err(|e| {
+                        EnclaveError::Crypto(CryptoError::Other(format!(
+                            "Failed to encrypt batch adaptor signature for {}: {}",
+                            batch_item_id, e
+                        )))
+                    })?;
+                    encrypted_batch_adaptor_results.insert(batch_item_id, encrypted);
+                }
             }
-        } else {
-            None
-        };
+        }
 
         info!(
-            "Finalized and encrypted signature for signing session {}",
-            mutable_self.session_id
+            "Encrypted {} batch signatures and {} batch adaptor signatures for session {}",
+            encrypted_batch_results.len(),
+            encrypted_batch_adaptor_results.len(),
+            self.session_id
         );
 
-        // Transition to Completed state with encrypted signature
-        let expected_count = mutable_self.get_expected_participant_count().unwrap_or(0) as u32;
+        // Transition to Completed state with batch results
+        let expected_count = self.get_expected_participant_count().unwrap_or(0) as u32;
+
+        // For batch mode, we use a placeholder for the single signature field
+        // The actual signatures are in the batch results
+        let placeholder_encrypted = self.session_secret.encrypt_signature(&[]).map_err(|e| {
+            EnclaveError::Crypto(CryptoError::Other(format!(
+                "Failed to create placeholder encrypted signature: {}",
+                e
+            )))
+        })?;
 
         let completed = Completed::new(
-            mutable_self.session_id,
-            mutable_self.session_secret,
-            encrypted_signature,
+            self.session_id,
+            self.session_secret,
+            placeholder_encrypted,
             expected_count,
-            mutable_self.created_at,
-            mutable_self.coordinator_data,
-            mutable_self.musig_processor,
-            encrypted_adaptor_signatures,
+            self.created_at,
+            self.coordinator_data,
+            self.musig_processor,
+            encrypted_batch_results,
+            encrypted_batch_adaptor_results,
         );
+
         Ok(SigningStatus::Completed(completed))
     }
 }

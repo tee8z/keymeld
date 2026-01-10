@@ -182,18 +182,25 @@ impl Initialized {
         };
 
         // Initialize musig processor in session context
-        keygen_ctx.musig_processor = Some(MusigProcessor::new(
+        let mut musig_processor = MusigProcessor::new(
             &self.session_id,
-            vec![], // Empty message for keygen
             taproot_tweak,
             Some(init_cmd.expected_participant_count),
             init_cmd.expected_participants.clone(),
-        ));
+        );
+
+        // Set subset definitions if provided
+        if !init_cmd.subset_definitions.is_empty() {
+            musig_processor.set_subset_definitions(init_cmd.subset_definitions.clone());
+        }
+
+        keygen_ctx.musig_processor = Some(musig_processor);
 
         info!(
-            "Keygen session {} initialized successfully (coordinator: {})",
+            "Keygen session {} initialized successfully (coordinator: {}, subsets: {})",
             self.session_id,
-            keygen_ctx.coordinator_data.is_some()
+            keygen_ctx.coordinator_data.is_some(),
+            init_cmd.subset_definitions.len()
         );
 
         // Transition logic based on session context state

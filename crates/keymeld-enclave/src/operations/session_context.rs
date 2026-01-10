@@ -311,7 +311,6 @@ impl
         // Initialize musig processor
         ctx.musig_processor = Some(MusigProcessor::new(
             &ctx.session_id,
-            vec![], // Empty message for keygen
             taproot_tweak,
             Some(cmd.expected_participant_count),
             cmd.expected_participants.clone(),

@@ -84,23 +84,37 @@ impl ContextAwareSession {
             (
                 OperatorStatus::Keygen(KeygenStatus::Completed(completed)),
                 SessionContext::Keygen(keygen_ctx),
-            ) => Ok(KeygenSessionData {
-                session_secret: keygen_ctx
-                    .session_secret
-                    .clone()
-                    .ok_or(EnclaveError::Session(
-                        keymeld_core::protocol::SessionError::SecretNotInitialized,
-                    ))?,
-                coordinator_data: keygen_ctx.coordinator_data.clone(),
-                // Use musig processor from completed state, not session context
-                musig_processor: completed.musig_processor(),
-                participants: completed.get_participants(),
-                aggregate_public_key: completed
-                    .musig_processor()
-                    .get_aggregate_pubkey()
-                    .map(|pk| pk.serialize().to_vec())
-                    .unwrap_or_default(),
-            }),
+            ) => {
+                // Extract subset aggregate public keys from the stored contexts
+                let session_metadata = completed.musig_processor().get_session_metadata_public();
+                let subset_aggregate_keys: std::collections::BTreeMap<uuid::Uuid, Vec<u8>> =
+                    session_metadata
+                        .subset_key_agg_contexts
+                        .iter()
+                        .map(|(subset_id, ctx)| {
+                            let pubkey: musig2::secp256k1::PublicKey = ctx.aggregated_pubkey();
+                            (*subset_id, pubkey.serialize().to_vec())
+                        })
+                        .collect();
+
+                Ok(KeygenSessionData {
+                    session_secret: keygen_ctx.session_secret.clone().ok_or(
+                        EnclaveError::Session(
+                            keymeld_core::protocol::SessionError::SecretNotInitialized,
+                        ),
+                    )?,
+                    coordinator_data: keygen_ctx.coordinator_data.clone(),
+                    // Use musig processor from completed state, not session context
+                    musig_processor: completed.musig_processor(),
+                    participants: completed.get_participants(),
+                    aggregate_public_key: completed
+                        .musig_processor()
+                        .get_aggregate_pubkey()
+                        .map(|pk| pk.serialize().to_vec())
+                        .unwrap_or_default(),
+                    subset_aggregate_keys,
+                })
+            }
             _ => Err(EnclaveError::Phase(PhaseError::KeygenInWrongState {
                 state: self.status.to_string(),
             })),

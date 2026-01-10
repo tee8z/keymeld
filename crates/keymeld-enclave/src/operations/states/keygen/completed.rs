@@ -124,7 +124,6 @@ impl TryFrom<Completed> for Initialized {
         // Create a new MusigProcessor for the signing session
         let mut musig_processor = MusigProcessor::new(
             &completed.session_id,
-            Vec::new(), // Message will be set later during initialization
             session_metadata.taproot_tweak.clone(),
             Some(user_private_keys.len()),
             session_metadata.expected_participants.clone(),
@@ -202,7 +201,6 @@ impl TryFrom<&Completed> for Initialized {
         // Create a new MusigProcessor for the signing session
         let mut musig_processor = MusigProcessor::new(
             &completed.session_id,
-            Vec::new(), // Message will be set later during initialization
             session_metadata.taproot_tweak.clone(),
             Some(user_private_keys.len()),
             session_metadata.expected_participants.clone(),

@@ -1,10 +1,9 @@
 use crate::musig::MusigProcessor;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::{EnclaveError, PrivateKeyError, ValidationError},
+    protocol::EnclaveError,
     SessionSecret,
 };
-use musig2::PubNonce;
 use std::time::SystemTime;
 use tracing::{error, info};
 
@@ -83,10 +82,11 @@ impl GeneratingPartialSignatures {
     }
 
     pub fn get_participants(&self) -> Vec<UserId> {
+        // Return participants in BIP327 order (sorted by compressed public key)
+        // This matches the order used in KeyAggContext for consistent signer indices
         self.musig_processor
             .get_session_metadata_public()
-            .expected_participants
-            .clone()
+            .get_all_participant_ids()
     }
 
     pub fn get_participant_count(&self) -> usize {
@@ -102,154 +102,50 @@ impl GeneratingPartialSignatures {
             .expected_participant_count
     }
 
-    pub fn get_message(&self) -> Vec<u8> {
-        self.musig_processor
-            .get_session_metadata_public()
-            .message
-            .clone()
+    /// Check if all batch signatures are complete
+    pub fn has_all_batch_signatures(&self) -> bool {
+        self.musig_processor.all_batch_signatures_complete()
     }
 
-    pub fn get_partial_signature_count(&self) -> usize {
-        // Use existing method from signatures.rs
-        self.musig_processor.get_partial_signature_count()
-    }
-
-    pub fn get_user_partial_signature(&self, user_id: &UserId) -> Result<Vec<u8>, EnclaveError> {
-        self.musig_processor
-            .get_user_partial_signature(user_id)
-            .map_err(|e| EnclaveError::Musig(e.to_string()))
-    }
-
-    pub fn has_all_partial_signatures(&self) -> bool {
-        // Check if this session uses adaptor signatures
-        let session_metadata = self.musig_processor.get_session_metadata_public();
-        let has_adaptor_configs = !session_metadata.adaptor_configs.is_empty();
-
-        if has_adaptor_configs {
-            // For adaptor signatures, use the dedicated method
-            self.musig_processor.has_all_adaptor_signatures()
-        } else {
-            // For regular signatures, check if we have enough count
-            let signature_count = self.musig_processor.get_partial_signature_count();
-            let expected_count = session_metadata.expected_participants.len();
-            signature_count >= expected_count
-        }
-    }
-
-    pub fn get_user_nonce(&self, user_id: &UserId) -> Option<PubNonce> {
-        self.musig_processor.get_user_nonce(user_id)
-    }
-
-    pub fn get_user_nonce_data(
-        &self,
-        user_id: &UserId,
-    ) -> Option<keymeld_core::protocol::NonceData> {
-        self.musig_processor.get_user_nonce_data(user_id)
-    }
-
-    pub fn get_nonce_count(&self) -> usize {
-        self.musig_processor.get_nonce_count()
+    /// Get the count of batch items with signatures
+    pub fn get_batch_signature_count(&self) -> usize {
+        self.musig_processor.get_batch_signature_count()
     }
 }
 
 impl GeneratingPartialSignatures {
-    /// Generate regular partial signature for a specific user
-    fn generate_regular_partial_signature_for_user(
+    /// Generate batch partial signatures for a specific user
+    fn generate_batch_partial_signature_for_user(
         &mut self,
         user_id: &UserId,
         _signing_ctx: &mut SigningSessionContext,
     ) -> Result<(), EnclaveError> {
-        let participants = self.get_participants();
-        let _signer_index =
-            participants
-                .iter()
-                .position(|p| p == user_id)
-                .ok_or(EnclaveError::Validation(ValidationError::Other(format!(
-                    "User {} not found in participants",
-                    user_id
-                ))))?;
-
-        let private_key =
-            self.musig_processor
-                .get_private_key(user_id)
-                .ok_or(EnclaveError::PrivateKey(PrivateKeyError::Invalid(format!(
-                    "Missing private key for user {}",
-                    user_id
-                ))))?;
-
-        // Generate partial signature using MusigProcessor
-        let result = self.musig_processor.sign(user_id, &private_key);
+        // Get batch partial signatures using MusigProcessor
+        // The SecondRounds were already created in finalize_batch_nonce_rounds
+        let result = self
+            .musig_processor
+            .get_user_batch_partial_signatures(user_id);
 
         match result {
-            Ok((signature_bytes, _nonce_bytes)) => {
+            Ok(batch_sigs) => {
                 info!(
-                    "Generated regular partial signature for user {} in session {} (signature length: {})",
-                    user_id, self.session_id, signature_bytes.len()
+                    "Generated batch partial signatures for user {} in session {} ({} batch items)",
+                    user_id,
+                    self.session_id,
+                    batch_sigs.len()
                 );
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to generate regular partial signature for user {} in session {}: {}",
+                    "Failed to generate batch partial signatures for user {} in session {}: {}",
                     user_id,
                     self.session_id,
                     e
                 );
                 Err(EnclaveError::Session(
                     keymeld_core::protocol::SessionError::ProcessingFailed(format!(
-                        "Failed to generate partial signature: {}",
-                        e
-                    )),
-                ))
-            }
-        }
-    }
-
-    /// Generate adaptor partial signature for a specific user
-    fn generate_adaptor_partial_signature_for_user(
-        &mut self,
-        user_id: &UserId,
-        _signing_ctx: &mut SigningSessionContext,
-    ) -> Result<(), EnclaveError> {
-        let participants = self.get_participants();
-        let _signer_index =
-            participants
-                .iter()
-                .position(|p| p == user_id)
-                .ok_or(EnclaveError::Validation(ValidationError::Other(format!(
-                    "User {} not found in participants",
-                    user_id
-                ))))?;
-
-        let private_key =
-            self.musig_processor
-                .get_private_key(user_id)
-                .ok_or(EnclaveError::PrivateKey(PrivateKeyError::Invalid(format!(
-                    "Missing private key for user {}",
-                    user_id
-                ))))?;
-
-        // Generate adaptor partial signatures using MusigProcessor
-        let result = self.musig_processor.sign(user_id, &private_key);
-
-        match result {
-            Ok((signature_bytes, adaptor_bytes)) => {
-                info!(
-                    "Generated adaptor partial signatures for user {} in session {} (signature: {} bytes, adaptor: {} bytes)",
-                    user_id, self.session_id, signature_bytes.len(), adaptor_bytes.len()
-                );
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to generate adaptor partial signatures for user {} in session {}: {}",
-                    user_id,
-                    self.session_id,
-                    e
-                );
-                Err(EnclaveError::Session(
-                    keymeld_core::protocol::SessionError::ProcessingFailed(format!(
-                        "Failed to generate adaptor partial signatures: {}",
+                        "Failed to generate batch partial signatures: {}",
                         e
                     )),
                 ))
@@ -283,6 +179,7 @@ impl TryFrom<GeneratingPartialSignatures> for CollectingPartialSignatures {
 
 impl GeneratingPartialSignatures {
     /// Auto-processing: generate partial signatures for all users this enclave represents.
+    /// All signing is now batch mode.
     /// Returns: CollectingPartialSignatures
     pub fn generate_partial_signatures(
         mut self,
@@ -290,27 +187,23 @@ impl GeneratingPartialSignatures {
         _enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
     ) -> Result<SigningStatus, EnclaveError> {
         info!(
-            "Auto-processing partial signature generation for all users in signing session {}",
+            "Auto-processing batch partial signature generation for all users in signing session {}",
             self.session_id
         );
-
-        // Check if we have adaptor configs from the MuSig processor metadata
-        let session_metadata = self.musig_processor.get_session_metadata_public();
-        let use_adaptor = !session_metadata.adaptor_configs.is_empty();
 
         // Get all users this enclave has private keys for
         let users_in_session = self.musig_processor.get_users_in_session();
         let expected_participants = self.get_participants();
 
         info!(
-            "Generating partial signatures for {} users this enclave represents in signing session {}",
+            "Generating batch partial signatures for {} users this enclave represents in signing session {}",
             users_in_session.len(),
-            self.session_id
+            self.session_id,
         );
 
         let mut generated_count = 0;
 
-        // Generate partial signatures for all users this enclave represents
+        // Generate batch partial signatures for all users this enclave represents
         for user_id in &users_in_session {
             if !expected_participants.contains(user_id) {
                 info!(
@@ -320,23 +213,20 @@ impl GeneratingPartialSignatures {
                 continue;
             }
 
-            let generation_result = if use_adaptor {
-                self.generate_adaptor_partial_signature_for_user(user_id, signing_ctx)
-            } else {
-                self.generate_regular_partial_signature_for_user(user_id, signing_ctx)
-            };
+            let generation_result =
+                self.generate_batch_partial_signature_for_user(user_id, signing_ctx);
 
             match generation_result {
                 Ok(_) => {
                     info!(
-                        "successfully generated partial signature for user {} in signing session {}",
+                        "Successfully generated batch partial signature for user {} in signing session {}",
                         user_id, self.session_id
                     );
                     generated_count += 1;
                 }
                 Err(e) => {
                     error!(
-                        "failed to generate partial signature for user {} in signing session {}: {}",
+                        "Failed to generate batch partial signature for user {} in signing session {}: {}",
                         user_id, self.session_id, e
                     );
                     // Continue with next user instead of failing the entire operation
@@ -345,7 +235,7 @@ impl GeneratingPartialSignatures {
         }
 
         info!(
-            "generated {} partial signatures in signing session {}",
+            "Generated {} batch partial signatures in signing session {}",
             generated_count, self.session_id
         );
 

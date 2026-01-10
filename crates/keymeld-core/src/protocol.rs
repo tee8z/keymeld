@@ -4,12 +4,28 @@ use crate::{
 };
 use musig2::{PartialSignature, PubNonce};
 use serde::{Deserialize, Serialize};
-use std::{fmt, time::SystemTime};
+use std::{collections::BTreeMap, fmt, time::SystemTime};
 use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
+
+// ============================================================================
+// Subset Aggregates Types
+// ============================================================================
+
+/// Definition of a participant subset for aggregate key computation.
+/// Each subset produces its own aggregate public key from the specified participants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SubsetDefinition {
+    /// Client-generated unique identifier for this subset
+    pub subset_id: Uuid,
+    /// List of user IDs that form this subset
+    pub participants: Vec<UserId>,
+}
 
 /// Taproot tweak configuration for MuSig2 key aggregation
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -736,6 +752,10 @@ pub struct InitKeygenSessionCommand {
     pub enclave_public_keys: Vec<EnclavePublicKeyInfo>,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
+    /// Subset definitions for computing additional aggregate keys.
+    /// Each subset produces its own aggregate from the specified participants.
+    #[serde(default)]
+    pub subset_definitions: Vec<SubsetDefinition>,
 }
 
 /// Approval signature for a user who requires signing approval
@@ -777,6 +797,13 @@ pub struct EnclaveBatchItem {
     pub encrypted_message: String,
     /// Optional adaptor configuration for this specific message
     pub encrypted_adaptor_configs: Option<String>,
+    /// Per-item taproot tweak (encrypted with session secret as JSON-serialized TaprootTweak)
+    pub encrypted_taproot_tweak: String,
+    /// Which subset of participants signs this item.
+    /// None = all participants (full aggregate key).
+    /// Some(subset_id) = only participants in that subset sign.
+    #[serde(default)]
+    pub subset_id: Option<Uuid>,
 }
 
 /// Result for a single batch item from the enclave
@@ -1018,13 +1045,17 @@ pub struct NoncesResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SignatureData {
     Regular(PartialSignature),
-    Adaptor(Vec<(uuid::Uuid, PartialSignature)>),
+    Adaptor(Vec<(Uuid, PartialSignature)>),
+    /// Batch signatures: map of batch_item_id -> SignatureData (Regular or Adaptor per item)
+    Batch(BTreeMap<Uuid, Box<SignatureData>>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NonceData {
     Regular(PubNonce),
-    Adaptor(Vec<(uuid::Uuid, PubNonce)>),
+    Adaptor(Vec<(Uuid, PubNonce)>),
+    /// Batch nonces: map of batch_item_id -> NonceData (Regular or Adaptor per item)
+    Batch(BTreeMap<Uuid, Box<NonceData>>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1056,6 +1087,10 @@ pub struct AggregatePublicKeyResponse {
     /// Encrypted aggregate public key as hex-encoded binary format (EncryptedData::to_hex)
     pub encrypted_aggregate_public_key: String,
     pub participant_count: usize,
+    /// Encrypted aggregate keys for each defined subset.
+    /// Keys are subset_id -> encrypted_aggregate_public_key (hex-encoded).
+    #[serde(default)]
+    pub encrypted_subset_aggregates: BTreeMap<Uuid, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

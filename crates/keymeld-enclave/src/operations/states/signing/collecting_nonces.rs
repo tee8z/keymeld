@@ -7,9 +7,10 @@ use keymeld_core::{
     },
     SessionSecret,
 };
-use musig2::PubNonce;
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::operations::{
     context::EnclaveSharedContext,
@@ -84,10 +85,11 @@ impl CollectingNonces {
     }
 
     pub fn get_participants(&self) -> Vec<UserId> {
+        // Return participants in BIP327 order (sorted by compressed public key)
+        // This matches the order used in KeyAggContext for consistent signer indices
         self.musig_processor
             .get_session_metadata_public()
-            .expected_participants
-            .clone()
+            .get_all_participant_ids()
     }
 
     pub fn get_aggregate_pubkey(&self) -> Result<musig2::secp256k1::PublicKey, EnclaveError> {
@@ -105,65 +107,19 @@ impl CollectingNonces {
             .expected_participant_count
     }
 
-    pub fn get_user_nonce(&self, user_id: &UserId) -> Option<PubNonce> {
-        self.musig_processor.get_user_nonce(user_id)
-    }
-
-    /// Get user nonce data (handles both regular and adaptor nonces)
-    pub fn get_user_nonce_data(&self, user_id: &UserId) -> Option<NonceData> {
-        self.musig_processor.get_user_nonce_data(user_id)
+    /// Get user batch nonce data (batch-only mode)
+    pub fn get_user_batch_nonce_data(&self, user_id: &UserId) -> Option<BTreeMap<Uuid, NonceData>> {
+        self.musig_processor.get_user_batch_nonce_data(user_id)
     }
 
     pub fn can_aggregate_nonces(&self) -> bool {
-        let expected_count = self.get_expected_participant_count().unwrap_or(0);
-
-        // Check if this session uses adaptor signatures
-        let session_metadata = self.musig_processor.get_session_metadata_public();
-        let has_adaptor_configs = !session_metadata.adaptor_configs.is_empty();
-
+        // All signing is now batch mode - check if all batch nonces are collected
+        let result = self.musig_processor.all_batch_nonces_complete();
         tracing::info!(
-            "can_aggregate_nonces for session {}: has_adaptor_configs={}, expected_count={}",
-            self.session_id,
-            has_adaptor_configs,
-            expected_count
-        );
-
-        if has_adaptor_configs {
-            // For adaptor sessions, check if all participants have completed adaptor nonces
-            let result = self.all_adaptor_nonces_collected();
-            tracing::info!(
-                "Adaptor nonce aggregation check for session {}: {}",
-                self.session_id,
-                result
-            );
-            result
-        } else {
-            // For regular sessions, use the existing logic
-            let nonce_count = self.musig_processor.get_nonce_count();
-            let result = nonce_count >= expected_count;
-            tracing::info!(
-                "Regular nonce aggregation check for session {}: {}/{} = {}",
-                self.session_id,
-                nonce_count,
-                expected_count,
-                result
-            );
-            result
-        }
-    }
-
-    fn all_adaptor_nonces_collected(&self) -> bool {
-        let result = self
-            .musig_processor
-            .all_adaptor_first_rounds_complete()
-            .unwrap_or(false);
-
-        tracing::info!(
-            "all_adaptor_nonces_collected for session {}: {}",
+            "Batch nonce aggregation check for session {}: {}",
             self.session_id,
             result
         );
-
         result
     }
 }
@@ -191,11 +147,15 @@ impl TryFrom<CollectingNonces> for GeneratingPartialSignatures {
 
         let participants_with_sessions = value.musig_processor.get_users_in_session();
 
+        // All signing is batch mode - finalize batch nonce rounds
         for participant in &participants_with_sessions {
-            if let Err(e) = value.musig_processor.finalize_nonce_rounds(participant) {
+            if let Err(e) = value
+                .musig_processor
+                .finalize_batch_nonce_rounds(participant)
+            {
                 return Err(EnclaveError::Session(SessionError::MusigInitialization(
                     format!(
-                        "Failed to finalize nonce rounds for participant {}: {}",
+                        "Failed to finalize batch nonce rounds for participant {}: {}",
                         participant, e
                     ),
                 )));
@@ -203,9 +163,9 @@ impl TryFrom<CollectingNonces> for GeneratingPartialSignatures {
         }
 
         info!(
-            "Finalized nonce rounds for {} participants in session {}",
+            "Finalized batch nonce rounds for {} participants in session {}",
             participants_with_sessions.len(),
-            value.session_id
+            value.session_id,
         );
 
         Ok(GeneratingPartialSignatures::new(
@@ -274,53 +234,44 @@ impl CollectingNonces {
                     user_id
                 ))))?;
 
-            // Add nonce to MuSig processor (handles duplicates gracefully)
+            // All nonces now come as batch nonces
             match nonce_data {
-                NonceData::Regular(nonce) => {
-                    // Validate nonce length
-                    if nonce.serialize().len() != 66 {
-                        return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
-                            user_id: user_id.clone(),
-                            error: format!(
-                                "Invalid regular nonce length: expected 66 bytes, got {}",
-                                nonce.serialize().len()
-                            ),
-                        }));
-                    }
-
-                    self.musig_processor
-                        .add_participant_nonce(user_id, nonce.clone())
-                        .map_err(|e| {
-                            EnclaveError::Nonce(NonceError::AddFailed {
-                                user_id: user_id.clone(),
-                                error: format!("Failed to add regular nonce: {}", e),
-                            })
-                        })?;
+                NonceData::Regular(_nonce) => {
+                    // For backwards compatibility, wrap single nonce as batch
+                    // This shouldn't happen in batch-only mode but handle gracefully
+                    return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
+                        user_id: user_id.clone(),
+                        error: "Expected batch nonces, got regular nonce. Use batch mode."
+                            .to_string(),
+                    }));
                 }
-                NonceData::Adaptor(adaptor_nonces) => {
-                    // Validate each adaptor nonce
-                    for (config_id, nonce) in &adaptor_nonces {
-                        if nonce.serialize().len() != 66 {
-                            return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
-                                user_id: user_id.clone(),
-                                error: format!(
-                                    "Invalid adaptor nonce length for config {}: expected 66 bytes, got {}",
-                                    config_id,
-                                    nonce.serialize().len()
-                                ),
-                            }));
-                        }
-                    }
+                NonceData::Adaptor(_adaptor_nonces) => {
+                    // For backwards compatibility
+                    return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
+                        user_id: user_id.clone(),
+                        error: "Expected batch nonces, got adaptor nonces. Use batch mode."
+                            .to_string(),
+                    }));
+                }
+                NonceData::Batch(batch_nonces) => {
+                    // Convert Box<NonceData> to NonceData for store_batch_nonces
+                    let batch_nonces_unboxed: BTreeMap<Uuid, NonceData> =
+                        batch_nonces.into_iter().map(|(k, v)| (k, *v)).collect();
 
-                    // Store adaptor nonces - this properly adds to adaptor_first_rounds
+                    // Store batch nonces - adds to batch_first_rounds/batch_adaptor_first_rounds
                     self.musig_processor
-                        .store_adaptor_nonces(user_id, adaptor_nonces)
+                        .store_batch_nonces(user_id, batch_nonces_unboxed)
                         .map_err(|e| {
                             EnclaveError::Nonce(NonceError::AddFailed {
                                 user_id: user_id.clone(),
-                                error: format!("Failed to store adaptor nonces: {}", e),
+                                error: format!("Failed to store batch nonces: {}", e),
                             })
                         })?;
+
+                    info!(
+                        "Stored batch nonces for user {} in signing session {}",
+                        user_id, self.session_id
+                    );
                 }
             }
 
@@ -349,11 +300,15 @@ impl CollectingNonces {
             // Chain to partial signature generation
             generating_partial_signatures.generate_partial_signatures(signing_ctx, enclave_ctx)
         } else {
-            let nonce_count = self.musig_processor.get_nonce_count();
+            let batch_item_count = self
+                .musig_processor
+                .get_session_metadata_public()
+                .batch_items
+                .len();
             let expected_count = self.get_expected_participant_count().unwrap_or(0);
             info!(
-                "Signing session {} still collecting nonces: {}/{}",
-                self.session_id, nonce_count, expected_count
+                "Signing session {} still collecting nonces: batch_items={}, expected_participants={}",
+                self.session_id, batch_item_count, expected_count
             );
             Ok(SigningStatus::CollectingNonces(self))
         }

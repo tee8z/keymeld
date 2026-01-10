@@ -3,7 +3,7 @@ use crate::musig::MusigProcessor;
 use keymeld_core::{
     crypto::SessionSecret,
     identifiers::{SessionId, UserId},
-    protocol::{EnclaveError, InternalError, NonceData},
+    protocol::{EnclaveError, InternalError},
 };
 use std::time::SystemTime;
 
@@ -141,94 +141,44 @@ impl std::fmt::Display for SigningStatus {
 }
 
 impl SigningStatus {
-    pub fn get_user_nonce_data(&self, user_id: &UserId) -> Option<NonceData> {
+    /// Get the count of batch items that have been processed
+    pub fn get_batch_item_count(&self) -> usize {
         match self {
-            SigningStatus::Initialized(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::GeneratingNonces(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::CollectingNonces(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::GeneratingPartialSignatures(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::CollectingPartialSignatures(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::FinalizingSignature(state) => {
-                state.musig_processor().get_user_nonce_data(user_id)
-            }
-            SigningStatus::Completed(state) => state.musig_processor().get_user_nonce_data(user_id),
-            SigningStatus::Failed(_) => None,
-        }
-    }
-
-    pub fn get_nonce_count(&self) -> usize {
-        match self {
-            SigningStatus::Initialized(_) => 0,
-            SigningStatus::GeneratingNonces(state) => state.musig_processor().get_nonce_count(),
-            SigningStatus::CollectingNonces(state) => state.musig_processor().get_nonce_count(),
-            SigningStatus::GeneratingPartialSignatures(state) => {
-                state.musig_processor().get_nonce_count()
-            }
-            SigningStatus::CollectingPartialSignatures(state) => {
-                state.musig_processor().get_nonce_count()
-            }
-            SigningStatus::FinalizingSignature(state) => state.musig_processor().get_nonce_count(),
-            SigningStatus::Completed(state) => state.musig_processor().get_nonce_count(),
-            SigningStatus::Failed(_) => 0,
-        }
-    }
-
-    pub fn get_user_partial_signature(&self, user_id: &UserId) -> Option<musig2::PartialSignature> {
-        match self {
-            SigningStatus::Initialized(_) => None,
-            SigningStatus::GeneratingNonces(_) => None,
-            SigningStatus::CollectingNonces(_) => None,
+            SigningStatus::Initialized(state) => state
+                .musig_processor()
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
+            SigningStatus::GeneratingNonces(state) => state
+                .musig_processor()
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
+            SigningStatus::CollectingNonces(state) => state
+                .musig_processor()
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
             SigningStatus::GeneratingPartialSignatures(state) => state
                 .musig_processor()
-                .get_user_partial_signature(user_id)
-                .ok()
-                .and_then(|bytes| musig2::PartialSignature::from_slice(&bytes).ok()),
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
             SigningStatus::CollectingPartialSignatures(state) => state
                 .musig_processor()
-                .get_user_partial_signature(user_id)
-                .ok()
-                .and_then(|bytes| musig2::PartialSignature::from_slice(&bytes).ok()),
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
             SigningStatus::FinalizingSignature(state) => state
                 .musig_processor()
-                .get_user_partial_signature(user_id)
-                .ok()
-                .and_then(|bytes| musig2::PartialSignature::from_slice(&bytes).ok()),
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
             SigningStatus::Completed(state) => state
                 .musig_processor()
-                .get_user_partial_signature(user_id)
-                .ok()
-                .and_then(|bytes| musig2::PartialSignature::from_slice(&bytes).ok()),
-            SigningStatus::Failed(_) => None,
-        }
-    }
-
-    pub fn get_partial_signature_count(&self) -> usize {
-        match self {
-            SigningStatus::Initialized(_) => 0,
-            SigningStatus::GeneratingNonces(_) => 0,
-            SigningStatus::CollectingNonces(_) => 0,
-            SigningStatus::GeneratingPartialSignatures(state) => {
-                state.get_partial_signature_count()
-            }
-            SigningStatus::CollectingPartialSignatures(state) => {
-                state.get_current_partial_signature_count().unwrap_or(0)
-            }
-            SigningStatus::FinalizingSignature(state) => {
-                state.get_current_partial_signature_count()
-            }
-            SigningStatus::Completed(_) => {
-                0 // Completed state doesn't need to track partial signatures
-            }
+                .get_session_metadata_public()
+                .batch_items
+                .len(),
             SigningStatus::Failed(_) => 0,
         }
     }

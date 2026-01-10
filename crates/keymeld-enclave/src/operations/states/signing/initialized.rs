@@ -1,15 +1,18 @@
+use crate::musig::types::BatchItemData;
 use crate::musig::MusigProcessor;
 use keymeld_core::{
     hash_message,
     identifiers::SessionId,
     managed_vsock::TimeoutConfig,
-    protocol::{CryptoError, EnclaveError, SessionError, SigningApproval, ValidationError},
+    protocol::{
+        CryptoError, EnclaveError, SessionError, SigningApproval, TaprootTweak, ValidationError,
+    },
     validation::decrypt_session_data,
     SessionSecret,
 };
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use sha2::{Digest, Sha256};
-
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 use tracing::{info, warn};
 
@@ -317,44 +320,68 @@ impl Initialized {
                 )))
             })?;
 
-        // Update the musig processor with the message
-        signing_processor
-            .update_session_message(message.clone())
-            .map_err(|e| {
-                EnclaveError::Session(SessionError::MusigInitialization(format!(
-                    "Failed to update session message: {e}"
-                )))
-            })?;
+        // Store batch items in the session metadata with per-item decryption
+        let mut batch_items_map = BTreeMap::new();
+        let session_secret_hex = hex::encode(self.session_secret.as_bytes());
 
-        let adaptor_configs = if let Some(ref encrypted_adaptor_configs) =
-            first_batch_item.encrypted_adaptor_configs
-        {
-            decrypt_adaptor_configs(encrypted_adaptor_configs, &self.session_secret)?
-        } else {
-            vec![]
-        };
-
-        if !adaptor_configs.is_empty() {
-            info!("Adaptor configs will be stored in SessionMetadata");
-
-            // Store the adaptor configs in the session metadata
-            signing_processor
-                .set_adaptor_configs(adaptor_configs.clone())
-                .map_err(|e| {
-                    EnclaveError::Session(SessionError::MusigInitialization(format!(
-                        "Failed to set adaptor configs: {e}"
-                    )))
-                })?;
-        }
-
-        // Store batch items in the session metadata so we can return correct batch_item_ids
-        let mut batch_items_map = std::collections::BTreeMap::new();
         for batch_item in &init_cmd.batch_items {
-            let batch_item_data = crate::musig::types::BatchItemData {
+            // Decrypt per-item message
+            let item_message =
+                decrypt_session_data(&batch_item.encrypted_message, &session_secret_hex)
+                    .map_err(|e| {
+                        EnclaveError::Crypto(CryptoError::DecryptionFailed {
+                            context: "batch_item_message".to_string(),
+                            error: format!(
+                                "Failed to decrypt message for batch item {}: {e}",
+                                batch_item.batch_item_id
+                            ),
+                        })
+                    })
+                    .and_then(|hex_msg| {
+                        hex::decode(&hex_msg).map_err(|e| {
+                            EnclaveError::Crypto(CryptoError::DecryptionFailed {
+                                context: "batch_item_message".to_string(),
+                                error: format!("Hex decode failed: {e}"),
+                            })
+                        })
+                    })?;
+
+            // Decrypt per-item adaptor configs
+            let item_adaptor_configs =
+                if let Some(ref encrypted_adaptor_configs) = batch_item.encrypted_adaptor_configs {
+                    decrypt_adaptor_configs(encrypted_adaptor_configs, &self.session_secret)?
+                } else {
+                    vec![]
+                };
+
+            // Decrypt per-item taproot tweak
+            let item_taproot_tweak =
+                decrypt_session_data(&batch_item.encrypted_taproot_tweak, &session_secret_hex)
+                    .map_err(|e| {
+                        EnclaveError::Crypto(CryptoError::DecryptionFailed {
+                            context: "batch_item_taproot_tweak".to_string(),
+                            error: format!(
+                                "Failed to decrypt taproot tweak for batch item {}: {e}",
+                                batch_item.batch_item_id
+                            ),
+                        })
+                    })
+                    .and_then(|tweak_json| {
+                        serde_json::from_str::<TaprootTweak>(&tweak_json).map_err(|e| {
+                            EnclaveError::Crypto(CryptoError::DecryptionFailed {
+                                context: "batch_item_taproot_tweak".to_string(),
+                                error: format!("Failed to parse taproot tweak JSON: {e}"),
+                            })
+                        })
+                    })?;
+
+            let batch_item_data = BatchItemData {
                 batch_item_id: batch_item.batch_item_id,
-                message: message.clone(), // For now, all items use the first message
-                adaptor_configs: adaptor_configs.clone(),
-                adaptor_final_signatures: std::collections::BTreeMap::new(),
+                message: item_message,
+                adaptor_configs: item_adaptor_configs,
+                adaptor_final_signatures: BTreeMap::new(),
+                taproot_tweak: item_taproot_tweak,
+                subset_id: batch_item.subset_id,
             };
             batch_items_map.insert(batch_item.batch_item_id, batch_item_data);
         }
