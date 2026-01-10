@@ -118,6 +118,47 @@ pub struct AdaptorConfig {
     pub hints: Option<Vec<AdaptorHint>>,
 }
 
+impl AdaptorConfig {
+    /// Create an adaptor config with a single adaptor point.
+    /// The adaptor_id is automatically generated.
+    pub fn single(adaptor_point: impl Into<String>) -> Self {
+        Self {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Single,
+            adaptor_points: vec![adaptor_point.into()],
+            hints: None,
+        }
+    }
+
+    /// Create an adaptor config requiring ALL adaptor points to be revealed.
+    /// The adaptor_id is automatically generated.
+    pub fn and(adaptor_points: Vec<String>) -> Self {
+        Self {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::And,
+            adaptor_points,
+            hints: None,
+        }
+    }
+
+    /// Create an adaptor config requiring ANY ONE adaptor point to be revealed.
+    /// The adaptor_id is automatically generated.
+    pub fn or(adaptor_points: Vec<String>) -> Self {
+        Self {
+            adaptor_id: Uuid::now_v7(),
+            adaptor_type: AdaptorType::Or,
+            adaptor_points,
+            hints: None,
+        }
+    }
+
+    /// Add hints for the adaptor points (typically used with Or adaptors).
+    pub fn with_hints(mut self, hints: Vec<AdaptorHint>) -> Self {
+        self.hints = Some(hints);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AdaptorType {
     Single,
