@@ -1,0 +1,101 @@
+🚀 Starting KeyMeld quickstart...
+[WARN] ⚠️  Passwordless sudo not available (this is OK, will use fallback mode)
+🧹 Cleaning all data...
+🛑 Stopping services...
+✅ All services stopped
+✅ Clean complete
+Building binaries...
+warning: Git tree '/home/teebz/repos/keymeld' is dirty
+🚀 KeyMeld Development Environment (Rust 1.88.0)
+Use 'just help' to see available commands
+✅ VSock available for enclave simulation
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.37s
+warning: Git tree '/home/teebz/repos/keymeld' is dirty
+🚀 KeyMeld Development Environment (Rust 1.88.0)
+Use 'just help' to see available commands
+✅ VSock available for enclave simulation
+[WARN] ⚠️  vhost_vsock: Not available or failed to load (will use fallback mode)
+[WARN] ⚠️  vmw_vsock_loopback: Not available or failed to load (will use fallback mode)
+[WARN] ⚠️  vsock: Not available or failed to load (will use fallback mode)
+[WARN] ⚠️  vsock_loopback: Not available or failed to load (will use fallback mode)
+[WARN] No VSock modules loaded - will use TCP fallback
+[WARN] 🔄 Falling back to TCP-only mode...
+   Access enclaves via:
+   - Enclave 0: localhost:9000 → localhost:5000
+   - Enclave 1: localhost:9001 → localhost:5001
+   - Enclave 2: localhost:9002 → localhost:5002
+[SUCCESS] 🎉 VSock setup complete with TCP fallback mode!
+🏦 Setting up Bitcoin regtest environment...
+Starting Bitcoin Core...
+Bitcoin Core starting
+Waiting for Bitcoin Core to start...
+Bitcoin Core RPC ready
+Generating initial blocks...
+✅ Bitcoin regtest ready with funded coordinator wallet
+🚀 Starting KeyMeld services...
+✅ Moto already running
+✅ Services started! Logs available in logs/ directory
+🌐 Gateway: http://localhost:8080
+⏳ Waiting for gateway to be ready...
+✅ Gateway is ready!
+⏳ Waiting for enclaves to initialize...
+🎮 Running KeyMeld plain demo...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target/debug/keymeld_demo plain --config config/example-nix.yaml --amount 50000 --destination bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80`
+2026-01-10T22:24:46.487849Z  INFO keymeld_demo::plain: KeyMeld Plain MuSig2 Example
+2026-01-10T22:24:46.487892Z  INFO keymeld_demo::plain: Gateway: http://127.0.0.1:8080
+2026-01-10T22:24:46.487902Z  INFO keymeld_demo::plain: Participants: 2
+2026-01-10T22:24:46.487946Z  INFO keymeld_examples::harness::test: 🔧 Initializing KeyMeld E2E Test
+2026-01-10T22:24:46.487978Z  INFO keymeld_examples::harness::test: Network: regtest
+2026-01-10T22:24:46.488013Z  INFO keymeld_examples::harness::test: Participants: 2
+2026-01-10T22:24:46.488026Z  INFO keymeld_examples::harness::test: Amount: 50000 sats
+2026-01-10T22:24:46.488415Z  INFO keymeld_examples::harness::test: 📁 Loading existing coordinator private key from /tmp/keymeld-keys/coordinator.key
+2026-01-10T22:24:46.488597Z  INFO keymeld_examples::harness::test: 👤 Coordinator user ID: 019baa03-1198-7013-9d99-1ba166205e3c
+2026-01-10T22:24:46.578148Z  INFO keymeld_examples::harness::test: 👥 Loading participant keys...
+2026-01-10T22:24:46.578204Z  INFO keymeld_examples::harness::test: 📁 Loading participant 1 key from /tmp/keymeld-keys/participant_1.key
+2026-01-10T22:24:46.667747Z  INFO keymeld_examples::harness::test: ✅ Loaded 1 participants
+2026-01-10T22:24:46.667808Z  INFO keymeld_examples::harness::test: 💰 Funding coordinator from master wallet...
+2026-01-10T22:24:46.669290Z  INFO keymeld_examples::harness::test: 📍 Coordinator address: bcrt1p9zkwzyk7xqrm9gs77uezdnm8jayx940rlxfjtu4zs0tmdpum4gqqgy7cyx
+2026-01-10T22:24:46.669361Z  INFO keymeld_examples::harness::test: 💸 Sending 110000 sats to coordinator
+2026-01-10T22:24:46.698059Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: 42ec0bc6f8b4a547d631ef408a7c37153e66da798ebe32fa624123b14a1d5ee3
+2026-01-10T22:24:46.698116Z  INFO keymeld_examples::harness::test: ⛏️ Mining block to confirm transaction...
+2026-01-10T22:24:46.701013Z  INFO keymeld_examples::harness::test: ✅ Funding confirmed
+2026-01-10T22:24:46.702466Z  INFO keymeld_demo::plain: Phase 1: Keygen
+2026-01-10T22:24:46.719718Z  INFO keymeld_demo::plain: Created keygen session: 019baa03-126e-7f01-ae41-0fe97d08f742
+2026-01-10T22:24:46.734724Z  INFO keymeld_demo::plain: Coordinator registered
+2026-01-10T22:24:46.755457Z  INFO keymeld_demo::plain: Participant 0 joined
+2026-01-10T22:24:47.020841Z  INFO keymeld_demo::plain: Keygen complete: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:47.020898Z  INFO keymeld_examples::harness::test: 💰 Funding aggregate key address...
+2026-01-10T22:24:47.020972Z  INFO keymeld_examples::harness::test: 📍 Aggregate key address: bcrt1puutpz6ahr4e43kw6p4khzvw0gnkzdnk4h826w34aul0v2r4snvmqg08qkz
+2026-01-10T22:24:47.053321Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: c4c499debf3385473625493a15f7fc58937b9b5a58f1a61bd8a9aece19ba5ba3
+2026-01-10T22:24:48.059118Z  INFO keymeld_examples::harness::test: ✅ Aggregate funding confirmed
+2026-01-10T22:24:48.061205Z  INFO keymeld_examples::harness::test: ✅ Found aggregate key output at index 1
+2026-01-10T22:24:48.061262Z  INFO keymeld_examples::harness::test: 📝 Creating MuSig2 transaction...
+2026-01-10T22:24:48.061412Z  INFO keymeld_examples::harness::test: 🔍 Key details for transaction:
+2026-01-10T22:24:48.061435Z  INFO keymeld_examples::harness::test:   - Aggregate key hex: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:48.061470Z  INFO keymeld_examples::harness::test:   - Aggregate key (compressed): 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:48.061505Z  INFO keymeld_examples::harness::test:   - Aggregate key (x-only): e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:48.061533Z  INFO keymeld_examples::harness::test:   - Parity: Odd
+2026-01-10T22:24:48.062672Z  INFO keymeld_examples::harness::test: ✅ UTXO scriptPubKey verification passed - matches current aggregate key
+2026-01-10T22:24:48.062727Z  INFO keymeld_examples::harness::test: ✅ Transaction created with 1 inputs and 2 outputs
+2026-01-10T22:24:48.062877Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
+2026-01-10T22:24:48.062897Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:48.062980Z  INFO keymeld_demo::plain: Phase 2: Signing
+2026-01-10T22:24:48.101270Z  INFO keymeld_demo::plain: Created signing session: 019baa03-17c6-73d3-82b0-dfa7a86b7a71
+2026-01-10T22:24:48.101348Z  INFO keymeld_demo::plain: Validating message before approval: b89ff2175e736bbfd846dd9493ee520cb2807ed89badeca9061238f45e3b1d6e
+2026-01-10T22:24:48.118610Z  INFO keymeld_demo::plain: Coordinator approved
+2026-01-10T22:24:48.135662Z  INFO keymeld_demo::plain: Participant validating message before approval: b89ff2175e736bbfd846dd9493ee520cb2807ed89badeca9061238f45e3b1d6e
+2026-01-10T22:24:48.151986Z  INFO keymeld_demo::plain: Participant 0 approved
+2026-01-10T22:24:48.817898Z  INFO keymeld_demo::plain: Signing complete: 9a6764a82a03b89a173cff9ca324b1939b177230140414a52f7fe7c992e4c10555c36e37473577b78020772f9162dd101e60d84448d176ee97a9081ad6471ddb
+2026-01-10T22:24:48.817997Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
+2026-01-10T22:24:48.818012Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:24:48.818085Z  INFO keymeld_demo::plain: Message verified before broadcast
+2026-01-10T22:24:48.818098Z  INFO keymeld_examples::harness::test: 📝 Applying signature to transaction...
+2026-01-10T22:24:48.818143Z  INFO keymeld_examples::harness::test: 🔍 Transaction being broadcast:
+2026-01-10T22:24:48.818171Z  INFO keymeld_examples::harness::test:   - Transaction ID: 5ce23f884ab4dcb9d6f8c6d6c947fa3b4878c17822982f084ffa98a7b0b173c6
+2026-01-10T22:24:48.818219Z  INFO keymeld_examples::harness::test: ✅ Transaction signed successfully
+2026-01-10T22:24:48.819655Z  INFO keymeld_examples::harness::test: 📡 Transaction broadcast successfully: 5ce23f884ab4dcb9d6f8c6d6c947fa3b4878c17822982f084ffa98a7b0b173c6
+
+KeyMeld Plain Example Complete!
+Aggregate key: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+Transaction: 5ce23f884ab4dcb9d6f8c6d6c947fa3b4878c17822982f084ffa98a7b0b173c6

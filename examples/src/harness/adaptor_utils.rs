@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use keymeld_sdk::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
+use keymeld_sdk::types::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
 use musig2::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use musig2::{AdaptorSignature, BinaryEncoding, LiftedSignature};
 use serde::{Deserialize, Serialize};
@@ -63,13 +63,7 @@ pub fn create_test_adaptor_configs(
         let secret = AdaptorSecret::new();
         let point_hex = hex::encode(secret.point.serialize());
 
-        adaptor_configs.push(AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::Single,
-            adaptor_points: vec![point_hex],
-            hints: None,
-        });
-
+        adaptor_configs.push(AdaptorConfig::single(point_hex));
         adaptor_secrets.push(secret);
     }
 
@@ -78,15 +72,10 @@ pub fn create_test_adaptor_configs(
         let secret1 = AdaptorSecret::new();
         let secret2 = AdaptorSecret::new();
 
-        adaptor_configs.push(AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::And,
-            adaptor_points: vec![
-                hex::encode(secret1.point.serialize()),
-                hex::encode(secret2.point.serialize()),
-            ],
-            hints: None,
-        });
+        adaptor_configs.push(AdaptorConfig::and(vec![
+            hex::encode(secret1.point.serialize()),
+            hex::encode(secret2.point.serialize()),
+        ]));
 
         adaptor_secrets.push(secret1);
         adaptor_secrets.push(secret2);
@@ -101,18 +90,16 @@ pub fn create_test_adaptor_configs(
         let hint_scalar = secret1.secret.secret_bytes().to_vec();
         let hint_point = secret2.point.serialize().to_vec();
 
-        adaptor_configs.push(AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::Or,
-            adaptor_points: vec![
+        adaptor_configs.push(
+            AdaptorConfig::or(vec![
                 hex::encode(secret1.point.serialize()),
                 hex::encode(secret2.point.serialize()),
-            ],
-            hints: Some(vec![
+            ])
+            .with_hints(vec![
                 AdaptorHint::Scalar(hint_scalar),
                 AdaptorHint::Point(hint_point),
             ]),
-        });
+        );
 
         adaptor_secrets.push(secret1);
         adaptor_secrets.push(secret2);

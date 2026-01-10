@@ -1,8 +1,17 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod keymeld_adaptor;
-mod keymeld_plain;
+mod adaptor;
+mod dlctix;
+mod plain;
+mod single_signer;
+mod stored_key;
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+}
 
 #[derive(Parser)]
 #[command(name = "keymeld_demo")]
@@ -15,55 +24,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Basic MuSig2 keygen and signing
     Plain {
-        /// Configuration file path
         #[arg(long)]
         config: String,
-        /// Amount in satoshis
         #[arg(long)]
         amount: u64,
-        /// Destination Bitcoin address (optional, will generate from coordinator wallet if not provided)
         #[arg(long)]
         destination: Option<String>,
     },
+    /// Adaptor signatures
     Adaptor {
-        /// Configuration file path
         #[arg(long)]
         config: String,
-        /// Amount in satoshis
         #[arg(long)]
         amount: u64,
-        /// Destination Bitcoin address (optional, will generate from coordinator wallet if not provided)
         #[arg(long)]
         destination: Option<String>,
-        /// Run only single adaptor signature test
         #[arg(long)]
         single_only: bool,
-        /// Run only 'And' adaptor signature test
         #[arg(long)]
         and_only: bool,
-        /// Run only 'Or' adaptor signature test
         #[arg(long)]
         or_only: bool,
-        /// Skip regular signing, only test adaptors
         #[arg(long)]
         skip_regular_signing: bool,
     },
-    /// Single-signer key management and signing test
+    /// Single-signer key import and signing
     SingleSigner {
-        /// Configuration file path
         #[arg(long)]
         config: String,
     },
-    /// Keygen with stored key test
-    KeygenWithStoredKey {
-        /// Configuration file path
+    /// Stored key restore after restart
+    StoredKey {
         #[arg(long)]
         config: String,
     },
-    /// DLC batch signing test using dlctix crate
-    DlctixBatch {
-        /// Configuration file path
+    /// DLC batch signing with dlctix
+    Dlctix {
         #[arg(long)]
         config: String,
     },
@@ -71,6 +69,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let cli = Cli::parse();
 
     match cli.command {
@@ -78,7 +77,8 @@ async fn main() -> Result<()> {
             config,
             amount,
             destination,
-        } => keymeld_plain::run_with_args(config, amount, destination).await,
+        } => plain::run_with_args(config, amount, destination).await,
+
         Commands::Adaptor {
             config,
             amount,
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             or_only,
             skip_regular_signing,
         } => {
-            keymeld_adaptor::run_with_args(
+            adaptor::run_with_args(
                 config,
                 amount,
                 destination,
@@ -99,41 +99,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::SingleSigner { config } => {
-            use keymeld_examples::ExampleConfig;
-            use std::fs::read_to_string;
-            use tracing_subscriber::fmt::init;
 
-            init();
+        Commands::SingleSigner { config } => single_signer::run_with_args(config).await,
 
-            let config_content = read_to_string(&config)?;
-            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
+        Commands::StoredKey { config } => stored_key::run_with_args(config).await,
 
-            keymeld_examples::single_signer::run_single_signer_test(config).await
-        }
-        Commands::KeygenWithStoredKey { config } => {
-            use keymeld_examples::ExampleConfig;
-            use std::fs::read_to_string;
-            use tracing_subscriber::fmt::init;
-
-            init();
-
-            let config_content = read_to_string(&config)?;
-            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
-
-            keymeld_examples::keygen_with_stored_key::run_keygen_with_stored_key_test(config).await
-        }
-        Commands::DlctixBatch { config } => {
-            use keymeld_examples::ExampleConfig;
-            use std::fs::read_to_string;
-            use tracing_subscriber::fmt::init;
-
-            init();
-
-            let config_content = read_to_string(&config)?;
-            let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
-
-            keymeld_examples::dlctix_batch::run_dlctix_batch_test(config).await
-        }
+        Commands::Dlctix { config } => dlctix::run_with_args(config).await,
     }
 }

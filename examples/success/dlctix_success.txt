@@ -1,0 +1,180 @@
+🎲 Running DLC Batch Signing E2E Test...
+🧹 Cleaning all data...
+🛑 Stopping services...
+✅ All services stopped
+✅ Clean complete
+warning: Git tree '/home/teebz/repos/keymeld' is dirty
+🚀 KeyMeld Development Environment (Rust 1.88.0)
+Use 'just help' to see available commands
+✅ VSock available for enclave simulation
+🔨 Building KeyMeld...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
+🚀 Starting services...
+🏦 Setting up Bitcoin regtest environment...
+Starting Bitcoin Core...
+Bitcoin Core starting
+Waiting for Bitcoin Core to start...
+Bitcoin Core RPC ready
+Generating initial blocks...
+✅ Bitcoin regtest ready with funded coordinator wallet
+🚀 Starting KeyMeld services...
+✅ Moto already running
+✅ Services started! Logs available in logs/ directory
+🌐 Gateway: http://localhost:8080
+⏳ Waiting for gateway to be ready...
+✅ Gateway is ready!
+⏳ Waiting for enclaves to initialize...
+🎲 Running DLC batch signing E2E test...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target/debug/keymeld_demo dlctix --config config/example-nix.yaml`
+2026-01-10T22:26:59.072561Z  INFO keymeld_demo::dlctix: DLC Batch Signing Example
+2026-01-10T22:26:59.072611Z  INFO keymeld_demo::dlctix: ==========================
+2026-01-10T22:26:59.072637Z  INFO keymeld_demo::dlctix: Network: regtest
+2026-01-10T22:26:59.072667Z  INFO keymeld_demo::dlctix: Gateway: http://127.0.0.1:8080
+2026-01-10T22:26:59.072679Z  INFO keymeld_demo::dlctix: Players: 3
+2026-01-10T22:26:59.072691Z  INFO keymeld_demo::dlctix: Outcomes: 3
+2026-01-10T22:26:59.072703Z  INFO keymeld_demo::dlctix:
+=== Phase 1: Setup ===
+2026-01-10T22:26:59.073408Z  INFO keymeld_demo::dlctix: Created fake oracle
+2026-01-10T22:26:59.073445Z  INFO keymeld_demo::dlctix:   Oracle pubkey: 031dcb513ae6dbd9c77b7798decf70c09a418841fccd167d5afd80fd58f8dee41f
+2026-01-10T22:26:59.074742Z  INFO keymeld_demo::dlctix: Created 3 outcome locking points
+2026-01-10T22:26:59.074767Z  INFO keymeld_demo::dlctix:
+=== Phase 2: KeyMeld Setup ===
+2026-01-10T22:26:59.074791Z  INFO keymeld_examples::harness::test: 🔧 Initializing KeyMeld E2E Test
+2026-01-10T22:26:59.074806Z  INFO keymeld_examples::harness::test: Network: regtest
+2026-01-10T22:26:59.074819Z  INFO keymeld_examples::harness::test: Participants: 4
+2026-01-10T22:26:59.074831Z  INFO keymeld_examples::harness::test: Amount: 350000 sats
+2026-01-10T22:26:59.075215Z  INFO keymeld_examples::harness::test: 📁 Loading existing coordinator private key from /tmp/keymeld-keys/coordinator.key
+2026-01-10T22:26:59.075355Z  INFO keymeld_examples::harness::test: 👤 Coordinator user ID: 019baa05-1783-7570-8eee-c049757fcfa6
+2026-01-10T22:26:59.164209Z  INFO keymeld_examples::harness::test: 📍 Generated destination address from coordinator wallet: bcrt1pdqus254e0wyx2czwkdqme0r9l5awpc0p33frj0fwqf9e37l5a7sq7ayvn5
+2026-01-10T22:26:59.165249Z  INFO keymeld_examples::harness::test: 👥 Loading participant keys...
+2026-01-10T22:26:59.165285Z  INFO keymeld_examples::harness::test: 📁 Loading participant 1 key from /tmp/keymeld-keys/participant_1.key
+2026-01-10T22:26:59.254251Z  INFO keymeld_examples::harness::test: 📁 Loading participant 2 key from /tmp/keymeld-keys/participant_2.key
+2026-01-10T22:26:59.343022Z  INFO keymeld_examples::harness::test: 📁 Loading participant 3 key from /tmp/keymeld-keys/participant_3.key
+2026-01-10T22:26:59.432607Z  INFO keymeld_examples::harness::test: ✅ Loaded 3 participants
+2026-01-10T22:26:59.432662Z  INFO keymeld_examples::harness::test: 💰 Funding coordinator from master wallet...
+2026-01-10T22:26:59.434127Z  INFO keymeld_examples::harness::test: 📍 Coordinator address: bcrt1p9zkwzyk7xqrm9gs77uezdnm8jayx940rlxfjtu4zs0tmdpum4gqqgy7cyx
+2026-01-10T22:26:59.434197Z  INFO keymeld_examples::harness::test: 💸 Sending 410000 sats to coordinator
+2026-01-10T22:26:59.465442Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: ae3b273a10e072b85a17665def5512c3c347f0e7fcf0f976c42e8f6f95e82ff0
+2026-01-10T22:26:59.465499Z  INFO keymeld_examples::harness::test: ⛏️ Mining block to confirm transaction...
+2026-01-10T22:26:59.468785Z  INFO keymeld_examples::harness::test: ✅ Funding confirmed
+2026-01-10T22:26:59.468813Z  INFO keymeld_demo::dlctix: Creating keygen session with 4 participants
+2026-01-10T22:26:59.468876Z  INFO keymeld_demo::dlctix:   Subset 019baa05-190c-7a93-bd97-b4bfa6f6cd3c for outcome 0: market_maker + players [0, 1]
+2026-01-10T22:26:59.468909Z  INFO keymeld_demo::dlctix:   Subset 019baa05-190c-7a93-bd97-b4c8a962fb58 for outcome 1: market_maker + players [1, 2]
+2026-01-10T22:26:59.468927Z  INFO keymeld_demo::dlctix:   Subset 019baa05-190c-7a93-bd97-b4dc0317c1a6 for outcome 2: market_maker + players [0, 1, 2]
+2026-01-10T22:26:59.468948Z  INFO keymeld_demo::dlctix: Created 3 subset definitions for split transactions (one per outcome)
+2026-01-10T22:26:59.468977Z  INFO keymeld_examples::harness::test: 🔑 Creating keygen session with 3 subset definitions...
+2026-01-10T22:26:59.469434Z  INFO keymeld_examples::harness::test: 📋 Phase 1: Reserving keygen session with subsets...
+2026-01-10T22:26:59.476394Z  INFO keymeld_examples::harness::test: ✅ Phase 1 complete: Session 019baa05-190c-7a93-bd97-b4ea88020d88 reserved with coordinator enclave 2
+2026-01-10T22:26:59.476442Z  INFO keymeld_examples::harness::test: 🔐 Phase 2: Encrypting data for coordinator enclave 2 and initializing session...
+2026-01-10T22:26:59.486655Z  INFO keymeld_examples::harness::test: ✅ Phase 2 complete: Session 019baa05-190c-7a93-bd97-b4ea88020d88 initialized and moved to CollectingParticipants
+2026-01-10T22:26:59.486739Z  INFO keymeld_examples::harness::test: 🔐 Session secret shared out-of-band with participants
+2026-01-10T22:26:59.486795Z  INFO keymeld_examples::harness::test: 🔗 Secret: 3fdc3143
+2026-01-10T22:26:59.486827Z  INFO keymeld_examples::harness::test: ⏳ Waiting for session initialization to complete...
+2026-01-10T22:26:59.495135Z  INFO keymeld_examples::harness::test: ✅ Session 019baa05-190c-7a93-bd97-b4ea88020d88 is now accepting participants (attempt 1)
+2026-01-10T22:26:59.495183Z  INFO keymeld_examples::harness::test: ✅ Session initialization complete
+2026-01-10T22:26:59.495200Z  INFO keymeld_examples::harness::test: 📝 Registering keygen participants...
+2026-01-10T22:26:59.495215Z  INFO keymeld_examples::harness::test: 🏥 Waiting for all enclaves to be healthy...
+2026-01-10T22:26:59.502538Z  INFO keymeld_examples::harness::test: 🏥 Health check: 3/3 enclaves healthy
+2026-01-10T22:26:59.502579Z  INFO keymeld_examples::harness::test: ✅ All 3 enclaves are healthy, proceeding with registration
+2026-01-10T22:26:59.506139Z  INFO keymeld_examples::harness::test: Found 4 available slots for keygen session
+2026-01-10T22:26:59.506200Z  INFO keymeld_examples::harness::test: 🚀 Starting participant registration with race condition protection...
+2026-01-10T22:26:59.506230Z  INFO keymeld_examples::harness::test: 👤 Registering coordinator...
+2026-01-10T22:26:59.506365Z  INFO keymeld_examples::harness::test: 🔐 Session secret shared out-of-band with participants
+2026-01-10T22:26:59.506390Z  INFO keymeld_examples::harness::test: 🔗 Secret: 3fdc3143
+2026-01-10T22:26:59.521465Z  INFO keymeld_examples::harness::test: ✅ Coordinator registered successfully
+2026-01-10T22:26:59.535213Z  INFO keymeld_examples::harness::test: ✅ Participant 019baa05-1835-7713-8b69-a0e92b0e6c7a registered
+2026-01-10T22:26:59.549150Z  INFO keymeld_examples::harness::test: ✅ Participant 019baa05-188e-7a22-b9e9-4c86a47224ed registered
+2026-01-10T22:26:59.563095Z  INFO keymeld_examples::harness::test: ✅ Participant 019baa05-18e7-7dd3-9ae3-febd172118bf registered
+2026-01-10T22:26:59.570473Z  INFO keymeld_examples::harness::test: ✅ All 4 participants registered
+2026-01-10T22:26:59.570538Z  INFO keymeld_examples::harness::test: ✅ Successfully registered all participants (race condition fix working)
+2026-01-10T22:26:59.570565Z  INFO keymeld_examples::harness::test: ⏳ Waiting for keygen completion...
+2026-01-10T22:26:59.577932Z  INFO keymeld_examples::harness::test: Keygen still collecting participants...
+2026-01-10T22:27:01.587651Z  INFO keymeld_demo::dlctix: Keygen complete!
+2026-01-10T22:27:01.587865Z  INFO keymeld_demo::dlctix:   Aggregate key: 02a118dbd9db0428...
+2026-01-10T22:27:01.587881Z  INFO keymeld_demo::dlctix:
+=== Phase 3: Create DLC Contract ===
+2026-01-10T22:27:01.588253Z  INFO keymeld_demo::dlctix: Created 3 players
+2026-01-10T22:27:01.588287Z  INFO keymeld_demo::dlctix:   Outcome 0: Player 0 (60%) + Player 1 (40%)
+2026-01-10T22:27:01.588326Z  INFO keymeld_demo::dlctix:   Outcome 1: Player 1 (50%) + Player 2 (50%)
+2026-01-10T22:27:01.588351Z  INFO keymeld_demo::dlctix:   Outcome 2: Player 0 (50%) + Player 1 (30%) + Player 2 (20%)
+2026-01-10T22:27:01.588468Z  INFO keymeld_demo::dlctix: Contract parameters validated
+2026-01-10T22:27:01.588492Z  INFO keymeld_demo::dlctix:
+=== Phase 4: Fund the DLC ===
+2026-01-10T22:27:01.589851Z  INFO keymeld_demo::dlctix: Funding output script: OP_PUSHNUM_1 OP_PUSHBYTES_32 a118dbd9db0428e00310eb0a6eabd946d431cea56b6acdf276f7b2b2c3669a23
+2026-01-10T22:27:01.589879Z  INFO keymeld_demo::dlctix: Funding amount: 300000 sats
+2026-01-10T22:27:01.589898Z  INFO keymeld_examples::harness::test: 💰 Funding dlctix output...
+2026-01-10T22:27:01.589914Z  INFO keymeld_examples::harness::test: 📍 DLC funding address: bcrt1p5yvdhkwmqs5wqqcsav9xa27egm2rrn49dd4vmunk77et9smxng3svcz74a
+2026-01-10T22:27:01.622483Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: 88f30e3b32579d7ea20c96d361e6726598443bff45536d13430aeacba8496448
+2026-01-10T22:27:02.628032Z  INFO keymeld_examples::harness::test: ✅ DLC funding confirmed
+2026-01-10T22:27:02.629544Z  INFO keymeld_examples::harness::test: ✅ Found DLC funding output at index 1
+2026-01-10T22:27:02.629575Z  INFO keymeld_demo::dlctix: Funded DLC at outpoint: 88f30e3b32579d7ea20c96d361e6726598443bff45536d13430aeacba8496448:1
+2026-01-10T22:27:02.645336Z  INFO keymeld_demo::dlctix: Created TicketedDLC
+2026-01-10T22:27:02.645369Z  INFO keymeld_demo::dlctix:
+=== Phase 5: Extract Signing Data ===
+2026-01-10T22:27:02.645937Z  INFO keymeld_demo::dlctix: Extracted signing data:
+2026-01-10T22:27:02.645953Z  INFO keymeld_demo::dlctix:   Outcome sighashes: 3
+2026-01-10T22:27:02.645962Z  INFO keymeld_demo::dlctix:   Adaptor points: 3
+2026-01-10T22:27:02.645971Z  INFO keymeld_demo::dlctix:   Split sighashes: 7
+2026-01-10T22:27:02.645985Z  INFO keymeld_demo::dlctix:   dlctix funding_agg_pubkey: 02a118dbd9db0428e00310eb0a6eabd946d431cea56b6acdf276f7b2b2c3669a23
+2026-01-10T22:27:02.646004Z  INFO keymeld_demo::dlctix:   keymeld aggregate key:     02a118dbd9db0428e00310eb0a6eabd946d431cea56b6acdf276f7b2b2c3669a23
+2026-01-10T22:27:02.646017Z  INFO keymeld_demo::dlctix:   Aggregate keys match!
+2026-01-10T22:27:02.646030Z  INFO keymeld_demo::dlctix:   Total signatures needed: 10
+2026-01-10T22:27:02.646042Z  INFO keymeld_demo::dlctix:
+=== Phase 6: Batch Signing with KeyMeld SDK ===
+2026-01-10T22:27:02.646127Z  INFO keymeld_demo::dlctix:   Total: 3 outcome txs + 7 split txs = 10 batch items
+2026-01-10T22:27:02.654111Z  INFO keymeld_demo::dlctix: Creating batch signing session via SDK...
+2026-01-10T22:27:02.692458Z  INFO keymeld_demo::dlctix:   Signing session created: 019baa05-257e-7343-897d-41757a19af32
+2026-01-10T22:27:02.692524Z  INFO keymeld_demo::dlctix: Validating messages before approval...
+2026-01-10T22:27:02.692552Z  INFO keymeld_demo::dlctix:   Outcome sighashes: 3 items
+2026-01-10T22:27:02.692575Z  INFO keymeld_demo::dlctix:   Split sighashes: 7 items
+2026-01-10T22:27:02.692596Z  INFO keymeld_demo::dlctix: Submitting signing approvals via SDK...
+2026-01-10T22:27:02.711008Z  INFO keymeld_demo::dlctix:   Coordinator approved
+2026-01-10T22:27:02.711051Z  INFO keymeld_demo::dlctix:   Participant 0 approving...
+2026-01-10T22:27:02.744503Z  INFO keymeld_demo::dlctix:   Participant 0 approved
+2026-01-10T22:27:02.744585Z  INFO keymeld_demo::dlctix: All approvals submitted
+2026-01-10T22:27:02.744616Z  INFO keymeld_demo::dlctix: Waiting for batch signing completion...
+2026-01-10T22:27:03.419061Z  INFO keymeld_demo::dlctix: Batch signing complete! Results received: 10
+2026-01-10T22:27:03.419102Z  INFO keymeld_demo::dlctix:
+=== Phase 7: Parse Results into ContractSignatures ===
+2026-01-10T22:27:03.419292Z  INFO keymeld_demo::dlctix:   Parsed 3 outcome + 7 split signatures
+2026-01-10T22:27:03.419308Z  INFO keymeld_demo::dlctix: Created SignedContract with 3 outcome + 7 split signatures
+2026-01-10T22:27:03.419318Z  INFO keymeld_demo::dlctix:
+=== Phase 8: Oracle Attestation ===
+2026-01-10T22:27:03.419678Z  INFO keymeld_demo::dlctix: Oracle attested to outcome 0: "outcome_0"
+2026-01-10T22:27:03.419692Z  INFO keymeld_demo::dlctix:
+=== Phase 9: Broadcast Outcome Transaction ===
+2026-01-10T22:27:03.420224Z  INFO keymeld_demo::dlctix: Created signed outcome transaction
+2026-01-10T22:27:03.420270Z  INFO keymeld_demo::dlctix:   Txid: cd7bace88823d50329f1b7b0f4e5eeba6eba8cd51f1053b02d05530ba33879a7
+2026-01-10T22:27:03.420300Z  INFO keymeld_demo::dlctix:   Outcome tx input verified
+2026-01-10T22:27:03.421824Z  INFO keymeld_demo::dlctix: Broadcast outcome transaction: cd7bace88823d50329f1b7b0f4e5eeba6eba8cd51f1053b02d05530ba33879a7
+2026-01-10T22:27:03.425092Z  INFO keymeld_demo::dlctix: Mined 1 block to confirm outcome tx
+2026-01-10T22:27:03.425140Z  INFO keymeld_demo::dlctix:
+=== Phase 10: Broadcast Split Transactions ===
+2026-01-10T22:27:03.425158Z  INFO keymeld_demo::dlctix: Outcome 0 has 2 winners with weighted payouts:
+2026-01-10T22:27:03.425171Z  INFO keymeld_demo::dlctix:   Player 0 claims 60% of the pot (weight 3/5)
+2026-01-10T22:27:03.425288Z  INFO keymeld_demo::dlctix:     Split TX for player 0: 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.427015Z  INFO keymeld_demo::dlctix:     Broadcast split transaction: 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.427047Z  INFO keymeld_demo::dlctix:   Player 1 claims 40% of the pot (weight 2/5)
+2026-01-10T22:27:03.427113Z  INFO keymeld_demo::dlctix:     Split TX for player 1: 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.427822Z  INFO keymeld_demo::dlctix:     Broadcast split transaction: 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.430647Z  INFO keymeld_demo::dlctix: Mined 1 block to confirm all split txs
+2026-01-10T22:27:03.430691Z  INFO keymeld_demo::dlctix:
+=== DLC Batch Signing Example Complete ===
+2026-01-10T22:27:03.430702Z  INFO keymeld_demo::dlctix: Transaction chain:
+2026-01-10T22:27:03.430710Z  INFO keymeld_demo::dlctix:   1. Funding: 88f30e3b32579d7ea20c96d361e6726598443bff45536d13430aeacba8496448:1
+2026-01-10T22:27:03.430742Z  INFO keymeld_demo::dlctix:   2. Outcome: cd7bace88823d50329f1b7b0f4e5eeba6eba8cd51f1053b02d05530ba33879a7
+2026-01-10T22:27:03.430777Z  INFO keymeld_demo::dlctix:   3. Split (Player 0): 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.430796Z  INFO keymeld_demo::dlctix:   3. Split (Player 1): 134134b3e1d345686d2b98b5ee9642127a884a5fe20c8b3df7710fc75b7f1488
+2026-01-10T22:27:03.430814Z  INFO keymeld_demo::dlctix:
+2026-01-10T22:27:03.430822Z  INFO keymeld_demo::dlctix: Summary:
+2026-01-10T22:27:03.430831Z  INFO keymeld_demo::dlctix:   - 3 players, 3 outcomes
+2026-01-10T22:27:03.430845Z  INFO keymeld_demo::dlctix:   - Batch signed 3 outcome txs (n-of-n adaptor) + 7 split txs (2-of-2 subset)
+2026-01-10T22:27:03.430857Z  INFO keymeld_demo::dlctix:   - Oracle attested to outcome 0
+2026-01-10T22:27:03.430866Z  INFO keymeld_demo::dlctix:   - 2 winners claimed weighted payouts via separate split txs
+2026-01-10T22:27:03.430877Z  INFO keymeld_demo::dlctix:
+2026-01-10T22:27:03.430885Z  INFO keymeld_demo::dlctix: Key features demonstrated:
+2026-01-10T22:27:03.430895Z  INFO keymeld_demo::dlctix:   - Subset definitions per OUTCOME: market_maker + ALL winners for that outcome
+2026-01-10T22:27:03.430906Z  INFO keymeld_demo::dlctix:   - Per-batch-item subset_id for signing with outcome's aggregate key
+2026-01-10T22:27:03.430920Z  INFO keymeld_demo::dlctix:   - WEIGHTED PAYOUTS: Multiple winners per outcome with proportional splits
+2026-01-10T22:27:03.430931Z  INFO keymeld_demo::dlctix:   - Full DLC flow: fund -> outcome tx (n-of-n adaptor) -> split txs (k-of-k per outcome)
