@@ -3,9 +3,10 @@ use crate::operations::states::signing::CoordinatorData;
 use keymeld_core::{
     crypto::SessionSecret,
     identifiers::UserId,
-    protocol::{CryptoError, EnclaveError, InitSigningSessionCommand, SessionError},
-    validation::decrypt_session_data,
+    protocol::{EnclaveError, InitSigningSessionCommand, SessionError},
 };
+use std::collections::BTreeMap;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct KeygenSessionData<'a> {
@@ -14,6 +15,8 @@ pub struct KeygenSessionData<'a> {
     pub musig_processor: &'a MusigProcessor,
     pub participants: Vec<UserId>,
     pub aggregate_public_key: Vec<u8>,
+    /// Subset aggregate public keys (subset_id -> public key bytes)
+    pub subset_aggregate_keys: BTreeMap<Uuid, Vec<u8>>,
 }
 
 pub fn create_signing_musig_from_keygen(
@@ -22,33 +25,10 @@ pub fn create_signing_musig_from_keygen(
 ) -> Result<MusigProcessor, EnclaveError> {
     let session_metadata = keygen_data.musig_processor.get_session_metadata_public();
 
-    // Get the first batch item's encrypted message (single message = batch of 1)
-    let first_batch_item = init_cmd.batch_items.first().ok_or_else(|| {
-        EnclaveError::Session(SessionError::MusigInitialization(
-            "No batch items provided for signing".to_string(),
-        ))
-    })?;
-
-    let decrypted_message_hex = decrypt_session_data(
-        &first_batch_item.encrypted_message,
-        &hex::encode(keygen_data.session_secret.as_bytes()),
-    )
-    .map_err(|e| {
-        EnclaveError::Crypto(CryptoError::DecryptionFailed {
-            context: "session_data".to_string(),
-            error: format!("Failed to decrypt message: {e}"),
-        })
-    })?;
-
-    let message_bytes = hex::decode(&decrypted_message_hex).map_err(|e| {
-        EnclaveError::Crypto(CryptoError::DecryptionFailed {
-            context: "session_data".to_string(),
-            error: format!("Hex decode failed: {e}"),
-        })
-    })?;
+    // Batch items are processed later in the initialized state
+    // Here we just create the signing processor with the session-level taproot tweak
     let mut signing_processor = MusigProcessor::new(
         &init_cmd.signing_session_id,
-        message_bytes,
         session_metadata.taproot_tweak.clone(),
         Some(keygen_data.participants.len()),
         keygen_data.participants.clone(),

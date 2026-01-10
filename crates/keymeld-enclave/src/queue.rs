@@ -388,6 +388,7 @@ mod tests {
             expected_participant_count: 2,
             expected_participants: vec![],
             encrypted_taproot_tweak: String::new(),
+            subset_definitions: vec![],
         };
         let _result = queue
             .process_command(

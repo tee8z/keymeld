@@ -1,9 +1,7 @@
 use crate::musig::MusigProcessor;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::{
-        EnclaveError, NonceData, NonceError, PrivateKeyError, SessionError, ValidationError,
-    },
+    protocol::{EnclaveError, NonceError, PrivateKeyError, SessionError, ValidationError},
     SessionSecret,
 };
 use std::time::SystemTime;
@@ -82,10 +80,11 @@ impl GeneratingNonces {
     }
 
     pub fn get_participants(&self) -> Vec<UserId> {
+        // Return participants in BIP327 order (sorted by compressed public key)
+        // This matches the order used in KeyAggContext for consistent signer indices
         self.musig_processor
             .get_session_metadata_public()
-            .expected_participants
-            .clone()
+            .get_all_participant_ids()
     }
 
     pub fn get_expected_participant_count(&self) -> Option<usize> {
@@ -94,9 +93,11 @@ impl GeneratingNonces {
             .expected_participant_count
     }
 
-    /// Check if user has any nonce (regular or adaptor)
+    /// Check if user has batch nonces
     pub fn has_user_nonce(&self, user_id: &UserId) -> bool {
-        self.musig_processor.get_user_nonce_data(user_id).is_some()
+        self.musig_processor
+            .get_user_batch_nonce_data(user_id)
+            .is_some()
     }
 }
 
@@ -135,7 +136,7 @@ impl GeneratingNonces {
 
         // Generate nonces for all users this enclave represents
         for user_id in &users_in_session {
-            // Check if nonce already exists for this user (handles both regular and adaptor)
+            // Check if nonce already exists for this user
             if self.has_user_nonce(user_id) {
                 debug!(
                     "Nonce already exists for user {} in signing session {}, skipping",
@@ -175,57 +176,20 @@ impl GeneratingNonces {
                     ))))?
             };
 
-            let nonce_data = self
+            // Generate nonces for all batch items (single message = batch of 1)
+            let batch_nonces = self
                 .musig_processor
-                .generate_nonce(user_id, signer_index, &private_key)
+                .generate_batch_nonces(user_id, signer_index, &private_key)
                 .map_err(|e| {
                     EnclaveError::Nonce(NonceError::GenerationFailed {
                         user_id: user_id.clone(),
-                        error: format!("Failed to generate nonce: {e}"),
+                        error: format!("Failed to generate batch nonces: {e}"),
                     })
                 })?;
 
-            // Validate nonce data based on type
-            match &nonce_data {
-                NonceData::Regular(nonce) => {
-                    if nonce.serialize().len() != 66 {
-                        return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
-                            user_id: user_id.clone(),
-                            error: format!(
-                                "Invalid regular nonce length: expected 66 bytes, got {}",
-                                nonce.serialize().len()
-                            ),
-                        }));
-                    }
-                }
-                NonceData::Adaptor(adaptor_nonces) => {
-                    for (config_id, nonce) in adaptor_nonces {
-                        if nonce.serialize().len() != 66 {
-                            return Err(EnclaveError::Nonce(NonceError::GenerationFailed {
-                                user_id: user_id.clone(),
-                                error: format!(
-                                    "Invalid adaptor nonce length for config {}: expected 66 bytes, got {}",
-                                    config_id,
-                                    nonce.serialize().len()
-                                ),
-                            }));
-                        }
-                    }
-                }
-            }
-
-            let nonce_info = match &nonce_data {
-                keymeld_core::protocol::NonceData::Regular(nonce) => {
-                    format!("regular nonce: {} bytes", nonce.serialize().len())
-                }
-                keymeld_core::protocol::NonceData::Adaptor(adaptor_nonces) => {
-                    format!("adaptor nonces: {} configs", adaptor_nonces.len())
-                }
-            };
-
             info!(
-                "successfully generated nonce for user {} in signing session {} ({})",
-                user_id, self.session_id, nonce_info
+                "successfully generated batch nonces for user {} in signing session {} ({} batch items)",
+                user_id, self.session_id, batch_nonces.len()
             );
 
             generated_count += 1;

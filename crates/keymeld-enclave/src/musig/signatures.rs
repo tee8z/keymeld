@@ -1,348 +1,535 @@
-use musig2::{BinaryEncoding, PartialSignature};
+use musig2::{BinaryEncoding, PartialSignature, SecondRound};
 use std::collections::BTreeMap;
-use tracing::info;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
-use keymeld_core::{identifiers::UserId, protocol::FinalizedData, KeyMaterial};
+use keymeld_core::{identifiers::UserId, protocol::FinalizedData};
 
 use super::{error::MusigError, MusigProcessor};
 
-/// Type alias for adaptor signature result: (uuid, signature_bytes, adaptor_bytes)
-type AdaptorSignatureResult = Vec<(uuid::Uuid, Vec<u8>, Vec<u8>)>;
-
 impl MusigProcessor {
-    pub fn sign(
-        &self,
-        user_id: &UserId,
-        private_key: &KeyMaterial,
-    ) -> Result<(Vec<u8>, Vec<u8>), MusigError> {
-        let session_meta = self.get_session_metadata();
+    // ========== BATCH SIGNING SIGNATURE METHODS ==========
+    // All signing now goes through batch paths. Single messages are treated as a batch of 1.
 
-        if session_meta.has_adaptor_configs() {
-            let adaptor_results = self.sign_adaptor_for_user(user_id, private_key)?;
-            adaptor_results
-                .first()
-                .map(|(_, sig, nonce)| (sig.clone(), nonce.clone()))
-                .ok_or(MusigError::InvalidAdaptorConfig(
-                    "No adaptor results generated".to_string(),
-                ))
-        } else {
-            self.sign_regular_for_user(user_id, private_key)
+    /// Finalize batch nonce rounds for a user - converts FirstRounds to SecondRounds
+    /// for all batch items, producing partial signatures.
+    pub fn finalize_batch_nonce_rounds(&mut self, user_id: &UserId) -> Result<(), MusigError> {
+        let session_id = self.session_metadata.session_id.clone();
+
+        let user_session = self.user_sessions.get_mut(user_id).ok_or_else(|| {
+            MusigError::NotReady(format!("No user session found for user {user_id}"))
+        })?;
+
+        let private_key = user_session.private_key.clone().ok_or_else(|| {
+            MusigError::NotReady(format!("No private key found for user {user_id}"))
+        })?;
+
+        let secret_key = musig2::secp256k1::SecretKey::from_byte_array(
+            private_key
+                .as_bytes()
+                .try_into()
+                .map_err(|_| MusigError::InvalidPrivateKey)?,
+        )
+        .map_err(|_| MusigError::InvalidPrivateKey)?;
+
+        // Clone batch_items to avoid borrow issues
+        let batch_items: BTreeMap<_, _> = self.session_metadata.batch_items.clone();
+
+        // Re-borrow user_session
+        let user_session = self.user_sessions.get_mut(user_id).unwrap();
+
+        // Finalize regular batch first rounds
+        let batch_item_ids: Vec<_> = user_session.batch_first_rounds.keys().cloned().collect();
+        for batch_item_id in batch_item_ids {
+            if user_session
+                .batch_second_rounds
+                .contains_key(&batch_item_id)
+            {
+                continue; // Already finalized
+            }
+
+            let first_round = match user_session.batch_first_rounds.remove(&batch_item_id) {
+                Some(round) => round,
+                None => continue,
+            };
+
+            if !first_round.is_complete() {
+                return Err(MusigError::NotReady(format!(
+                    "Batch item {} first round not complete",
+                    batch_item_id
+                )));
+            }
+
+            let message = batch_items
+                .get(&batch_item_id)
+                .map(|item| item.message.clone())
+                .unwrap_or_default();
+
+            let second_round = first_round
+                .finalize(secret_key, message)
+                .map_err(|e| MusigError::Musig2Error(e.into()))?;
+
+            user_session
+                .batch_second_rounds
+                .insert(batch_item_id, second_round);
+
+            info!(
+                "Finalized batch second round for user {} batch_item {} in session {}",
+                user_id, batch_item_id, session_id
+            );
         }
+
+        // Finalize adaptor batch first rounds
+        let adaptor_batch_ids: Vec<_> = user_session
+            .batch_adaptor_first_rounds
+            .keys()
+            .cloned()
+            .collect();
+        for batch_item_id in adaptor_batch_ids {
+            let batch_item = match batch_items.get(&batch_item_id) {
+                Some(item) => item,
+                None => continue,
+            };
+
+            let adaptor_rounds = match user_session
+                .batch_adaptor_first_rounds
+                .remove(&batch_item_id)
+            {
+                Some(rounds) => rounds,
+                None => continue,
+            };
+
+            let mut second_rounds: BTreeMap<Uuid, SecondRound<Vec<u8>>> = BTreeMap::new();
+
+            // Build lookup of adaptor configs by id for easy access
+            let adaptor_configs: BTreeMap<_, _> = batch_item
+                .adaptor_configs
+                .iter()
+                .map(|c| (c.adaptor_id, c))
+                .collect();
+
+            // Iterate over owned adaptor rounds
+            for (adaptor_id, first_round) in adaptor_rounds {
+                let adaptor_config = match adaptor_configs.get(&adaptor_id) {
+                    Some(config) => *config,
+                    None => continue,
+                };
+
+                if !first_round.is_complete() {
+                    return Err(MusigError::NotReady(format!(
+                        "Batch item {} adaptor {} first round not complete",
+                        batch_item_id, adaptor_id
+                    )));
+                }
+
+                // Parse adaptor point
+                let adaptor_point_hex = adaptor_config.adaptor_points.first().ok_or_else(|| {
+                    MusigError::InvalidAdaptorConfig(format!(
+                        "No adaptor points in config {}",
+                        adaptor_id
+                    ))
+                })?;
+
+                let adaptor_point_bytes = hex::decode(adaptor_point_hex).map_err(|e| {
+                    MusigError::InvalidAdaptorConfig(format!("Invalid adaptor point hex: {}", e))
+                })?;
+
+                let adaptor_point = musig2::secp256k1::PublicKey::from_slice(&adaptor_point_bytes)
+                    .map_err(|e| {
+                        MusigError::InvalidAdaptorConfig(format!("Invalid adaptor point: {}", e))
+                    })?;
+
+                let second_round = first_round
+                    .finalize_adaptor(secret_key, adaptor_point, batch_item.message.clone())
+                    .map_err(|e| MusigError::Musig2Error(e.into()))?;
+
+                second_rounds.insert(adaptor_id, second_round);
+
+                info!(
+                    "Finalized batch adaptor second round for user {} batch_item {} adaptor {} in session {}",
+                    user_id, batch_item_id, adaptor_id, session_id
+                );
+            }
+
+            user_session
+                .batch_adaptor_second_rounds
+                .insert(batch_item_id, second_rounds);
+        }
+
+        Ok(())
     }
 
-    fn sign_regular_for_user(
+    /// Get batch partial signatures for a user.
+    /// Returns map of batch_item_id -> BatchPartialSigData
+    pub fn get_user_batch_partial_signatures(
         &self,
         user_id: &UserId,
-        _private_key: &KeyMaterial,
-    ) -> Result<(Vec<u8>, Vec<u8>), MusigError> {
-        let session_meta = self.get_session_metadata();
-
-        info!(
-            "sign_regular_for_user called for user {} in session {} (phase: {:?})",
-            user_id, session_meta.session_id, session_meta.phase
-        );
-
-        // Get user session data
+    ) -> Result<BTreeMap<Uuid, BatchPartialSigData>, MusigError> {
         let user_session = self
             .user_sessions
             .get(user_id)
             .ok_or_else(|| MusigError::UserNotFound(user_id.clone()))?;
 
-        match &user_session.second_round {
-            Some(second_round) => {
-                let signature: PartialSignature = second_round.our_signature();
-                let aggregated_nonce = second_round.aggregated_nonce();
+        let mut results: BTreeMap<Uuid, BatchPartialSigData> = BTreeMap::new();
 
-                // Return signature bytes and actual aggregated nonce
-                Ok((
-                    signature.serialize().to_vec(),
-                    aggregated_nonce.serialize().to_vec(),
-                ))
-            }
-            None => Err(MusigError::SessionNotReady(
-                "Second round not initialized".to_string(),
-            )),
+        // Get regular batch signatures
+        for (batch_item_id, second_round) in &user_session.batch_second_rounds {
+            let partial_sig: PartialSignature = second_round.our_signature();
+            let aggregated_nonce = second_round.aggregated_nonce();
+            results.insert(
+                *batch_item_id,
+                BatchPartialSigData::Regular {
+                    signature: partial_sig.serialize().to_vec(),
+                    nonce: aggregated_nonce.serialize().to_vec(),
+                },
+            );
         }
+
+        // Get adaptor batch signatures
+        for (batch_item_id, adaptor_rounds) in &user_session.batch_adaptor_second_rounds {
+            let mut adaptor_sigs: Vec<(Uuid, Vec<u8>, Vec<u8>)> = Vec::new();
+            for (adaptor_id, second_round) in adaptor_rounds {
+                let partial_sig: PartialSignature = second_round.our_signature();
+                let aggregated_nonce = second_round.aggregated_nonce();
+                adaptor_sigs.push((
+                    *adaptor_id,
+                    partial_sig.serialize().to_vec(),
+                    aggregated_nonce.serialize().to_vec(),
+                ));
+            }
+            if !adaptor_sigs.is_empty() {
+                results.insert(*batch_item_id, BatchPartialSigData::Adaptor(adaptor_sigs));
+            }
+        }
+
+        Ok(results)
     }
 
-    pub fn add_partial_signature(
-        &mut self,
-        signer_index: usize,
-        partial_signature: PartialSignature,
-    ) -> Result<(), MusigError> {
-        // Add the signature to ALL local user sessions that have SecondRound active
-        // This is how MuSig2 works - each participant collects signatures from all other participants
-        let mut signatures_added = 0;
-        for (session_user_id, user_session) in self.user_sessions.iter_mut() {
-            if let Some(second_round) = &mut user_session.second_round {
-                second_round
-                    .receive_signature(signer_index, partial_signature)
-                    .map_err(|e| {
-                        MusigError::SigningError(format!(
-                            "Failed to add partial signature: {:?}",
-                            e
-                        ))
-                    })?;
-                signatures_added += 1;
-                info!(
-                    "Added partial signature (index {}) to user session {} in session {}",
-                    signer_index, session_user_id, self.session_metadata.session_id
-                );
+    /// Compute the signer index for a user within a subset (for signature verification).
+    /// The subset's KeyAggContext is built from public keys sorted by BIP327 order.
+    fn compute_subset_signer_index_for_sigs(
+        &self,
+        user_id: &UserId,
+        subset_id: &Uuid,
+    ) -> Option<usize> {
+        // Find the subset definition
+        let subset_def = self
+            .session_metadata
+            .subset_definitions
+            .iter()
+            .find(|def| def.subset_id == *subset_id)?;
+
+        // Check if user is in this subset
+        if !subset_def.participants.contains(user_id) {
+            return None;
+        }
+
+        // Collect and sort public keys for subset participants (same as compute_subset_aggregates)
+        let mut subset_pubkeys_with_ids: Vec<(UserId, musig2::secp256k1::PublicKey)> = Vec::new();
+        for uid in &subset_def.participants {
+            if let Some(pubkey) = self.session_metadata.participant_public_keys.get(uid) {
+                subset_pubkeys_with_ids.push((uid.clone(), *pubkey));
             }
         }
 
-        if signatures_added == 0 {
-            return Err(MusigError::SigningError(
-                "No active SecondRound sessions to receive signature".to_string(),
-            ));
+        // Sort by compressed public key bytes (BIP327) - same order as KeyAggContext
+        subset_pubkeys_with_ids.sort_by(|a, b| a.1.serialize().cmp(&b.1.serialize()));
+
+        // Find user's position in sorted order
+        subset_pubkeys_with_ids
+            .iter()
+            .position(|(uid, _)| uid == user_id)
+    }
+
+    /// Add batch partial signatures from a remote participant.
+    pub fn add_batch_partial_signatures(
+        &mut self,
+        user_id: &UserId,
+        batch_signatures: BTreeMap<Uuid, BatchPartialSigData>,
+    ) -> Result<(), MusigError> {
+        let sorted_participants = self.session_metadata.get_all_participant_ids();
+        let full_group_signer_index = sorted_participants
+            .iter()
+            .position(|id| id == user_id)
+            .ok_or(MusigError::InvalidParticipant(user_id.clone()))?;
+
+        // Get all user IDs that need updating
+        let user_ids_with_private_keys: Vec<_> = self
+            .user_sessions
+            .iter()
+            .filter_map(|(uid, session)| {
+                if session.private_key.is_some() {
+                    Some(uid.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Clone batch_items to check subset_id for each batch item
+        let batch_items = self.session_metadata.batch_items.clone();
+
+        // Pre-compute signer indices for all batch items to avoid borrow conflicts
+        let mut batch_item_signer_indices: std::collections::BTreeMap<Uuid, Option<usize>> =
+            std::collections::BTreeMap::new();
+        for (batch_item_id, batch_item) in &batch_items {
+            let signer_index = if let Some(subset_id) = batch_item.subset_id {
+                match self.compute_subset_signer_index_for_sigs(user_id, &subset_id) {
+                    Some(idx) => {
+                        debug!(
+                            "User {} has subset signer index {} for batch_item {} with subset {}",
+                            user_id, idx, batch_item_id, subset_id
+                        );
+                        Some(idx)
+                    }
+                    None => {
+                        // User is not in this subset - will skip
+                        warn!(
+                            "User {} is not in subset {} for batch_item {}, will skip signature",
+                            user_id, subset_id, batch_item_id
+                        );
+                        None
+                    }
+                }
+            } else {
+                Some(full_group_signer_index)
+            };
+            batch_item_signer_indices.insert(*batch_item_id, signer_index);
         }
+
+        for session_user_id in user_ids_with_private_keys {
+            if let Some(user_session) = self.user_sessions.get_mut(&session_user_id) {
+                for (batch_item_id, sig_data) in &batch_signatures {
+                    // Get the pre-computed signer index for this batch item
+                    let signer_index = match batch_item_signer_indices.get(batch_item_id) {
+                        Some(Some(idx)) => *idx,
+                        _ => {
+                            // User is not in this subset or batch item not found - skip
+                            continue;
+                        }
+                    };
+
+                    match sig_data {
+                        BatchPartialSigData::Regular { signature, .. } => {
+                            if let Some(second_round) =
+                                user_session.batch_second_rounds.get_mut(batch_item_id)
+                            {
+                                let partial_sig =
+                                    PartialSignature::from_slice(signature).map_err(|e| {
+                                        MusigError::SigningError(format!(
+                                            "Invalid partial signature: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                second_round
+                                    .receive_signature(signer_index, partial_sig)
+                                    .map_err(|e| {
+                                        MusigError::SigningError(format!(
+                                            "Failed to add batch signature: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                            }
+                        }
+                        BatchPartialSigData::Adaptor(adaptor_sigs) => {
+                            if let Some(adaptor_rounds) = user_session
+                                .batch_adaptor_second_rounds
+                                .get_mut(batch_item_id)
+                            {
+                                for (adaptor_id, sig_bytes, _) in adaptor_sigs {
+                                    if let Some(second_round) = adaptor_rounds.get_mut(adaptor_id) {
+                                        let partial_sig = PartialSignature::from_slice(sig_bytes)
+                                            .map_err(|e| {
+                                            MusigError::SigningError(format!(
+                                                "Invalid adaptor partial signature: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                        second_round
+                                            .receive_signature(signer_index, partial_sig)
+                                            .map_err(|e| {
+                                            MusigError::SigningError(format!(
+                                                "Failed to add batch adaptor signature: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Added batch partial signatures from user {} (full_group_index {}) in session {}",
+            user_id, full_group_signer_index, self.session_metadata.session_id
+        );
 
         Ok(())
     }
 
-    pub fn add_adaptor_partial_signatures(
+    /// Finalize all batch signatures (coordinator only).
+    /// Returns map of batch_item_id -> FinalizedData
+    pub fn finalize_batch(
         &mut self,
-        signer_index: usize,
-        adaptor_signatures: Vec<(uuid::Uuid, Vec<u8>)>,
-    ) -> Result<(), MusigError> {
-        // Add the signatures to ALL local user sessions that have adaptor SecondRounds active
-        // This is how MuSig2 works - each participant collects signatures from all other participants
-        let mut signatures_added = 0;
-        for (session_user_id, user_session) in self.user_sessions.iter_mut() {
-            // Process each adaptor signature for the configs available in this session
-            for (config_id, signature_bytes) in &adaptor_signatures {
-                if let Some(adaptor_second_round) =
-                    user_session.adaptor_second_rounds.get_mut(config_id)
-                {
-                    // Convert bytes to PartialSignature
-                    let partial_sig =
-                        PartialSignature::from_slice(signature_bytes).map_err(|e| {
-                            MusigError::SigningError(format!(
-                                "Invalid partial signature format: {:?}",
-                                e
-                            ))
-                        })?;
+        coordinator_user_id: &UserId,
+    ) -> Result<BTreeMap<Uuid, FinalizedData>, MusigError> {
+        let session_id = self.session_metadata.session_id.clone();
+        let batch_items = self.session_metadata.batch_items.clone();
 
-                    adaptor_second_round
-                        .receive_signature(signer_index, partial_sig)
-                        .map_err(|e| {
-                            MusigError::SigningError(format!(
-                                "Failed to add adaptor signature: {:?}",
-                                e
-                            ))
-                        })?;
-                    signatures_added += 1;
-                    info!(
-                        "Added adaptor partial signature (index {}, config {}) to user session {} in session {}",
-                        signer_index, config_id, session_user_id, self.session_metadata.session_id
+        let user_session = self
+            .user_sessions
+            .get_mut(coordinator_user_id)
+            .ok_or_else(|| MusigError::UserNotFound(coordinator_user_id.clone()))?;
+
+        let mut results: BTreeMap<Uuid, FinalizedData> = BTreeMap::new();
+
+        // Finalize regular batch second rounds
+        let batch_item_ids: Vec<_> = user_session.batch_second_rounds.keys().cloned().collect();
+        for batch_item_id in batch_item_ids {
+            if let Some(second_round) = user_session.batch_second_rounds.remove(&batch_item_id) {
+                if !second_round.holdouts().is_empty() {
+                    return Err(MusigError::NotReady(format!(
+                        "Batch item {} second round not complete - missing signatures",
+                        batch_item_id
+                    )));
+                }
+
+                let final_sig: [u8; 64] = second_round.finalize::<[u8; 64]>().map_err(|e| {
+                    MusigError::SigningError(format!("Failed to finalize batch signature: {:?}", e))
+                })?;
+
+                results.insert(
+                    batch_item_id,
+                    FinalizedData::FinalSignature(final_sig.to_vec()),
+                );
+
+                info!(
+                    "Finalized batch signature for batch_item {} in session {}",
+                    batch_item_id, session_id
+                );
+            }
+        }
+
+        // Finalize adaptor batch second rounds
+        let adaptor_batch_ids: Vec<_> = user_session
+            .batch_adaptor_second_rounds
+            .keys()
+            .cloned()
+            .collect();
+        for batch_item_id in adaptor_batch_ids {
+            let batch_item = match batch_items.get(&batch_item_id) {
+                Some(item) => item,
+                None => continue,
+            };
+
+            if let Some(mut adaptor_rounds) = user_session
+                .batch_adaptor_second_rounds
+                .remove(&batch_item_id)
+            {
+                let mut adaptor_results: Vec<(Uuid, Vec<u8>)> = Vec::new();
+
+                for adaptor_config in &batch_item.adaptor_configs {
+                    let adaptor_id = adaptor_config.adaptor_id;
+
+                    if let Some(second_round) = adaptor_rounds.remove(&adaptor_id) {
+                        if !second_round.holdouts().is_empty() {
+                            return Err(MusigError::NotReady(format!(
+                                "Batch item {} adaptor {} not complete",
+                                batch_item_id, adaptor_id
+                            )));
+                        }
+
+                        // Get aggregated nonce before finalize consumes the round
+                        let aggregated_nonce = second_round.aggregated_nonce();
+                        let nonce_bytes = aggregated_nonce.serialize().to_vec();
+
+                        let adaptor_sig = second_round
+                            .finalize_adaptor::<musig2::AdaptorSignature>()
+                            .map_err(|e| {
+                                MusigError::SigningError(format!(
+                                    "Failed to finalize batch adaptor signature: {:?}",
+                                    e
+                                ))
+                            })?;
+
+                        let sig_bytes = adaptor_sig.to_bytes().to_vec();
+
+                        // Store adaptor signature result in batch_item metadata
+                        if let Some(item) =
+                            self.session_metadata.batch_items.get_mut(&batch_item_id)
+                        {
+                            item.adaptor_final_signatures.insert(
+                                adaptor_id,
+                                keymeld_core::protocol::AdaptorSignatureResult {
+                                    adaptor_id,
+                                    adaptor_type: adaptor_config.adaptor_type.clone(),
+                                    signature_scalar: sig_bytes.clone(),
+                                    nonce_point: nonce_bytes,
+                                    adaptor_points: adaptor_config
+                                        .adaptor_points
+                                        .iter()
+                                        .filter_map(|hex| hex::decode(hex).ok())
+                                        .collect(),
+                                    hints: adaptor_config.hints.clone(),
+                                    aggregate_adaptor_point: adaptor_config
+                                        .adaptor_points
+                                        .first()
+                                        .and_then(|hex| hex::decode(hex).ok())
+                                        .unwrap_or_default(),
+                                },
+                            );
+                        }
+
+                        adaptor_results.push((adaptor_id, sig_bytes));
+
+                        info!(
+                            "Finalized batch adaptor signature for batch_item {} adaptor {} in session {}",
+                            batch_item_id, adaptor_id, session_id
+                        );
+                    }
+                }
+
+                if !adaptor_results.is_empty() {
+                    results.insert(
+                        batch_item_id,
+                        FinalizedData::AdaptorSignatures(adaptor_results),
                     );
                 }
             }
         }
 
-        if signatures_added == 0 {
-            return Err(MusigError::SigningError(
-                "No active adaptor SecondRound sessions to receive signature".to_string(),
-            ));
-        }
+        info!(
+            "Finalized {} batch signatures in session {}",
+            results.len(),
+            session_id
+        );
 
-        Ok(())
+        Ok(results)
     }
 
-    pub fn finalize(&mut self, coordinator_user_id: &UserId) -> Result<[u8; 64], MusigError> {
-        let has_adaptor_configs = self.session_metadata.has_adaptor_configs();
-
-        if has_adaptor_configs {
-            // For adaptor signatures, use aggregate_adaptor_signatures
-            // This also stores the results in session_metadata.adaptor_final_signatures
-            let finalized_data = self.aggregate_adaptor_signatures()?;
-            match finalized_data {
-                FinalizedData::AdaptorSignatures(adaptor_sigs) => {
-                    // Return the first adaptor signature as the "main" signature
-                    // The full adaptor signatures are available via get_adaptor_signature_results()
-                    if let Some((_, sig)) = adaptor_sigs.first() {
-                        if sig.len() >= 64 {
-                            let mut result = [0u8; 64];
-                            result.copy_from_slice(&sig[..64]);
-                            Ok(result)
-                        } else {
-                            Err(MusigError::SigningError(
-                                "Adaptor signature too short".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MusigError::SigningError(
-                            "No adaptor signatures produced".to_string(),
-                        ))
-                    }
-                }
-                FinalizedData::FinalSignature(sig) => {
-                    if sig.len() >= 64 {
-                        let mut result = [0u8; 64];
-                        result.copy_from_slice(&sig[..64]);
-                        Ok(result)
-                    } else {
-                        Err(MusigError::SigningError("Signature too short".to_string()))
-                    }
-                }
+    /// Check if all batch signatures are complete and ready for finalization
+    pub fn all_batch_signatures_complete(&self) -> bool {
+        for user_session in self.user_sessions.values() {
+            if user_session.private_key.is_none() {
+                continue;
             }
-        } else {
-            // Regular signing: use second_round.finalize()
-            let coordinator_session = self
-                .user_sessions
-                .get_mut(coordinator_user_id)
-                .ok_or_else(|| MusigError::UserNotFound(coordinator_user_id.clone()))?;
 
-            if let Some(second_round) = coordinator_session.second_round.take() {
-                let final_signature: [u8; 64] =
-                    second_round.finalize::<[u8; 64]>().map_err(|e| {
-                        MusigError::SigningError(format!("Finalization failed: {:?}", e))
-                    })?;
-
-                Ok(final_signature)
-            } else {
-                Err(MusigError::SessionNotReady(
-                    "Second round not initialized for coordinator".to_string(),
-                ))
-            }
-        }
-    }
-
-    pub fn can_aggregate_signatures(&self) -> bool {
-        let session_metadata = &self.session_metadata;
-
-        if session_metadata.has_adaptor_configs() {
-            // Check adaptor signature completion
-            for entry in &self.user_sessions {
-                let user_session = entry.1;
-
-                for adaptor_second_round in user_session.adaptor_second_rounds.values() {
-                    let holdouts_count = adaptor_second_round.holdouts().len();
-                    if holdouts_count > 0 {
-                        return false;
-                    }
-                }
-            }
-            true
-        } else {
-            // Check regular signature completion
-            for entry in &self.user_sessions {
-                let user_session = entry.1;
-
-                if let Some(second_round) = &user_session.second_round {
-                    let holdouts_count = second_round.holdouts().len();
-                    if holdouts_count > 0 {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-    }
-
-    pub fn aggregate_signatures(&mut self) -> Result<FinalizedData, MusigError> {
-        let session_metadata = &self.session_metadata;
-
-        if session_metadata.has_adaptor_configs() {
-            self.aggregate_adaptor_signatures()
-        } else {
-            self.aggregate_regular_signatures()
-        }
-    }
-
-    fn aggregate_regular_signatures(&mut self) -> Result<FinalizedData, MusigError> {
-        // Find any user with a complete second round for aggregation
-        for entry in self.user_sessions.iter_mut() {
-            let (user_id, user_session) = entry;
-
-            if let Some(second_round) = &mut user_session.second_round {
-                // Check if this round is ready for finalization
-                let holdouts_count = second_round.holdouts().len();
-                if holdouts_count == 0 {
-                    if let Some(second_round) = user_session.second_round.take() {
-                        let signature: [u8; 64] =
-                            second_round.finalize::<[u8; 64]>().map_err(|e| {
-                                MusigError::SigningError(format!(
-                                    "Aggregation failed for user {}: {:?}",
-                                    user_id, e
-                                ))
-                            })?;
-                        return Ok(FinalizedData::FinalSignature(signature.to_vec()));
-                    }
-                }
-            }
-        }
-
-        Err(MusigError::SessionNotReady(
-            "No complete signature rounds available for aggregation".to_string(),
-        ))
-    }
-
-    pub fn get_partial_signature_count(&self) -> usize {
-        let session_metadata = &self.session_metadata;
-
-        if session_metadata.has_adaptor_configs() {
-            // Count adaptor partial signatures
-            let mut total_count = 0;
-            for entry in &self.user_sessions {
-                let user_session = entry.1;
-
-                for adaptor_second_round in user_session.adaptor_second_rounds.values() {
-                    let holdouts_count = adaptor_second_round.holdouts().len();
-                    total_count += session_metadata.expected_participants.len() - holdouts_count;
-                }
-            }
-            total_count
-        } else {
-            // Count regular partial signatures
-            let mut total_count = 0;
-            for entry in &self.user_sessions {
-                let user_session = entry.1;
-
-                if let Some(second_round) = &user_session.second_round {
-                    let holdouts_count = second_round.holdouts().len();
-                    total_count += session_metadata.expected_participants.len() - holdouts_count;
-                }
-            }
-            total_count
-        }
-    }
-
-    pub fn get_adaptor_signature_completion_count(&self) -> BTreeMap<uuid::Uuid, usize> {
-        let session_metadata = &self.session_metadata;
-        let mut completion_counts = BTreeMap::new();
-
-        if session_metadata.has_adaptor_configs() {
-            for entry in &self.user_sessions {
-                let user_session = entry.1;
-
-                for (config_id, adaptor_second_round) in &user_session.adaptor_second_rounds {
-                    let holdouts_count = adaptor_second_round.holdouts().len();
-                    let completed_count =
-                        session_metadata.expected_participants.len() - holdouts_count;
-
-                    completion_counts.insert(*config_id, completed_count);
-                }
-            }
-        }
-
-        completion_counts
-    }
-
-    pub fn has_all_adaptor_signatures(&self) -> bool {
-        let session_metadata = &self.session_metadata;
-
-        if !session_metadata.has_adaptor_configs() {
-            return true; // No adaptor signatures needed
-        }
-
-        for entry in &self.user_sessions {
-            let user_session = entry.1;
-
-            for adaptor_second_round in user_session.adaptor_second_rounds.values() {
-                let holdouts_count = adaptor_second_round.holdouts().len();
-                if holdouts_count > 0 {
+            // Check regular batch second rounds
+            for second_round in user_session.batch_second_rounds.values() {
+                if !second_round.holdouts().is_empty() {
                     return false;
+                }
+            }
+
+            // Check adaptor batch second rounds
+            for adaptor_rounds in user_session.batch_adaptor_second_rounds.values() {
+                for second_round in adaptor_rounds.values() {
+                    if !second_round.holdouts().is_empty() {
+                        return false;
+                    }
                 }
             }
         }
@@ -350,203 +537,22 @@ impl MusigProcessor {
         true
     }
 
-    pub fn get_user_partial_signature(&self, user_id: &UserId) -> Result<Vec<u8>, MusigError> {
-        let user_session = self
-            .user_sessions
-            .get(user_id)
-            .ok_or_else(|| MusigError::UserNotFound(user_id.clone()))?;
-
-        if let Some(second_round) = &user_session.second_round {
-            // Get the actual partial signature from the second round
-            let partial_sig: PartialSignature = second_round.our_signature();
-            Ok(partial_sig.serialize().to_vec())
-        } else {
-            Err(MusigError::SessionNotReady(
-                "Second round not initialized".to_string(),
-            ))
-        }
-    }
-
-    pub fn get_user_adaptor_signatures(
-        &self,
-        user_id: &UserId,
-    ) -> Result<Vec<(uuid::Uuid, Vec<u8>)>, MusigError> {
-        let user_session = self
-            .user_sessions
-            .get(user_id)
-            .ok_or_else(|| MusigError::UserNotFound(user_id.clone()))?;
-
-        let mut signatures = Vec::new();
-
-        for (config_id, adaptor_second_round) in &user_session.adaptor_second_rounds {
-            // Get the actual adaptor signature from the second round
-            let partial_sig: PartialSignature = adaptor_second_round.our_signature();
-            signatures.push((*config_id, partial_sig.serialize().to_vec()));
-        }
-
-        Ok(signatures)
-    }
-
-    pub fn user_has_all_adaptor_signatures(&self, user_id: &UserId) -> bool {
-        if let Some(user_session) = self.user_sessions.get(user_id) {
-            !user_session.adaptor_second_rounds.is_empty()
-        } else {
-            false
-        }
-    }
-
-    pub fn get_session_partial_signatures(&self) -> BTreeMap<UserId, Vec<u8>> {
-        let mut signatures = BTreeMap::new();
-
-        for (user_id, user_session) in &self.user_sessions {
-            if let Some(second_round) = &user_session.second_round {
-                // Get the actual partial signature
-                let partial_sig: PartialSignature = second_round.our_signature();
-                signatures.insert(user_id.clone(), partial_sig.serialize().to_vec());
+    /// Get the count of batch items that have finalized signatures
+    pub fn get_batch_signature_count(&self) -> usize {
+        let mut count = 0;
+        for user_session in self.user_sessions.values() {
+            if user_session.private_key.is_some() {
+                count = count.max(user_session.batch_second_rounds.len());
+                count = count.max(user_session.batch_adaptor_second_rounds.len());
             }
         }
-
-        signatures
+        count
     }
+}
 
-    fn sign_adaptor_for_user(
-        &self,
-        user_id: &UserId,
-        _private_key: &KeyMaterial,
-    ) -> Result<AdaptorSignatureResult, MusigError> {
-        let session_meta = self.get_session_metadata();
-
-        info!(
-            "sign_adaptor_for_user called for user {} in session {} (phase: {:?})",
-            user_id, session_meta.session_id, session_meta.phase
-        );
-
-        let user_session = self
-            .user_sessions
-            .get(user_id)
-            .ok_or_else(|| MusigError::UserNotFound(user_id.clone()))?;
-
-        let mut results = Vec::new();
-
-        for config in &session_meta.adaptor_configs {
-            if let Some(adaptor_second_round) =
-                user_session.adaptor_second_rounds.get(&config.adaptor_id)
-            {
-                // Get the actual adaptor signature and nonce from the second round
-                let partial_sig: PartialSignature = adaptor_second_round.our_signature();
-                let aggregated_nonce = adaptor_second_round.aggregated_nonce();
-                results.push((
-                    config.adaptor_id,
-                    partial_sig.serialize().to_vec(),
-                    aggregated_nonce.serialize().to_vec(),
-                ));
-            }
-        }
-
-        if results.is_empty() {
-            Err(MusigError::SessionNotReady(
-                "No adaptor second rounds initialized".to_string(),
-            ))
-        } else {
-            Ok(results)
-        }
-    }
-
-    fn aggregate_adaptor_signatures(&mut self) -> Result<FinalizedData, MusigError> {
-        // We need to finalize ALL adaptor configs, not just the first one
-        let adaptor_configs = self.session_metadata.adaptor_configs.clone();
-
-        // Find any user session that has adaptor_second_rounds (coordinator's session)
-        let user_id_with_rounds = self
-            .user_sessions
-            .iter()
-            .find(|(_, session)| !session.adaptor_second_rounds.is_empty())
-            .map(|(user_id, _)| user_id.clone());
-
-        let Some(user_id) = user_id_with_rounds else {
-            return Err(MusigError::SessionNotReady(
-                "No user session with adaptor second rounds found".to_string(),
-            ));
-        };
-
-        // First pass: finalize all rounds and collect results (without storing yet)
-        // Tuple: (config_id, signature_bytes, config_index, nonce_bytes)
-        let mut pending_results: Vec<(uuid::Uuid, Vec<u8>, usize, Vec<u8>)> = Vec::new();
-
-        {
-            let user_session = self
-                .user_sessions
-                .get_mut(&user_id)
-                .ok_or_else(|| MusigError::SessionNotReady("User session not found".to_string()))?;
-
-            for (idx, adaptor_config) in adaptor_configs.iter().enumerate() {
-                let config_id = adaptor_config.adaptor_id;
-
-                // Check if this config's round is ready
-                let round_ready = user_session
-                    .adaptor_second_rounds
-                    .get(&config_id)
-                    .map(|round| round.holdouts().is_empty())
-                    .unwrap_or(false);
-
-                if !round_ready {
-                    return Err(MusigError::SessionNotReady(format!(
-                        "Adaptor second round for config {} is not ready",
-                        config_id
-                    )));
-                }
-
-                // Remove and finalize the round
-                if let Some(adaptor_second_round) =
-                    user_session.adaptor_second_rounds.remove(&config_id)
-                {
-                    // Get the aggregated nonce BEFORE finalize_adaptor consumes the round
-                    let aggregated_nonce = adaptor_second_round.aggregated_nonce();
-                    let nonce_bytes = aggregated_nonce.serialize().to_vec();
-
-                    let adaptor_signature = adaptor_second_round
-                        .finalize_adaptor::<musig2::AdaptorSignature>()
-                        .map_err(|e| {
-                            MusigError::SigningError(format!(
-                                "Adaptor aggregation failed for config {}: {:?}",
-                                config_id, e
-                            ))
-                        })?;
-
-                    let serialized = adaptor_signature.to_bytes().to_vec();
-
-                    info!(
-                        "Finalized adaptor signature for config {} ({} bytes)",
-                        config_id,
-                        serialized.len()
-                    );
-
-                    pending_results.push((config_id, serialized, idx, nonce_bytes));
-                }
-            }
-        }
-
-        if pending_results.is_empty() {
-            return Err(MusigError::SessionNotReady(
-                "No adaptor signatures were finalized".to_string(),
-            ));
-        }
-
-        // Second pass: store all results in session metadata
-        let mut all_results: Vec<(uuid::Uuid, Vec<u8>)> = Vec::new();
-        for (config_id, serialized, idx, nonce_bytes) in pending_results {
-            let adaptor_config = &adaptor_configs[idx];
-            self.store_adaptor_signature_result(
-                config_id,
-                serialized.clone(),
-                adaptor_config,
-                Some(nonce_bytes),
-            )?;
-            all_results.push((config_id, serialized));
-        }
-
-        info!("Finalized {} adaptor signatures", all_results.len());
-
-        Ok(FinalizedData::AdaptorSignatures(all_results))
-    }
+/// Data for batch partial signatures - can be regular or adaptor
+#[derive(Debug, Clone)]
+pub enum BatchPartialSigData {
+    Regular { signature: Vec<u8>, nonce: Vec<u8> },
+    Adaptor(Vec<(Uuid, Vec<u8>, Vec<u8>)>), // Vec of (adaptor_id, sig_bytes, nonce_bytes)
 }

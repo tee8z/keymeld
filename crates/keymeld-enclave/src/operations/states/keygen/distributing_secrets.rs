@@ -316,6 +316,18 @@ impl DistributingSecrets {
                 "Failed to create key aggregation context: {e}"
             ))));
         }
+
+        // Compute subset aggregates after main key aggregation
+        if let Err(e) = self.musig_processor.compute_subset_aggregates() {
+            error!(
+                "Failed to compute subset aggregates for session {}: {}",
+                self.session_id, e
+            );
+            return Err(EnclaveError::Crypto(CryptoError::Other(format!(
+                "Failed to compute subset aggregates: {e}"
+            ))));
+        }
+
         Ok(())
     }
 

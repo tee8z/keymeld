@@ -10,12 +10,14 @@ use keymeld_core::{
         InitKeygenSessionCommand, InitSigningSessionCommand, InternalError, KeygenCommand,
         KeygenInitializedResponse, KeygenOutcome, MusigCommand, MusigOutcome, NonceError,
         NoncesResponse, Outcome, PartialSignatureResponse, ParticipantsAddedBatchResponse,
-        PublicInfoResponse, SessionError, SigningCommand, SigningOutcome, SystemCommand,
-        SystemOutcome,
+        PublicInfoResponse, SessionError, SignatureData, SigningCommand, SigningOutcome,
+        SystemCommand, SystemOutcome,
     },
 };
+use uuid::Uuid;
 
 use std::{
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{
@@ -343,11 +345,34 @@ impl EnclaveOperator {
                     )))
                 })?;
 
+                // Encrypt subset aggregate public keys
+                let mut encrypted_subset_aggregates = BTreeMap::new();
+                for (subset_id, pubkey_bytes) in &keygen_data.subset_aggregate_keys {
+                    let encrypted = session_secret
+                        .encrypt(pubkey_bytes, "subset_aggregate_public_key")
+                        .map_err(|e| {
+                            EnclaveError::Internal(InternalError::Other(format!(
+                                "Failed to encrypt subset {} aggregate public key: {}",
+                                subset_id, e
+                            )))
+                        })?;
+
+                    let encrypted_hex = encrypted.to_hex().map_err(|e| {
+                        EnclaveError::Internal(InternalError::Other(format!(
+                            "Failed to encode encrypted subset {} aggregate public key: {}",
+                            subset_id, e
+                        )))
+                    })?;
+
+                    encrypted_subset_aggregates.insert(*subset_id, encrypted_hex);
+                }
+
                 Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
                     KeygenOutcome::AggregatePublicKey(AggregatePublicKeyResponse {
                         keygen_session_id: session.session_id().to_owned(),
                         encrypted_aggregate_public_key,
                         participant_count: keygen_data.participants.len(),
+                        encrypted_subset_aggregates,
                     }),
                 )))
             }
@@ -431,11 +456,34 @@ impl EnclaveOperator {
                             )))
                         })?;
 
+                        // Encrypt subset aggregate public keys
+                        let mut encrypted_subset_aggregates = BTreeMap::new();
+                        for (subset_id, pubkey_bytes) in &keygen_data.subset_aggregate_keys {
+                            let encrypted = session_secret
+                                .encrypt(pubkey_bytes, "subset_aggregate_public_key")
+                                .map_err(|e| {
+                                    EnclaveError::Internal(InternalError::Other(format!(
+                                        "Failed to encrypt subset {} aggregate public key: {}",
+                                        subset_id, e
+                                    )))
+                                })?;
+
+                            let encrypted_hex = encrypted.to_hex().map_err(|e| {
+                                EnclaveError::Internal(InternalError::Other(format!(
+                                    "Failed to encode encrypted subset {} aggregate public key: {}",
+                                    subset_id, e
+                                )))
+                            })?;
+
+                            encrypted_subset_aggregates.insert(*subset_id, encrypted_hex);
+                        }
+
                         Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
                             KeygenOutcome::AggregatePublicKey(AggregatePublicKeyResponse {
                                 keygen_session_id: session.session_id().to_owned(),
                                 encrypted_aggregate_public_key,
                                 participant_count: keygen_data.participants.len(),
+                                encrypted_subset_aggregates,
                             }),
                         )))
                     }
@@ -840,14 +888,25 @@ impl EnclaveOperator {
                 // Extract nonces for all user_ids in the command
                 let mut nonces = Vec::new();
                 for user_id in &cmd.user_ids {
-                    // Use get_user_nonce_data which handles both regular and adaptor nonces
-                    let nonce_data =
+                    // Get batch nonce data for this user
+                    let batch_nonce_data =
                         state
-                            .get_user_nonce_data(user_id)
+                            .get_user_batch_nonce_data(user_id)
                             .ok_or(EnclaveError::Nonce(NonceError::GenerationFailed {
                                 user_id: user_id.clone(),
-                                error: "Nonce not found".to_string(),
+                                error: "Batch nonce not found".to_string(),
                             }))?;
+
+                    // Wrap in NonceData::Batch for protocol compatibility (boxing the values)
+                    let boxed_batch_nonce_data: BTreeMap<
+                        Uuid,
+                        Box<keymeld_core::protocol::NonceData>,
+                    > = batch_nonce_data
+                        .into_iter()
+                        .map(|(k, v)| (k, Box::new(v)))
+                        .collect();
+                    let nonce_data =
+                        keymeld_core::protocol::NonceData::Batch(boxed_batch_nonce_data);
 
                     // Encrypt the nonce data (already in correct NonceData format)
                     let encrypted_nonce = session_secret
@@ -918,70 +977,61 @@ impl EnclaveOperator {
                     )));
                 }
 
-                // Check if we have adaptor configs for adaptor signatures
-                let adaptor_configs = &state
-                    .musig_processor()
-                    .get_session_metadata_public()
-                    .adaptor_configs;
-
                 let mut partial_signatures = Vec::new();
 
-                // Process each user on this enclave
+                // Process each user on this enclave (batch-only mode)
                 for user_id in &users_in_session {
-                    let signature_data = if adaptor_configs.is_empty() {
-                        // Regular signature - get directly from musig processor
-                        let sig_bytes = state
-                            .musig_processor()
-                            .get_user_partial_signature(user_id)
-                            .map_err(|e| {
-                                EnclaveError::Internal(InternalError::Other(format!(
-                                    "Failed to get partial signature for user {}: {}",
-                                    user_id, e
-                                )))
-                            })?;
+                    // Get batch partial signatures for this user
+                    let batch_sigs = state
+                        .musig_processor()
+                        .get_user_batch_partial_signatures(user_id)
+                        .map_err(|e| {
+                            EnclaveError::Internal(InternalError::Other(format!(
+                                "Failed to get batch partial signatures for user {}: {}",
+                                user_id, e
+                            )))
+                        })?;
 
-                        let partial_sig = musig2::PartialSignature::from_slice(&sig_bytes)
-                            .map_err(|e| {
-                                EnclaveError::Internal(InternalError::Other(format!(
-                                    "Failed to deserialize partial signature: {:?}",
-                                    e
-                                )))
-                            })?;
+                    // Convert to SignatureData::Batch
+                    let batch_sig_map: BTreeMap<Uuid, Box<SignatureData>> = batch_sigs
+                        .into_iter()
+                        .map(|(batch_item_id, sig_data)| {
+                            let sig = match sig_data {
+                                crate::musig::signatures::BatchPartialSigData::Regular {
+                                    signature,
+                                    ..
+                                } => {
+                                    let partial_sig =
+                                        musig2::PartialSignature::from_slice(&signature)
+                                            .expect("Invalid partial signature");
+                                    keymeld_core::protocol::SignatureData::Regular(partial_sig)
+                                }
+                                crate::musig::signatures::BatchPartialSigData::Adaptor(
+                                    adaptor_sigs,
+                                ) => {
+                                    let adaptor_signatures: Vec<(Uuid, musig2::PartialSignature)> =
+                                        adaptor_sigs
+                                            .into_iter()
+                                            .map(|(adaptor_id, sig_bytes, _)| {
+                                                let partial_sig =
+                                                    musig2::PartialSignature::from_slice(
+                                                        &sig_bytes,
+                                                    )
+                                                    .expect("Invalid adaptor partial signature");
+                                                (adaptor_id, partial_sig)
+                                            })
+                                            .collect();
+                                    keymeld_core::protocol::SignatureData::Adaptor(
+                                        adaptor_signatures,
+                                    )
+                                }
+                            };
+                            (batch_item_id, Box::new(sig))
+                        })
+                        .collect();
 
-                        keymeld_core::protocol::SignatureData::Regular(partial_sig)
-                    } else {
-                        // Adaptor signatures - get directly from musig processor
-                        let adaptor_sig_bytes = state
-                            .musig_processor()
-                            .get_user_adaptor_signatures(user_id)
-                            .map_err(|e| {
-                                EnclaveError::Internal(InternalError::Other(format!(
-                                    "Failed to get adaptor signatures for user {}: {}",
-                                    user_id, e
-                                )))
-                            })?;
-
-                        if adaptor_sig_bytes.is_empty() {
-                            return Err(EnclaveError::Internal(InternalError::Other(format!(
-                                "No adaptor partial signatures available for user {}",
-                                user_id
-                            ))));
-                        }
-
-                        let mut adaptor_signatures = Vec::new();
-                        for (config_id, sig_bytes) in adaptor_sig_bytes {
-                            let partial_sig = musig2::PartialSignature::from_slice(&sig_bytes)
-                                .map_err(|e| {
-                                    EnclaveError::Internal(InternalError::Other(format!(
-                                        "Failed to deserialize adaptor partial signature: {:?}",
-                                        e
-                                    )))
-                                })?;
-                            adaptor_signatures.push((config_id, partial_sig));
-                        }
-
-                        keymeld_core::protocol::SignatureData::Adaptor(adaptor_signatures)
-                    };
+                    let signature_data =
+                        keymeld_core::protocol::SignatureData::Batch(batch_sig_map);
 
                     // Encrypt the signature data
                     let encrypted_sig = session_secret
@@ -1075,9 +1125,78 @@ impl EnclaveOperator {
                     .clone();
 
                 // Build batch results from batch_items or create a single result
-                let batch_results = if batch_items.is_empty() {
+                let batch_results = if state.is_batch() {
+                    // Batch mode: use the per-batch-item encrypted signatures from Completed state
+                    let mut results = Vec::new();
+
+                    // Get regular batch signatures
+                    for (batch_item_id, encrypted_sig) in state.encrypted_batch_signatures() {
+                        let encrypted_sig_hex = encrypted_sig.to_hex().map_err(|e| {
+                            EnclaveError::Internal(InternalError::Other(format!(
+                                "Failed to encode batch signature for {}: {}",
+                                batch_item_id, e
+                            )))
+                        })?;
+
+                        // Check if there's an adaptor signature for this batch item
+                        let adaptor_sig_hex = state
+                            .encrypted_batch_adaptor_signatures()
+                            .get(batch_item_id)
+                            .map(|enc| {
+                                enc.to_hex().map_err(|e| {
+                                    EnclaveError::Internal(InternalError::Other(format!(
+                                        "Failed to encode batch adaptor signature for {}: {}",
+                                        batch_item_id, e
+                                    )))
+                                })
+                            })
+                            .transpose()?;
+
+                        results.push(keymeld_core::protocol::EnclaveBatchResult {
+                            batch_item_id: *batch_item_id,
+                            encrypted_final_signature: Some(encrypted_sig_hex),
+                            encrypted_adaptor_signatures: adaptor_sig_hex,
+                            error: None,
+                        });
+                    }
+
+                    // Add any adaptor-only batch items (items with only adaptor signatures)
+                    for (batch_item_id, encrypted_adaptor) in
+                        state.encrypted_batch_adaptor_signatures()
+                    {
+                        // Skip if we already added this batch item from regular signatures
+                        if state
+                            .encrypted_batch_signatures()
+                            .contains_key(batch_item_id)
+                        {
+                            continue;
+                        }
+
+                        let adaptor_sig_hex = encrypted_adaptor.to_hex().map_err(|e| {
+                            EnclaveError::Internal(InternalError::Other(format!(
+                                "Failed to encode batch adaptor signature for {}: {}",
+                                batch_item_id, e
+                            )))
+                        })?;
+
+                        results.push(keymeld_core::protocol::EnclaveBatchResult {
+                            batch_item_id: *batch_item_id,
+                            encrypted_final_signature: None,
+                            encrypted_adaptor_signatures: Some(adaptor_sig_hex),
+                            error: None,
+                        });
+                    }
+
+                    info!(
+                        "Built {} batch results for signing session {}",
+                        results.len(),
+                        signing_session_id
+                    );
+
+                    results
+                } else if batch_items.is_empty() {
                     // Single message mode: create a batch of 1 using UUIDv7
-                    let batch_item_id = uuid::Uuid::now_v7();
+                    let batch_item_id = Uuid::now_v7();
                     vec![keymeld_core::protocol::EnclaveBatchResult {
                         batch_item_id,
                         encrypted_final_signature: Some(encrypted_final_signature),
@@ -1085,9 +1204,8 @@ impl EnclaveOperator {
                         error: None,
                     }]
                 } else {
-                    // Batch mode: create results for each batch item
-                    // For now, since we only support single message, this path won't be hit
-                    // Full batch implementation would iterate over batch_items here
+                    // Legacy batch mode (shouldn't be reached with new implementation)
+                    // Fall back to single signature for all items
                     batch_items
                         .keys()
                         .map(|batch_item_id| keymeld_core::protocol::EnclaveBatchResult {

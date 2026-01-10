@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+
+use uuid::Uuid;
+
 use crate::{
     crypto::SecureCrypto,
     protocol::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType},
@@ -309,9 +313,9 @@ pub fn validate_decrypted_adaptor_configs(configs: &[AdaptorConfig]) -> Result<(
 pub fn decrypt_adaptor_signatures_with_secret(
     encrypted_signatures_hex: &str,
     session_secret: &str,
-) -> Result<std::collections::BTreeMap<uuid::Uuid, AdaptorSignatureResult>, KeyMeldError> {
+) -> Result<BTreeMap<Uuid, AdaptorSignatureResult>, KeyMeldError> {
     if encrypted_signatures_hex.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(BTreeMap::new());
     }
 
     let encrypted_data = EncryptedData::from_hex(encrypted_signatures_hex)?;
