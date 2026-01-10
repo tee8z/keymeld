@@ -63,7 +63,14 @@ else
 fi
 
 echo "🚀 Starting services..."
-./scripts/start-services.sh > /dev/null 2>&1
+if ! ./scripts/start-services.sh; then
+    echo "❌ Failed to start services"
+    echo "Gateway logs:"
+    tail -50 logs/gateway.log 2>/dev/null || echo "No gateway log"
+    echo "Enclave 0 logs:"
+    tail -50 logs/enclave-0.log 2>/dev/null || echo "No enclave-0 log"
+    exit 1
+fi
 sleep 3
 
 # Wait for gateway to be ready
@@ -79,11 +86,11 @@ for i in {1..30}; do
         echo "Gateway process status:"
         pgrep -f keymeld-gateway || echo "No gateway process found"
         echo "Port 8080 status:"
-        netstat -tlnp | grep :8080 || echo "Nothing listening on port 8080"
-        if [ -f logs/gateway.log ]; then
-            echo "Gateway logs:"
-            tail -20 logs/gateway.log
-        fi
+        ss -tlnp | grep :8080 || netstat -tlnp 2>/dev/null | grep :8080 || echo "Nothing listening on port 8080"
+        echo "Gateway logs:"
+        tail -50 logs/gateway.log 2>/dev/null || echo "No gateway log"
+        echo "Enclave 0 logs:"
+        tail -30 logs/enclave-0.log 2>/dev/null || echo "No enclave-0 log"
         exit 1
     fi
     sleep 1
