@@ -22,6 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
@@ -51,6 +60,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-nix-cargo-build-
+          save-always: false
 
       - name: Build project
         run: nix develop -c cargo build --workspace --locked
