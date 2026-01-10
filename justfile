@@ -24,6 +24,7 @@ help:
     @echo "  demo [amount] [dest] Run MuSig2 demo with optional params"
     @echo "  demo-adaptors       Run adaptor signatures demo"
     @echo "  test-batch-signing  Run batch signing E2E test"
+    @echo "  test-dlctix-batch   Run DLC batch signing E2E test"
     @echo "  test-single-signer  Run single-signer E2E test"
     @echo "  test-kms-e2e        Run KMS end-to-end tests with restart"
     @echo "  mine <blocks>       Mine Bitcoin regtest blocks"
@@ -348,6 +349,47 @@ test-batch-signing:
         cargo run --bin keymeld_demo -- batch-signing --config config/example-nix.yaml
     else
         nix develop -c cargo run --bin keymeld_demo -- batch-signing --config config/example-nix.yaml
+    fi
+
+# Run DLC batch signing E2E test
+test-dlctix-batch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🎲 Running DLC Batch Signing E2E Test..."
+
+    # Clean and setup
+    ./scripts/clean.sh
+
+    # Build unless SKIP_BUILD is set and all binaries exist
+    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+        echo "🔨 Building KeyMeld..."
+        if [ -n "${IN_NIX_SHELL:-}" ]; then
+            cargo build
+        else
+            nix develop -c cargo build
+        fi
+    else
+        echo "Using pre-built binaries (SKIP_BUILD=1)"
+    fi
+
+    # Setup regtest and start services
+    echo "🚀 Starting services..."
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        ./scripts/setup-regtest.sh
+        ./scripts/start-services.sh
+    else
+        nix develop -c ./scripts/setup-regtest.sh
+        nix develop -c ./scripts/start-services.sh
+    fi
+
+    # Run the DLC batch signing test
+    echo "🎲 Running DLC batch signing E2E test..."
+    if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
+        ./target/debug/keymeld_demo dlctix-batch --config config/example-nix.yaml
+    elif [ -n "${IN_NIX_SHELL:-}" ]; then
+        cargo run --bin keymeld_demo -- dlctix-batch --config config/example-nix.yaml
+    else
+        nix develop -c cargo run --bin keymeld_demo -- dlctix-batch --config config/example-nix.yaml
     fi
 
 # Run single-signer E2E test
