@@ -220,7 +220,7 @@ async fn run_adaptor_signatures_test(
     // Validate: Before approving, verify the message matches what we expect to sign
     info!(
         "🔍 Validating message before approval: {}",
-        hex::encode(&expected_message)
+        hex::encode(expected_message)
     );
 
     // Approve using SDK
@@ -295,8 +295,8 @@ async fn run_adaptor_signatures_test(
         if verified_message != expected_message {
             return Err(anyhow!(
                 "Message mismatch! Expected {} but got {}",
-                hex::encode(&expected_message),
-                hex::encode(&verified_message)
+                hex::encode(expected_message),
+                hex::encode(verified_message)
             ));
         }
         info!("✅ Message verified before broadcast");

@@ -295,13 +295,13 @@ async fn run_psbt_transaction_test(
         .map_err(|e| anyhow!("Failed to calculate sighash: {}", e))?;
 
     let sighash_bytes: [u8; 32] = sighash.to_byte_array();
-    info!("  Sighash: {}", hex::encode(&sighash_bytes));
+    info!("  Sighash: {}", hex::encode(sighash_bytes));
 
     // Validate: Store the expected message before signing
     let expected_message = sighash_bytes;
     info!(
         "  Validating message before signing: {}",
-        hex::encode(&expected_message)
+        hex::encode(expected_message)
     );
 
     // Sign using the SDK
@@ -323,8 +323,8 @@ async fn run_psbt_transaction_test(
     if verified_message != expected_message {
         return Err(anyhow!(
             "Message mismatch! Expected {} but got {}",
-            hex::encode(&expected_message),
-            hex::encode(&verified_message)
+            hex::encode(expected_message),
+            hex::encode(verified_message)
         ));
     }
     info!("  Message verified before broadcast");
