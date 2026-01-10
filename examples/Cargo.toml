@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "keymeld_demo"
 path = "src/main.rs"
 
+[[bin]]
+name = "keymeld_session_test"
+path = "src/session_restore_test_main.rs"
+
 
 
 
