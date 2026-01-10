@@ -2445,7 +2445,7 @@ impl KeyMeldE2ETest {
         // Store session secret
         let seed = keygen_session.export_session_secret();
         self.session_secrets
-            .insert(session_id.clone(), hex::encode(&seed));
+            .insert(session_id.clone(), hex::encode(seed));
 
         // Register coordinator
         info!("👤 Registering coordinator...");
