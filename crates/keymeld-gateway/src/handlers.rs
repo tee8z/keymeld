@@ -1881,7 +1881,7 @@ mod tests {
             validate_decrypted_adaptor_configs,
         },
         AdaptorConfig, AdaptorHint, AdaptorType, CreateSigningSessionRequest, SessionId,
-        SigningBatchItem,
+        SigningBatchItem, SigningMode,
     };
     use uuid::Uuid;
 
@@ -1914,8 +1914,10 @@ mod tests {
         let batch_item = SigningBatchItem {
             batch_item_id: uuid::Uuid::now_v7(),
             message_hash: vec![0u8; 32],
-            encrypted_message: Some("test_message".to_string()),
-            encrypted_adaptor_configs: Some(mock_encrypted_hex.clone()),
+            signing_mode: SigningMode::Adaptor {
+                encrypted_message: "test_message".to_string(),
+                encrypted_adaptor_configs: mock_encrypted_hex.clone(),
+            },
             encrypted_taproot_tweak: "test_tweak".to_string(),
             subset_id: None,
         };
@@ -1935,12 +1937,13 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_encrypted_adaptor_configs_default() {
+    fn test_regular_signing_mode() {
         let batch_item = SigningBatchItem {
             batch_item_id: uuid::Uuid::now_v7(),
             message_hash: vec![0u8; 32],
-            encrypted_message: None,
-            encrypted_adaptor_configs: None,
+            signing_mode: SigningMode::Regular {
+                encrypted_message: "test_message".to_string(),
+            },
             encrypted_taproot_tweak: "test_tweak".to_string(),
             subset_id: None,
         };
@@ -1952,13 +1955,18 @@ mod tests {
             batch_items: vec![batch_item],
         };
 
-        assert!(request.batch_items[0].encrypted_adaptor_configs.is_none());
+        // Regular mode should not have adaptor configs
+        assert!(request.batch_items[0]
+            .signing_mode
+            .encrypted_adaptor_configs()
+            .is_none());
 
         let json = serde_json::to_string(&request).expect("Should serialize");
         let deserialized: CreateSigningSessionRequest =
             serde_json::from_str(&json).expect("Should deserialize");
         assert!(deserialized.batch_items[0]
-            .encrypted_adaptor_configs
+            .signing_mode
+            .encrypted_adaptor_configs()
             .is_none());
     }
 

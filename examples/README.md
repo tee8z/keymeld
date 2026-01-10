@@ -10,6 +10,12 @@ just quickstart
 
 # Adaptor signatures
 just quickstart-adaptors
+
+# Batch signing
+just test-batch-signing
+
+# DLC batch signing with subset keys
+just test-dlctix-batch
 ```
 
 ## Examples
@@ -22,16 +28,41 @@ Complete 2-phase workflow: keygen + signing with taproot integration.
 just demo 50000 bcrt1q...  # amount and destination
 ```
 
-### Adaptor Signatures (`keymeld_adaptor_test`)
+### Adaptor Signatures (`keymeld_adaptor`)
 
 All adaptor types: Single, And, Or.
 
 ```bash
-just demo-adaptors              # All types
-just demo-adaptors-single       # Single only
-just demo-adaptors-and          # And logic
-just demo-adaptors-or           # Or logic
+just demo-adaptors  # All types
 ```
+
+### Batch Signing (`batch_signing`)
+
+Sign multiple messages in a single session with per-item configuration.
+
+```bash
+just test-batch-signing
+```
+
+### DLC Batch Signing (`dlctix_batch`)
+
+Complete DLC workflow demonstrating:
+- **Subset definitions per outcome**: market_maker + ALL winners for that outcome
+- **Weighted payouts**: Multiple winners per outcome with proportional splits
+- **Mixed batch signing**: Outcome txs (n-of-n with adaptors) + split txs (k-of-k subsets)
+- **Oracle attestation**: Secret recovery from adaptor signatures
+- **Full payout flow**: Fund → outcome tx → split txs (one per winner)
+
+```bash
+just test-dlctix-batch
+```
+
+Key features:
+- 3 players + 1 market maker (4-of-4 for outcome transactions)
+- 3 outcomes with weighted payouts (60/40, 50/50, 50/30/20 splits)
+- 7 split transactions total (2+2+3 winners across outcomes)
+- Per-outcome subset keys for split transactions (k-of-k where k = winners + market_maker)
+- Single batch signing session for all 10 transactions
 
 ## Workflow
 
@@ -41,9 +72,11 @@ just demo-adaptors-or           # Or logic
 4. **Signing**: Create session, wait for approvals (if required), get signature
 5. **Broadcast**: Apply signature to PSBT, broadcast transaction
 
-## Why Single-Input Transactions?
+## Transaction Patterns
 
-In practice, MuSig2 transactions typically follow a **two-transaction pattern**:
+### Single-Input Pattern
+
+MuSig2 transactions typically follow a **two-transaction pattern**:
 
 ```
 ┌─────────────────────────────────────┐    ┌──────────────────────────────────┐
@@ -58,14 +91,55 @@ In practice, MuSig2 transactions typically follow a **two-transaction pattern**:
 └─────────────────────────────────────┘    └──────────────────────────────────┘
 ```
 
-**Step 1**: Consolidate multiple UTXOs into a single output using regular Bitcoin signatures  
-**Step 2**: Spend that single output using MuSig2 for the coordinated transaction
-
 Benefits:
 - One signing ceremony instead of one per input
 - Lower coordination overhead
 - Cleaner transaction structure
-- Matches real use cases (treasury, channels, escrow)
+
+### DLC Pattern with Subsets
+
+For DLCs, use subset signing for efficient 2-of-n payouts:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Funding TX                                   │
+│  Output: n-of-n aggregate key (all players + market maker)          │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+   │   Outcome TX 0   │  │   Outcome TX 1   │  │   Outcome TX 2   │
+   │ (n-of-n adaptor) │  │ (n-of-n adaptor) │  │ (n-of-n adaptor) │
+   │  locked to oracle│  │  locked to oracle│  │  locked to oracle│
+   └──────────────────┘  └──────────────────┘  └──────────────────┘
+              │                     │                     │
+              ▼                     ▼                     ▼
+   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+   │    Split TX 0    │  │    Split TX 1    │  │    Split TX 2    │
+   │ outputs per win- │  │ outputs per win- │  │ outputs per win- │
+   │ ning player with │  │ ning player with │  │ ning player with │
+   │ weighted payouts │  │ weighted payouts │  │ weighted payouts │
+   └──────────────────┘  └──────────────────┘  └──────────────────┘
+              │                     │                     │
+    ┌─────────┴─────────┐          ...                   ...
+    ▼                   ▼
+┌────────┐         ┌────────┐
+│Player A│         │Player B│   Each winning player has their own
+│ output │         │ output │   2-of-2 (player + MM) spending path
+│(2-of-2)│         │(2-of-2)│   with weight-proportional payout
+└────────┘         └────────┘
+```
+
+Each `WinCondition` = (outcome, player_index) gets its own subset signature.
+When multiple players win an outcome with weighted payouts, each gets a separate
+output in the split transaction, each requiring a 2-of-2 signature with the market maker.
+
+Benefits:
+- Batch sign all transactions in one session
+- Subset keys for efficient 2-of-2 split payouts
+- Oracle attestation unlocks winning outcome
+- Weighted payouts via multiple outputs per split tx
 
 ## Configuration
 

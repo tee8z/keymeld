@@ -7,7 +7,8 @@
 //! - Outcome transactions: Use full n-of-n aggregate key with adaptor signatures
 //! - Split transactions: Use 2-of-2 subset aggregate keys (winner + market_maker)
 //! - Subset definitions: Define player+market_maker pairs at keygen time
-//! - Happy path: Oracle attests, outcome tx broadcast, then split tx broadcast
+//! - Weighted payouts: Multiple winners per outcome with proportional payouts
+//! - Happy path: Oracle attests, outcome tx broadcast, then split txs for each winner
 
 use crate::{retry_bitcoin_rpc, ExampleConfig, KeyMeldE2ETest};
 use anyhow::{anyhow, Result};
@@ -27,7 +28,7 @@ use keymeld_sdk::{
         decrypt_adaptor_signatures_with_secret, decrypt_signature_with_secret,
         encrypt_adaptor_configs_for_client, encrypt_session_data,
     },
-    AdaptorConfig, AdaptorType, CreateSigningSessionRequest, SigningBatchItem,
+    AdaptorConfig, AdaptorType, CreateSigningSessionRequest, SigningBatchItem, SigningMode,
     SigningSessionStatusResponse, SigningStatusKind, SubsetDefinition, TaprootTweak,
 };
 use std::collections::BTreeMap;
@@ -38,7 +39,7 @@ use uuid::Uuid;
 
 const NUM_PLAYERS: usize = 3;
 const NUM_OUTCOMES: usize = 3;
-const FUNDING_AMOUNT_SATS: u64 = 200_000;
+const FUNDING_AMOUNT_SATS: u64 = 300_000; // Increased to support multiple winners per outcome
 
 pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     info!("DLC Batch Signing Example");
@@ -89,32 +90,42 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         NUM_PLAYERS + 1
     );
 
-    // Create subset definitions for each player + market_maker pair
-    // These will be used for split transaction signing (2-of-2)
+    // Create subset definitions for each OUTCOME (not per player!)
+    // Each outcome's split tx uses an aggregate key of: market_maker + ALL winners for that outcome
+    // This is critical: dlctix computes the split key from market_maker + winner pubkeys for the outcome
     let mut subset_definitions = Vec::new();
-    let mut player_subset_ids: BTreeMap<usize, Uuid> = BTreeMap::new();
+    let mut outcome_subset_ids: BTreeMap<OutcomeIndex, Uuid> = BTreeMap::new();
 
-    for (player_idx, _participant) in test.participants.iter().enumerate() {
+    // Define the winners for each outcome (must match outcome_payouts defined later)
+    let outcome_winners: Vec<(OutcomeIndex, Vec<usize>)> = vec![
+        (0, vec![0, 1]),    // Outcome 0: Player 0 + Player 1 win
+        (1, vec![1, 2]),    // Outcome 1: Player 1 + Player 2 win
+        (2, vec![0, 1, 2]), // Outcome 2: All players win
+    ];
+
+    for (outcome_idx, winner_indices) in &outcome_winners {
         let subset_id = Uuid::now_v7();
-        player_subset_ids.insert(player_idx, subset_id);
+        outcome_subset_ids.insert(*outcome_idx, subset_id);
 
-        // Subset includes: market_maker (coordinator) + this player
+        // Subset includes: market_maker (coordinator) + ALL winning players for this outcome
+        let mut participants = vec![test.coordinator_user_id.clone()]; // market_maker
+        for player_idx in winner_indices {
+            participants.push(test.participant_user_ids[*player_idx].clone());
+        }
+
         let subset_def = SubsetDefinition {
             subset_id,
-            participants: vec![
-                test.coordinator_user_id.clone(), // market_maker
-                test.participant_user_ids[player_idx].clone(),
-            ],
+            participants,
         };
         subset_definitions.push(subset_def);
         info!(
-            "  Subset {} for player {}: market_maker + player",
-            subset_id, player_idx
+            "  Subset {} for outcome {}: market_maker + players {:?}",
+            subset_id, outcome_idx, winner_indices
         );
     }
 
     info!(
-        "Created {} subset definitions for split transactions",
+        "Created {} subset definitions for split transactions (one per outcome)",
         subset_definitions.len()
     );
 
@@ -160,15 +171,30 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
 
     info!("Created {} players", players.len());
 
+    // Create outcome payouts with MULTIPLE winners per outcome using weighted payouts
+    // This demonstrates the most complex case: each outcome has 2+ winners splitting the pot
     let mut outcome_payouts = BTreeMap::new();
-    for i in 0..NUM_OUTCOMES {
-        let winner_index = i % NUM_PLAYERS;
-        outcome_payouts.insert(
-            Outcome::Attestation(i),
-            PayoutWeights::from([(winner_index, 1u64)]),
-        );
-        info!("  Outcome {}: Player {} wins", i, winner_index);
-    }
+
+    // Outcome 0: Player 0 gets 60%, Player 1 gets 40%
+    outcome_payouts.insert(
+        Outcome::Attestation(0),
+        PayoutWeights::from([(0usize, 3u64), (1usize, 2u64)]), // 3:2 ratio = 60:40
+    );
+    info!("  Outcome 0: Player 0 (60%) + Player 1 (40%)");
+
+    // Outcome 1: Player 1 gets 50%, Player 2 gets 50%
+    outcome_payouts.insert(
+        Outcome::Attestation(1),
+        PayoutWeights::from([(1usize, 1u64), (2usize, 1u64)]), // 1:1 ratio = 50:50
+    );
+    info!("  Outcome 1: Player 1 (50%) + Player 2 (50%)");
+
+    // Outcome 2: All three players win - Player 0 (50%), Player 1 (30%), Player 2 (20%)
+    outcome_payouts.insert(
+        Outcome::Attestation(2),
+        PayoutWeights::from([(0usize, 5u64), (1usize, 3u64), (2usize, 2u64)]), // 5:3:2 ratio
+    );
+    info!("  Outcome 2: Player 0 (50%) + Player 1 (30%) + Player 2 (20%)");
 
     let contract_params = ContractParameters {
         market_maker,
@@ -255,7 +281,13 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         let batch_item_id = Uuid::now_v7();
         let encrypted_message = encrypt_session_data(&hex::encode(sighash), session_secret)?;
 
-        let encrypted_adaptor_configs = match outcome {
+        // Outcome transactions use NO tweak - dlctix uses untweaked aggregate key
+        // (the key is marked as "dangerous_assume_tweaked" at the Bitcoin layer,
+        // but MuSig2 signing uses the raw aggregate key)
+        let encrypted_tweak =
+            encrypt_session_data(&serde_json::to_string(&TaprootTweak::None)?, session_secret)?;
+
+        let signing_mode = match outcome {
             Outcome::Attestation(idx) => {
                 outcome_batch_ids.insert(*idx, batch_item_id);
 
@@ -274,27 +306,23 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
                         hints: None,
                     };
 
-                    let encrypted =
+                    let encrypted_adaptor_configs =
                         encrypt_adaptor_configs_for_client(&[adaptor_config], session_secret)?;
-                    Some(encrypted)
+                    SigningMode::Adaptor {
+                        encrypted_message,
+                        encrypted_adaptor_configs,
+                    }
                 } else {
-                    None
+                    SigningMode::Regular { encrypted_message }
                 }
             }
-            Outcome::Expiry => None,
+            Outcome::Expiry => SigningMode::Regular { encrypted_message },
         };
-
-        // Outcome transactions use NO tweak - dlctix uses untweaked aggregate key
-        // (the key is marked as "dangerous_assume_tweaked" at the Bitcoin layer,
-        // but MuSig2 signing uses the raw aggregate key)
-        let encrypted_tweak =
-            encrypt_session_data(&serde_json::to_string(&TaprootTweak::None)?, session_secret)?;
 
         batch_items.push(SigningBatchItem {
             batch_item_id,
             message_hash: sighash.to_vec(),
-            encrypted_message: Some(encrypted_message),
-            encrypted_adaptor_configs,
+            signing_mode,
             encrypted_taproot_tweak: encrypted_tweak.clone(),
             subset_id: None, // Use full n-of-n aggregate key for outcome transactions
         });
@@ -304,7 +332,8 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         );
     }
 
-    // Add split transactions using subset aggregate keys (2-of-2: winner + market_maker)
+    // Add split transactions using subset aggregate keys
+    // Each split tx uses the outcome's subset (market_maker + ALL winners for that outcome)
     let mut split_batch_ids: BTreeMap<WinCondition, Uuid> = BTreeMap::new();
     let encrypted_tweak =
         encrypt_session_data(&serde_json::to_string(&TaprootTweak::None)?, session_secret)?;
@@ -313,14 +342,20 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         let batch_item_id = Uuid::now_v7();
         let encrypted_message = encrypt_session_data(&hex::encode(sighash), session_secret)?;
 
-        // Determine which player wins this split transaction
-        let player_idx = win_condition.player_index;
+        // Get the outcome index from the win condition
+        let outcome_idx = match win_condition.outcome {
+            Outcome::Attestation(idx) => idx,
+            Outcome::Expiry => {
+                return Err(anyhow!("Expiry outcome not supported in this example"));
+            }
+        };
 
-        // Get the subset_id for this player's split transaction
-        let subset_id = player_subset_ids.get(&player_idx).ok_or_else(|| {
+        // Get the subset_id for this OUTCOME's split transaction
+        // (not per-player - all winners for this outcome share the same aggregate key)
+        let subset_id = outcome_subset_ids.get(&outcome_idx).ok_or_else(|| {
             anyhow!(
-                "No subset defined for player {} in win condition {:?}",
-                player_idx,
+                "No subset defined for outcome {} in win condition {:?}",
+                outcome_idx,
                 win_condition
             )
         })?;
@@ -330,14 +365,13 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         batch_items.push(SigningBatchItem {
             batch_item_id,
             message_hash: sighash.to_vec(),
-            encrypted_message: Some(encrypted_message),
-            encrypted_adaptor_configs: None, // Split transactions use regular signatures
+            signing_mode: SigningMode::Regular { encrypted_message }, // Split transactions use regular signatures
             encrypted_taproot_tweak: encrypted_tweak.clone(),
-            subset_id: Some(*subset_id), // Use 2-of-2 subset aggregate key
+            subset_id: Some(*subset_id), // Use outcome's subset aggregate key
         });
         info!(
-            "  Split batch item for {:?}: {} (subset {})",
-            win_condition, batch_item_id, subset_id
+            "  Split batch item for {:?}: {} (outcome {} subset {})",
+            win_condition, batch_item_id, outcome_idx, subset_id
         );
     }
 
@@ -515,41 +549,72 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     mine_blocks(&test, 1).await?;
     info!("Mined 1 block to confirm outcome tx");
 
-    // Phase 10: Broadcast Split Transaction (Happy Path)
-    info!("\n=== Phase 10: Broadcast Split Transaction ===");
+    // Phase 10: Broadcast Split Transactions for ALL Winners (Weighted Payout)
+    info!("\n=== Phase 10: Broadcast Split Transactions ===");
 
-    // The winner of outcome 0 is player 0 (see outcome_payouts setup above)
-    let winner_player_idx = attested_outcome_idx % NUM_PLAYERS;
-    let win_condition = WinCondition {
-        outcome: Outcome::Attestation(attested_outcome_idx),
-        player_index: winner_player_idx,
-    };
+    // Get the payout weights for the attested outcome from the contract
+    let attested_outcome = Outcome::Attestation(attested_outcome_idx);
+    let payout_weights = contract_params
+        .outcome_payouts
+        .get(&attested_outcome)
+        .ok_or_else(|| anyhow!("No payout weights for outcome {}", attested_outcome_idx))?;
+
+    // Calculate total weight for percentage display
+    let total_weight: u64 = payout_weights.values().sum();
 
     info!(
-        "Winner: Player {} (outcome {} attested)",
-        winner_player_idx, attested_outcome_idx
+        "Outcome {} has {} winners with weighted payouts:",
+        attested_outcome_idx,
+        payout_weights.len()
     );
 
-    let winner_ticket_preimage = ticket_preimages[winner_player_idx];
-    let split_tx = signed_contract
-        .signed_split_tx(&win_condition, winner_ticket_preimage)
-        .map_err(|e| anyhow!("Failed to create signed split tx: {:?}", e))?;
+    let mut split_txids = Vec::new();
+    for (player_idx, weight) in payout_weights {
+        let payout_pct = (*weight as f64 / total_weight as f64) * 100.0;
 
-    info!("Created signed split transaction");
-    info!("  Txid: {}", split_tx.compute_txid());
+        let win_condition = WinCondition {
+            outcome: attested_outcome,
+            player_index: *player_idx,
+        };
 
-    let split_txid = broadcast_transaction(&test, &split_tx).await?;
-    info!("Broadcast split transaction: {}", split_txid);
+        info!(
+            "  Player {} claims {:.0}% of the pot (weight {}/{})",
+            player_idx, payout_pct, weight, total_weight
+        );
+
+        let ticket_preimage = ticket_preimages[*player_idx];
+        let split_tx = signed_contract
+            .signed_split_tx(&win_condition, ticket_preimage)
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to create signed split tx for player {}: {:?}",
+                    player_idx,
+                    e
+                )
+            })?;
+
+        info!(
+            "    Split TX for player {}: {}",
+            player_idx,
+            split_tx.compute_txid()
+        );
+
+        let split_txid = broadcast_transaction(&test, &split_tx).await?;
+        split_txids.push((*player_idx, split_txid));
+        info!("    Broadcast split transaction: {}", split_txid);
+    }
 
     mine_blocks(&test, 1).await?;
-    info!("Mined 1 block to confirm split tx");
+    info!("Mined 1 block to confirm all split txs");
 
     // Phase 11: Summary
     info!("\n=== DLC Batch Signing Example Complete ===");
     info!("Transaction chain:");
     info!("  1. Funding: {}:{}", funding_utxo.txid, funding_utxo.vout);
     info!("  2. Outcome: {}", outcome_txid);
-    info!("  3. Split:   {}", split_txid);
+    for (player_idx, txid) in &split_txids {
+        info!("  3. Split (Player {}): {}", player_idx, txid);
+    }
     info!("");
     info!("Summary:");
     info!("  - {} players, {} outcomes", NUM_PLAYERS, NUM_OUTCOMES);
@@ -560,14 +625,17 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     );
     info!("  - Oracle attested to outcome {}", attested_outcome_idx);
     info!(
-        "  - Player {} claimed winnings via split tx",
-        winner_player_idx
+        "  - {} winners claimed weighted payouts via separate split txs",
+        split_txids.len()
     );
     info!("");
     info!("Key features demonstrated:");
-    info!("  - Subset definitions for 2-of-2 (winner + market_maker) aggregate keys");
-    info!("  - Per-batch-item subset_id for signing with subset aggregate");
-    info!("  - Full DLC flow: fund -> outcome -> split");
+    info!("  - Subset definitions per OUTCOME: market_maker + ALL winners for that outcome");
+    info!("  - Per-batch-item subset_id for signing with outcome's aggregate key");
+    info!("  - WEIGHTED PAYOUTS: Multiple winners per outcome with proportional splits");
+    info!(
+        "  - Full DLC flow: fund -> outcome tx (n-of-n adaptor) -> split txs (k-of-k per outcome)"
+    );
 
     Ok(())
 }

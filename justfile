@@ -316,39 +316,38 @@ test-batch-signing:
     set -euo pipefail
     echo "📦 Running Batch Signing E2E Test..."
 
-    # Clean and setup
+    # Clean first
     ./scripts/clean.sh
 
-    # Build unless SKIP_BUILD is set and all binaries exist
-    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
-        echo "🔨 Building KeyMeld..."
-        if [ -n "${IN_NIX_SHELL:-}" ]; then
+    # Run everything in a single nix develop session to avoid multiple shell startups
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        # Already in nix shell, run directly
+        if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+            echo "🔨 Building KeyMeld..."
             cargo build
         else
-            nix develop -c cargo build
+            echo "Using pre-built binaries (SKIP_BUILD=1)"
         fi
-    else
-        echo "Using pre-built binaries (SKIP_BUILD=1)"
-    fi
-
-    # Setup regtest and start services
-    echo "🚀 Starting services..."
-    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "🚀 Starting services..."
         ./scripts/setup-regtest.sh
         ./scripts/start-services.sh
-    else
-        nix develop -c ./scripts/setup-regtest.sh
-        nix develop -c ./scripts/start-services.sh
-    fi
-
-    # Run the batch signing test
-    echo "📦 Running batch signing E2E test..."
-    if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
-        ./target/debug/keymeld_demo batch-signing --config config/example-nix.yaml
-    elif [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "📦 Running batch signing E2E test..."
         cargo run --bin keymeld_demo -- batch-signing --config config/example-nix.yaml
     else
-        nix develop -c cargo run --bin keymeld_demo -- batch-signing --config config/example-nix.yaml
+        # Not in nix shell - run everything in a single nix develop session
+        nix develop -c bash -c '
+            if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+                echo "🔨 Building KeyMeld..."
+                cargo build
+            else
+                echo "Using pre-built binaries (SKIP_BUILD=1)"
+            fi
+            echo "🚀 Starting services..."
+            ./scripts/setup-regtest.sh
+            ./scripts/start-services.sh
+            echo "📦 Running batch signing E2E test..."
+            cargo run --bin keymeld_demo -- batch-signing --config config/example-nix.yaml
+        '
     fi
 
 # Run DLC batch signing E2E test
@@ -357,39 +356,38 @@ test-dlctix-batch:
     set -euo pipefail
     echo "🎲 Running DLC Batch Signing E2E Test..."
 
-    # Clean and setup
+    # Clean first
     ./scripts/clean.sh
 
-    # Build unless SKIP_BUILD is set and all binaries exist
-    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
-        echo "🔨 Building KeyMeld..."
-        if [ -n "${IN_NIX_SHELL:-}" ]; then
+    # Run everything in a single nix develop session to avoid multiple shell startups
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        # Already in nix shell, run directly
+        if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+            echo "🔨 Building KeyMeld..."
             cargo build
         else
-            nix develop -c cargo build
+            echo "Using pre-built binaries (SKIP_BUILD=1)"
         fi
-    else
-        echo "Using pre-built binaries (SKIP_BUILD=1)"
-    fi
-
-    # Setup regtest and start services
-    echo "🚀 Starting services..."
-    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "🚀 Starting services..."
         ./scripts/setup-regtest.sh
         ./scripts/start-services.sh
-    else
-        nix develop -c ./scripts/setup-regtest.sh
-        nix develop -c ./scripts/start-services.sh
-    fi
-
-    # Run the DLC batch signing test
-    echo "🎲 Running DLC batch signing E2E test..."
-    if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
-        ./target/debug/keymeld_demo dlctix-batch --config config/example-nix.yaml
-    elif [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "🎲 Running DLC batch signing E2E test..."
         cargo run --bin keymeld_demo -- dlctix-batch --config config/example-nix.yaml
     else
-        nix develop -c cargo run --bin keymeld_demo -- dlctix-batch --config config/example-nix.yaml
+        # Not in nix shell - run everything in a single nix develop session
+        nix develop -c bash -c '
+            if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+                echo "🔨 Building KeyMeld..."
+                cargo build
+            else
+                echo "Using pre-built binaries (SKIP_BUILD=1)"
+            fi
+            echo "🚀 Starting services..."
+            ./scripts/setup-regtest.sh
+            ./scripts/start-services.sh
+            echo "🎲 Running DLC batch signing E2E test..."
+            cargo run --bin keymeld_demo -- dlctix-batch --config config/example-nix.yaml
+        '
     fi
 
 # Run single-signer E2E test
@@ -398,39 +396,38 @@ test-single-signer:
     set -euo pipefail
     echo "🔑 Running Single-Signer E2E Test..."
 
-    # Clean and setup
+    # Clean first
     ./scripts/clean.sh
 
-    # Build unless SKIP_BUILD is set and all binaries exist
-    if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
-        echo "🔨 Building KeyMeld..."
-        if [ -n "${IN_NIX_SHELL:-}" ]; then
+    # Run everything in a single nix develop session to avoid multiple shell startups
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        # Already in nix shell, run directly
+        if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+            echo "🔨 Building KeyMeld..."
             cargo build
         else
-            nix develop -c cargo build
+            echo "Using pre-built binaries (SKIP_BUILD=1)"
         fi
-    else
-        echo "Using pre-built binaries (SKIP_BUILD=1)"
-    fi
-
-    # Setup regtest and start services
-    echo "🚀 Starting services..."
-    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "🚀 Starting services..."
         ./scripts/setup-regtest.sh
         ./scripts/start-services.sh
-    else
-        nix develop -c ./scripts/setup-regtest.sh
-        nix develop -c ./scripts/start-services.sh
-    fi
-
-    # Run the single-signer test
-    echo "🔑 Running single-signer E2E test..."
-    if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld_demo" ]; then
-        ./target/debug/keymeld_demo single-signer --config config/example-nix.yaml
-    elif [ -n "${IN_NIX_SHELL:-}" ]; then
+        echo "🔑 Running single-signer E2E test..."
         cargo run --bin keymeld_demo -- single-signer --config config/example-nix.yaml
     else
-        nix develop -c cargo run --bin keymeld_demo -- single-signer --config config/example-nix.yaml
+        # Not in nix shell - run everything in a single nix develop session
+        nix develop -c bash -c '
+            if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ] || [ ! -f target/debug/keymeld_demo ]; then
+                echo "🔨 Building KeyMeld..."
+                cargo build
+            else
+                echo "Using pre-built binaries (SKIP_BUILD=1)"
+            fi
+            echo "🚀 Starting services..."
+            ./scripts/setup-regtest.sh
+            ./scripts/start-services.sh
+            echo "🔑 Running single-signer E2E test..."
+            cargo run --bin keymeld_demo -- single-signer --config config/example-nix.yaml
+        '
     fi
 
 # Run parallel stress tests

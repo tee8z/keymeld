@@ -1,13 +1,18 @@
 # Adaptor Signatures
 
-KeyMeld supports adaptor signatures for atomic swaps, conditional payments, and smart contract patterns.
+KeyMeld supports adaptor signatures for atomic swaps, conditional payments, DLCs, and smart contract patterns.
 
 ## Overview
 
 Adaptor signatures bind MuSig2 signatures to cryptographic secrets:
 - **Adaptor Point (T)**: `T = t*G` where `t` is the secret
 - **Adapted Signature**: Regular signature encrypted with the adaptor point
-- **Secret Recovery**: When signature is revealed, secret `t` can be recovered
+- **Secret Recovery**: When the final signature is broadcast, secret `t` can be recovered
+
+Use cases:
+- **DLCs (Discreet Log Contracts)**: Outcome transactions locked to oracle attestation
+- **Atomic Swaps**: Cross-chain exchanges without trusted intermediaries
+- **Conditional Payments**: Release funds only when a secret is revealed
 
 ## Adaptor Types
 
@@ -52,6 +57,8 @@ Alternative secrets (any one works).
 
 ### Create Signing Session with Adaptors
 
+Adaptor configurations are specified per batch item, allowing mixed regular and adaptor signatures in a single session.
+
 ```json
 POST /api/v1/signing
 {
@@ -62,14 +69,29 @@ POST /api/v1/signing
     {
       "batch_item_id": "uuid-v7",
       "message_hash": [32 bytes],
-      "encrypted_message": "hex-encoded",
-      "encrypted_adaptor_configs": "hex-encoded-encrypted-json"
+      "signing_mode": {
+        "type": "adaptor",
+        "encrypted_message": "hex-session-encrypted",
+        "encrypted_adaptor_configs": "hex-session-encrypted-json"
+      },
+      "encrypted_taproot_tweak": "hex-session-encrypted",
+      "subset_id": null
     }
   ]
 }
 ```
 
-Client encrypts adaptor configs using session secret before sending.
+**Adaptor Config Structure** (encrypted with session secret):
+```json
+[
+  {
+    "adaptor_id": "uuid-v7",
+    "adaptor_type": "Single",
+    "adaptor_points": ["02...hex-pubkey"],
+    "hints": null
+  }
+]
+```
 
 ### Status Response
 
@@ -81,14 +103,16 @@ GET /api/v1/signing/{id}/status/{user_id}
     {
       "batch_item_id": "uuid-v7",
       "signature": "hex-encrypted",
-      "adaptor_signatures": [...],
+      "adaptor_signatures": {"adaptor_id": {...}},
       "error": null
     }
   ]
 }
 ```
 
-Decrypt adaptor signatures client-side using session secret.
+Decrypt adaptor signatures client-side using session secret. Each adaptor result contains:
+- `signature_scalar`: The 65-byte serialized adaptor signature
+- `was_negated`: Whether the signature was negated during aggregation
 
 ## Privacy
 
@@ -99,8 +123,40 @@ Decrypt adaptor signatures client-side using session secret.
 ## Demo Commands
 
 ```bash
-just demo-adaptors              # Test all types
-just demo-adaptors-single       # Single adaptor only
-just demo-adaptors-and          # And logic only
-just demo-adaptors-or           # Or logic only
+just demo-adaptors       # Adaptor signatures demo (all types)
+just test-dlctix-batch   # DLC batch signing with adaptor + subset signing
 ```
+
+## DLC Example
+
+The `dlctix_batch` example demonstrates a complete DLC workflow:
+
+1. **Keygen with subsets**: Define 2-of-2 subsets for each player + market_maker pair
+2. **Batch signing**: Sign outcome txs (n-of-n with adaptors) and split txs (2-of-2 subsets) in one session
+3. **Oracle attestation**: Oracle reveals the secret, unlocking the adaptor signature
+4. **Payout**: Broadcast outcome tx, then split tx for winner
+
+```rust
+// Outcome transactions use adaptor signatures locked to oracle attestation
+let adaptor_config = AdaptorConfig {
+    adaptor_id: Uuid::now_v7(),
+    adaptor_type: AdaptorType::Single,
+    adaptor_points: vec![hex::encode(locking_point)],
+    hints: None,
+};
+
+SigningBatchItem {
+    signing_mode: SigningMode::Adaptor { encrypted_message, encrypted_adaptor_configs },
+    subset_id: None,  // n-of-n signing
+    ...
+}
+
+// Split transactions use regular signatures with subset aggregate keys
+SigningBatchItem {
+    signing_mode: SigningMode::Regular { encrypted_message },
+    subset_id: Some(outcome_subset_id),  // k-of-k signing (winners + market_maker)
+    ...
+}
+```
+
+See `examples/src/dlctix_batch.rs` for the complete implementation.

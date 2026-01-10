@@ -461,6 +461,49 @@ pub struct SingleSigningStatusResponse {
 // Batch Signing API Types
 // ============================================================================
 
+/// Specifies the type of signature to produce for a batch item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SigningMode {
+    /// Regular Schnorr signature - signs the message directly
+    Regular {
+        /// Encrypted message (sighash) for signing
+        encrypted_message: String,
+    },
+    /// Adaptor signature - signs the message locked to adaptor point(s)
+    /// The signature can only be completed when the adaptor secret is revealed
+    Adaptor {
+        /// Encrypted message (sighash) for signing
+        encrypted_message: String,
+        /// Encrypted adaptor configuration (hex-encoded encrypted JSON)
+        encrypted_adaptor_configs: String,
+    },
+}
+
+impl SigningMode {
+    /// Extract the encrypted message from either variant
+    pub fn encrypted_message(&self) -> &str {
+        match self {
+            SigningMode::Regular { encrypted_message } => encrypted_message,
+            SigningMode::Adaptor {
+                encrypted_message, ..
+            } => encrypted_message,
+        }
+    }
+
+    /// Extract the encrypted adaptor configs if this is an Adaptor variant
+    pub fn encrypted_adaptor_configs(&self) -> Option<&str> {
+        match self {
+            SigningMode::Regular { .. } => None,
+            SigningMode::Adaptor {
+                encrypted_adaptor_configs,
+                ..
+            } => Some(encrypted_adaptor_configs),
+        }
+    }
+}
+
 /// A single item in a batch signing request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -470,11 +513,8 @@ pub struct SigningBatchItem {
     pub batch_item_id: Uuid,
     /// The 32-byte message hash to sign
     pub message_hash: Vec<u8>,
-    /// Optional encrypted message (for privacy)
-    pub encrypted_message: Option<String>,
-    /// Optional adaptor configuration for this specific message
-    /// Empty string or None for regular signature
-    pub encrypted_adaptor_configs: Option<String>,
+    /// The signing mode - regular Schnorr or adaptor signature
+    pub signing_mode: SigningMode,
     /// Per-item taproot tweak (encrypted with session secret as JSON-serialized TaprootTweak)
     /// Each batch item specifies its own tweak for the aggregate key
     pub encrypted_taproot_tweak: String,
@@ -679,12 +719,30 @@ pub fn validate_batch_signing_request(
             &format!("Message hash for batch item {}", item.batch_item_id),
         )?;
 
-        // Validate encrypted message if present
-        if let Some(encrypted_message) = &item.encrypted_message {
-            validation::Validator::validate_non_empty_string(
+        // Validate signing mode
+        match &item.signing_mode {
+            SigningMode::Regular { encrypted_message } => {
+                validation::Validator::validate_non_empty_string(
+                    encrypted_message,
+                    &format!("Encrypted message for batch item {}", item.batch_item_id),
+                )?;
+            }
+            SigningMode::Adaptor {
                 encrypted_message,
-                &format!("Encrypted message for batch item {}", item.batch_item_id),
-            )?;
+                encrypted_adaptor_configs,
+            } => {
+                validation::Validator::validate_non_empty_string(
+                    encrypted_message,
+                    &format!("Encrypted message for batch item {}", item.batch_item_id),
+                )?;
+                validation::Validator::validate_non_empty_string(
+                    encrypted_adaptor_configs,
+                    &format!(
+                        "Encrypted adaptor configs for batch item {}",
+                        item.batch_item_id
+                    ),
+                )?;
+            }
         }
     }
 

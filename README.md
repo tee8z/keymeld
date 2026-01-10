@@ -67,8 +67,10 @@ just quickstart     # Complete setup + MuSig2 demo
 
 **Other demos:**
 ```bash
-just demo-adaptors      # Adaptor signatures demo
-just demo-single-signer # Single-signer key import demo
+just demo-adaptors       # Adaptor signatures demo
+just test-batch-signing  # Batch signing E2E test
+just test-dlctix-batch   # DLC batch signing with subset keys
+just test-single-signer  # Single-signer key import demo
 ```
 
 ## How It Works
@@ -105,6 +107,8 @@ SDK ──HTTP──▶ Gateway ──VSock──▶ Enclaves
 | Feature | Description |
 |---------|-------------|
 | **MuSig2 Signing** | BIP-327 compliant multi-party Schnorr signatures |
+| **Batch Signing** | Sign multiple messages in a single session with per-item configuration |
+| **Subset Signing** | Define participant subsets for 2-of-n signing within larger groups |
 | **Adaptor Signatures** | Single, And, Or logic for atomic swaps and conditional payments |
 | **Single-Signer Mode** | Import keys for non-MuSig signing (ECDSA & Schnorr) |
 | **Taproot Support** | Flexible tweaking modes for Bitcoin compatibility |
@@ -123,6 +127,13 @@ just build              # Build all services
 just test               # Run tests
 just check              # Format + lint + test
 just dev                # Enter Nix dev shell
+
+# Demo & Testing
+just demo               # MuSig2 demo
+just demo-adaptors      # Adaptor signatures demo
+just test-batch-signing # Batch signing E2E test
+just test-dlctix-batch  # DLC batch signing with subset keys
+just test-single-signer # Single-signer E2E test
 
 # AWS Deployment
 just build-eif          # Build Nitro Enclave image

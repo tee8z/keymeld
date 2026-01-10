@@ -1242,8 +1242,8 @@ impl EnclaveManager {
                     .iter()
                     .map(|item| keymeld_core::protocol::EnclaveBatchItem {
                         batch_item_id: item.batch_item_id,
-                        encrypted_message: item.encrypted_message.clone().unwrap_or_default(),
-                        encrypted_adaptor_configs: item.encrypted_adaptor_configs.clone(),
+                        encrypted_message: item.signing_mode.encrypted_message().to_string(),
+                        encrypted_adaptor_configs: item.signing_mode.encrypted_adaptor_configs().map(|s| s.to_string()),
                         encrypted_taproot_tweak: item.encrypted_taproot_tweak.clone(),
                         subset_id: item.subset_id,
                     })
@@ -1897,6 +1897,7 @@ impl EnclaveManager {
 mod tests {
     use super::*;
     use crate::identifiers::{EnclaveId, SessionId, UserId};
+    use keymeld_sdk::SigningMode;
     use std::collections::{BTreeMap, HashSet};
 
     fn create_test_participants() -> BTreeMap<UserId, ParticipantData> {
@@ -1945,8 +1946,9 @@ mod tests {
         let batch_item = SigningBatchItem {
             batch_item_id: uuid::Uuid::now_v7(),
             message_hash: vec![0u8; 32],
-            encrypted_message: Some("test_message".to_string()),
-            encrypted_adaptor_configs: None,
+            signing_mode: SigningMode::Regular {
+                encrypted_message: "test_message".to_string(),
+            },
             encrypted_taproot_tweak: "test_tweak".to_string(),
             subset_id: None,
         };

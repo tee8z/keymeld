@@ -270,8 +270,10 @@ async fn test_signing_session_with_adaptors(
     let batch_item = keymeld_sdk::SigningBatchItem {
         batch_item_id: uuid::Uuid::now_v7(),
         message_hash: sighash.to_vec(),
-        encrypted_message: Some(encrypted_message),
-        encrypted_adaptor_configs: Some(encrypted_adaptor_configs),
+        signing_mode: keymeld_sdk::SigningMode::Adaptor {
+            encrypted_message,
+            encrypted_adaptor_configs,
+        },
         encrypted_taproot_tweak,
         subset_id: None, // Use full n-of-n aggregate key
     };
