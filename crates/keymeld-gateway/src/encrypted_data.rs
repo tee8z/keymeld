@@ -2,6 +2,7 @@ use keymeld_core::{
     crypto::SessionSecret, protocol::AdaptorConfig, EncryptedData, KeyMeldError, PartialSignature,
     PubNonce,
 };
+use keymeld_sdk::UserId;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
@@ -54,7 +55,7 @@ impl KeygenEnclaveData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeygenParticipantSessionData {
-    pub participant_public_keys: std::collections::BTreeMap<crate::identifiers::UserId, Vec<u8>>,
+    pub participant_public_keys: std::collections::BTreeMap<UserId, Vec<u8>>,
 }
 
 impl Default for KeygenParticipantSessionData {

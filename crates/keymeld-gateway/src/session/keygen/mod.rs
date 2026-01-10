@@ -4,7 +4,7 @@ use crate::{
     AggregatePublicKey, KeyMeldError,
 };
 use keymeld_core::protocol::{
-    EncryptedParticipantPublicKey, EncryptedSessionSecret, KeygenStatusKind,
+    EncryptedParticipantPublicKey, EncryptedSessionSecret, KeygenStatusKind, SubsetDefinition,
 };
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 pub mod processing;
 
@@ -27,6 +28,9 @@ pub struct KeygenReserved {
     pub max_signing_sessions: Option<u32>,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
+    /// Subset definitions for computing additional aggregate keys
+    #[serde(default)]
+    pub subset_definitions: Vec<SubsetDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -46,6 +50,9 @@ pub struct KeygenCollectingParticipants {
     pub required_enclave_epochs: BTreeMap<EnclaveId, u64>,
     /// Encrypted TaprootTweak as hex-encoded JSON
     pub encrypted_taproot_tweak: String,
+    /// Subset definitions for computing additional aggregate keys
+    #[serde(default)]
+    pub subset_definitions: Vec<SubsetDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -76,6 +83,13 @@ pub struct KeygenCompleted {
     #[serde(default)]
     #[schema(value_type = Vec<String>)]
     pub enclave_encrypted_session_secrets: Vec<EncryptedSessionSecret>,
+    /// Subset definitions for computing additional aggregate keys
+    #[serde(default)]
+    pub subset_definitions: Vec<SubsetDefinition>,
+    /// Encrypted aggregate keys for each defined subset.
+    /// Keys are subset_id -> encrypted_aggregate_public_key (hex-encoded).
+    #[serde(default)]
+    pub encrypted_subset_aggregates: BTreeMap<Uuid, String>,
 }
 
 impl KeygenCompleted {
@@ -84,6 +98,7 @@ impl KeygenCompleted {
         aggregate_public_key: AggregatePublicKey,
         participant_encrypted_public_keys: Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>,
         enclave_encrypted_session_secrets: Vec<EncryptedSessionSecret>,
+        encrypted_subset_aggregates: BTreeMap<Uuid, String>,
     ) -> Self {
         let completed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -106,6 +121,8 @@ impl KeygenCompleted {
             encrypted_taproot_tweak: collecting.encrypted_taproot_tweak,
             participant_encrypted_public_keys,
             enclave_encrypted_session_secrets,
+            subset_definitions: collecting.subset_definitions,
+            encrypted_subset_aggregates,
         }
     }
 }

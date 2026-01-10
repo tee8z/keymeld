@@ -397,6 +397,14 @@ impl Database {
                     expires_at: expires_at as u64,
                     max_signing_sessions: request.max_signing_sessions,
                     encrypted_taproot_tweak: request.encrypted_taproot_tweak.clone(),
+                    subset_definitions: request
+                        .subset_definitions
+                        .iter()
+                        .map(|s| keymeld_core::protocol::SubsetDefinition {
+                            subset_id: s.subset_id,
+                            participants: s.participants.clone(),
+                        })
+                        .collect(),
                 });
 
                 let status_json = serde_json::to_string(&status).map_err(|e| {
@@ -491,6 +499,7 @@ impl Database {
                     expires_at: reserved_session.expires_at,
                     required_enclave_epochs: BTreeMap::new(),
                     encrypted_taproot_tweak: reserved_session.encrypted_taproot_tweak,
+                    subset_definitions: reserved_session.subset_definitions,
                 });
 
                 let status_json = serde_json::to_string(&new_status).map_err(|e| {
@@ -1442,7 +1451,7 @@ impl Database {
                         // Already in collecting state - just clear enclave epochs
                         SigningSessionStatus::CollectingParticipants(
                             SigningCollectingParticipants {
-                                required_enclave_epochs: std::collections::BTreeMap::new(),
+                                required_enclave_epochs: BTreeMap::new(),
                                 ..collecting
                             },
                         )
@@ -1478,7 +1487,7 @@ impl Database {
                                 encrypted_session_secret: init.encrypted_session_secret,
                                 created_at: init.created_at,
                                 expires_at: init.expires_at,
-                                required_enclave_epochs: std::collections::BTreeMap::new(),
+                                required_enclave_epochs: BTreeMap::new(),
                                 encrypted_taproot_tweak: init.encrypted_taproot_tweak,
                                 participants_requiring_approval,
                                 approved_participants,

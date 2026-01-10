@@ -102,6 +102,7 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
                 &self.encrypted_session_secret,
                 &self.registered_participants,
                 &self.encrypted_taproot_tweak,
+                &self.subset_definitions,
             )
             .await
             .map_err(|e| {
@@ -125,6 +126,7 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
                 keygen_result.aggregate_public_key,
                 keygen_result.participant_encrypted_public_keys,
                 keygen_result.enclave_encrypted_session_secrets,
+                keygen_result.encrypted_subset_aggregates,
             ),
         ))
     }

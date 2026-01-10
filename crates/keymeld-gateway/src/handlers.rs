@@ -661,6 +661,12 @@ pub async fn get_keygen_status(
     let (status, expected_participants, aggregate_public_key, expires_at) =
         session_status.extract_status_info();
 
+    // Get encrypted_subset_aggregates from Completed status
+    let encrypted_subset_aggregates = match &session_status {
+        KeygenSessionStatus::Completed(s) => s.encrypted_subset_aggregates.clone(),
+        _ => std::collections::BTreeMap::new(),
+    };
+
     let response = KeygenSessionStatusResponse {
         keygen_session_id,
         status,
@@ -668,6 +674,7 @@ pub async fn get_keygen_status(
         registered_participants: participant_count,
         aggregate_public_key,
         expires_at,
+        encrypted_subset_aggregates,
     };
 
     Ok(Json(response))
@@ -1909,6 +1916,8 @@ mod tests {
             message_hash: vec![0u8; 32],
             encrypted_message: Some("test_message".to_string()),
             encrypted_adaptor_configs: Some(mock_encrypted_hex.clone()),
+            encrypted_taproot_tweak: "test_tweak".to_string(),
+            subset_id: None,
         };
 
         let request = CreateSigningSessionRequest {
@@ -1932,6 +1941,8 @@ mod tests {
             message_hash: vec![0u8; 32],
             encrypted_message: None,
             encrypted_adaptor_configs: None,
+            encrypted_taproot_tweak: "test_tweak".to_string(),
+            subset_id: None,
         };
 
         let request = CreateSigningSessionRequest {
