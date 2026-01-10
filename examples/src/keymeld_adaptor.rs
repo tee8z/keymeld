@@ -161,7 +161,7 @@ async fn run_adaptor_signatures_test(
     }
     info!("✅ All required approvals completed - signing can now proceed");
 
-    let (_signature, adaptor_signatures) =
+    let adaptor_signatures =
         wait_for_signing_with_adaptors(test, &signing_session_id, &keygen_session_id).await?;
 
     validate_adaptor_signatures(&adaptor_configs, &adaptor_signatures)?;
@@ -313,10 +313,7 @@ async fn wait_for_signing_with_adaptors(
     test: &mut KeyMeldE2ETest,
     signing_session_id: &SessionId,
     keygen_session_id: &SessionId,
-) -> Result<(
-    Vec<u8>,
-    std::collections::BTreeMap<uuid::Uuid, AdaptorSignatureResult>,
-)> {
+) -> Result<std::collections::BTreeMap<uuid::Uuid, AdaptorSignatureResult>> {
     info!("⏳ Waiting for signing completion with adaptor processing...");
 
     loop {
@@ -354,22 +351,11 @@ async fn wait_for_signing_with_adaptors(
                     .first()
                     .ok_or(anyhow!("Signing completed but no batch results found"))?;
 
-                let signature = if let Some(ref encrypted_sig) = first_result.signature {
-                    let session_secret = test
-                        .session_secrets
-                        .get(keygen_session_id)
-                        .ok_or(anyhow!("Session secret not found"))?;
-
-                    keymeld_sdk::validation::decrypt_signature_with_secret(
-                        encrypted_sig,
-                        session_secret,
-                    )?
-                } else if let Some(ref error) = first_result.error {
+                if let Some(ref error) = first_result.error {
                     return Err(anyhow!("Signing failed: {}", error));
-                } else {
-                    return Err(anyhow!("Signing completed but no signature found"));
-                };
+                }
 
+                // For adaptor signing, we get adaptor signatures (not a regular signature)
                 let adaptor_signatures =
                     if let Some(ref encrypted_adaptors) = first_result.adaptor_signatures {
                         let session_secret = test
@@ -383,17 +369,16 @@ async fn wait_for_signing_with_adaptors(
                             session_secret,
                         )?
                     } else {
-                        std::collections::BTreeMap::new()
+                        return Err(anyhow!("Signing completed but no adaptor signatures found"));
                     };
 
-                info!("Regular MuSig2 signing completed");
-                info!("Adaptor signatures processed automatically!");
+                info!("Adaptor signing completed!");
                 info!(
                     "Successfully decrypted {} adaptor signatures",
                     adaptor_signatures.len()
                 );
 
-                return Ok((signature, adaptor_signatures));
+                return Ok(adaptor_signatures);
             }
             SigningStatusKind::Failed => {
                 return Err(anyhow!("Signing session failed"));
