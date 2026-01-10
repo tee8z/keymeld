@@ -1876,25 +1876,19 @@ pub async fn get_single_signing_status(
 #[cfg(test)]
 mod tests {
     use keymeld_sdk::{
+        types::{AdaptorConfig, AdaptorHint, AdaptorType},
         validation::{
             decrypt_adaptor_configs, encrypt_adaptor_configs_for_client,
             validate_decrypted_adaptor_configs,
         },
-        AdaptorConfig, AdaptorHint, AdaptorType, CreateSigningSessionRequest, SessionId,
-        SigningBatchItem, SigningMode,
+        CreateSigningSessionRequest, SessionId, SigningBatchItem, SigningMode,
     };
-    use uuid::Uuid;
 
     #[test]
     fn test_client_side_privacy_architecture() {
-        let adaptor_config = AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::Single,
-            adaptor_points: vec![
-                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9".to_string(),
-            ],
-            hints: None,
-        };
+        let adaptor_config = AdaptorConfig::single(
+            "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        );
 
         let json = serde_json::to_string(&adaptor_config).expect("Should serialize");
         assert!(json.contains(&adaptor_config.adaptor_id.to_string()));
@@ -1975,26 +1969,13 @@ mod tests {
         let session_secret = "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678";
 
         let client_adaptor_configs = vec![
-            AdaptorConfig {
-                adaptor_id: Uuid::now_v7(),
-                adaptor_type: AdaptorType::Single,
-                adaptor_points: vec![
-                    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
-                        .to_string(),
-                ],
-                hints: None,
-            },
-            AdaptorConfig {
-                adaptor_id: Uuid::now_v7(),
-                adaptor_type: AdaptorType::And,
-                adaptor_points: vec![
-                    "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659"
-                        .to_string(),
-                    "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66"
-                        .to_string(),
-                ],
-                hints: None,
-            },
+            AdaptorConfig::single(
+                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+            ),
+            AdaptorConfig::and(vec![
+                "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
+                "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
+            ]),
         ];
 
         let encrypted = encrypt_adaptor_configs_for_client(&client_adaptor_configs, session_secret)
@@ -2051,37 +2032,23 @@ mod tests {
     fn test_zero_knowledge_privacy_guarantees() {
         let session_secret = "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678";
 
-        let adaptor_config_1 = vec![AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::Single,
-            adaptor_points: vec![
-                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9".to_string(),
-            ],
-            hints: None,
-        }];
+        let adaptor_config_1 = vec![AdaptorConfig::single(
+            "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        )];
 
-        let adaptor_config_2 = vec![AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::And,
-            adaptor_points: vec![
-                "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
-                "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
-            ],
-            hints: None,
-        }];
+        let adaptor_config_2 = vec![AdaptorConfig::and(vec![
+            "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
+            "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
+        ])];
 
-        let adaptor_config_3 = vec![AdaptorConfig {
-            adaptor_id: Uuid::now_v7(),
-            adaptor_type: AdaptorType::Or,
-            adaptor_points: vec![
-                "02abc123def456789012345678901234567890123456789012345678901234567890".to_string(),
-                "03def456789012345678901234567890123456789012345678901234567890123abc".to_string(),
-            ],
-            hints: Some(vec![
-                AdaptorHint::Scalar(vec![1u8; 32]),
-                AdaptorHint::Hash(vec![2u8; 32]),
-            ]),
-        }];
+        let adaptor_config_3 = vec![AdaptorConfig::or(vec![
+            "02abc123def456789012345678901234567890123456789012345678901234567890".to_string(),
+            "03def456789012345678901234567890123456789012345678901234567890123abc".to_string(),
+        ])
+        .with_hints(vec![
+            AdaptorHint::Scalar(vec![1u8; 32]),
+            AdaptorHint::Hash(vec![2u8; 32]),
+        ])];
 
         let encrypted_config_1 =
             encrypt_adaptor_configs_for_client(&adaptor_config_1, session_secret)
