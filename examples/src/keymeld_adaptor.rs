@@ -260,12 +260,20 @@ async fn test_signing_session_with_adaptors(
     let encrypted_message =
         keymeld_sdk::validation::encrypt_session_data(&hex::encode(&sighash[..]), &session_secret)?;
 
+    // Encrypt the taproot tweak
+    let encrypted_taproot_tweak = keymeld_sdk::validation::encrypt_session_data(
+        &serde_json::to_string(&keymeld_sdk::TaprootTweak::None)?,
+        &session_secret,
+    )?;
+
     // Create a batch item for the single message with adaptor configs
     let batch_item = keymeld_sdk::SigningBatchItem {
         batch_item_id: uuid::Uuid::now_v7(),
         message_hash: sighash.to_vec(),
         encrypted_message: Some(encrypted_message),
         encrypted_adaptor_configs: Some(encrypted_adaptor_configs),
+        encrypted_taproot_tweak,
+        subset_id: None, // Use full n-of-n aggregate key
     };
 
     let request = CreateSigningSessionRequest {

@@ -61,8 +61,8 @@ enum Commands {
         #[arg(long)]
         config: String,
     },
-    /// Batch signing test (multiple messages in one session)
-    BatchSigning {
+    /// DLC batch signing test using dlctix crate
+    DlctixBatch {
         /// Configuration file path
         #[arg(long)]
         config: String,
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
 
             keymeld_examples::keygen_with_stored_key::run_keygen_with_stored_key_test(config).await
         }
-        Commands::BatchSigning { config } => {
+        Commands::DlctixBatch { config } => {
             use keymeld_examples::ExampleConfig;
             use std::fs::read_to_string;
             use tracing_subscriber::fmt::init;
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
             let config_content = read_to_string(&config)?;
             let config = serde_yaml::from_str::<ExampleConfig>(&config_content)?;
 
-            keymeld_examples::batch_signing::run_batch_signing_test(config).await
+            keymeld_examples::dlctix_batch::run_dlctix_batch_test(config).await
         }
     }
 }

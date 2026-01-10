@@ -39,6 +39,22 @@ pub struct ConfirmRequest {
     pub min_confirmations: u32,
 }
 
+/// Request to generate blocks to an address
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerateRequest {
+    pub request_id: String,
+    pub num_blocks: u64,
+    pub address: String,
+}
+
+/// Response for generate blocks
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerateResponse {
+    pub success: bool,
+    pub block_hashes: Option<Vec<String>>,
+    pub error: Option<String>,
+}
+
 /// Response from the batcher
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatcherResponse {
@@ -205,6 +221,86 @@ impl RpcBatcher {
 
         Err(anyhow!(
             "Timeout waiting for confirmation after {}s",
+            self.max_wait_secs
+        ))
+    }
+
+    /// Generate blocks to an address and wait for response
+    pub async fn generate_to_address(&self, num_blocks: u64, address: &str) -> Result<Vec<String>> {
+        let request_id = Uuid::now_v7().to_string();
+        let request = GenerateRequest {
+            request_id: request_id.clone(),
+            num_blocks,
+            address: address.to_string(),
+        };
+
+        let req_dir = format!("{}/generate/requests", self.queue_dir);
+        let resp_dir = format!("{}/generate/responses", self.queue_dir);
+
+        // Ensure directories exist
+        fs::create_dir_all(&req_dir)?;
+        fs::create_dir_all(&resp_dir)?;
+
+        // Write request file
+        let req_file = format!("{}/{}.req", req_dir, request_id);
+        let req_json = serde_json::to_string(&request)?;
+        fs::write(&req_file, &req_json)?;
+
+        info!(
+            "📝 Queued generate request {} for {} blocks to {}",
+            &request_id[..8],
+            num_blocks,
+            &address[..20.min(address.len())]
+        );
+
+        // Wait for response
+        self.wait_for_generate_response(&resp_dir, &request_id)
+            .await
+    }
+
+    /// Wait for a generate response file to appear and read it
+    async fn wait_for_generate_response(
+        &self,
+        resp_dir: &str,
+        request_id: &str,
+    ) -> Result<Vec<String>> {
+        let resp_file = format!("{}/{}.resp", resp_dir, request_id);
+        let max_attempts = (self.max_wait_secs * 1000) / self.poll_interval_ms;
+
+        for attempt in 0..max_attempts {
+            if Path::new(&resp_file).exists() {
+                let resp_content = fs::read_to_string(&resp_file)?;
+
+                // Clean up response file
+                let _ = fs::remove_file(&resp_file);
+
+                let response: GenerateResponse = serde_json::from_str(&resp_content)
+                    .map_err(|e| anyhow!("Failed to parse generate response: {}", e))?;
+
+                if response.success {
+                    return Ok(response.block_hashes.unwrap_or_default());
+                } else {
+                    let error = response
+                        .error
+                        .unwrap_or_else(|| "Unknown error".to_string());
+                    return Err(anyhow!("Generate error: {}", error));
+                }
+            }
+
+            // Log progress every 10 seconds
+            if attempt > 0 && attempt % (10000 / self.poll_interval_ms) == 0 {
+                warn!(
+                    "⏳ Still waiting for generate response {} ({}s)...",
+                    &request_id[..8],
+                    (attempt * self.poll_interval_ms) / 1000
+                );
+            }
+
+            sleep(Duration::from_millis(self.poll_interval_ms)).await;
+        }
+
+        Err(anyhow!(
+            "Timeout waiting for generate response after {}s",
             self.max_wait_secs
         ))
     }
