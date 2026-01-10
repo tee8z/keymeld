@@ -29,6 +29,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use super::distribution::{EnclaveAssignmentManager, SessionAssignment};
 
@@ -43,6 +44,8 @@ pub struct KeygenInitResult {
     pub aggregate_public_key: AggregatePublicKey,
     pub participant_encrypted_public_keys: Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>,
     pub enclave_encrypted_session_secrets: Vec<EncryptedSessionSecret>,
+    /// Encrypted aggregate keys for each defined subset
+    pub encrypted_subset_aggregates: BTreeMap<Uuid, String>,
 }
 
 #[derive(Debug)]
@@ -911,6 +914,7 @@ impl EnclaveManager {
         self.enclave_info.iter().map(|entry| *entry.key()).collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn orchestrate_keygen_session_initialization(
         &self,
         keygen_session_id: &SessionId,
@@ -919,6 +923,7 @@ impl EnclaveManager {
         encrypted_session_secret: &str,
         participants: &BTreeMap<UserId, ParticipantData>,
         encrypted_taproot_tweak: &str,
+        subset_definitions: &[keymeld_core::protocol::SubsetDefinition],
     ) -> Result<KeygenInitResult, KeyMeldError> {
         let session_assignment = self
             .get_session_assignment(keygen_session_id)?
@@ -963,6 +968,7 @@ impl EnclaveManager {
                 expected_participant_count: participants.len(),
                 expected_participants: expected_participants.clone(),
                 enclave_public_keys: fresh_enclave_public_keys.clone(),
+                subset_definitions: subset_definitions.to_vec(),
             };
 
             info!(
@@ -1042,6 +1048,7 @@ impl EnclaveManager {
                         expected_participant_count: participants.len(),
                         expected_participants: expected_participants.clone(),
                         enclave_public_keys: fresh_enclave_public_keys.clone(),
+                        subset_definitions: subset_definitions.to_vec(),
                     };
 
                     async move {
@@ -1121,7 +1128,7 @@ impl EnclaveManager {
         // might not be ready immediately after participants are added. The musig processor
         // creates the key aggregation context when participant_count >= expected_count,
         // but there can be a timing window between participant addition and context creation.
-        let aggregate_public_key_bytes = self
+        let (aggregate_public_key_bytes, encrypted_subset_aggregates) = self
             .execute_with_retry(
                 &session_assignment.coordinator_enclave,
                 || {
@@ -1134,7 +1141,10 @@ impl EnclaveManager {
                 |outcome| match outcome {
                     EnclaveOutcome::Musig(MusigOutcome::Keygen(
                         KeygenOutcome::AggregatePublicKey(response),
-                    )) => Ok(response.encrypted_aggregate_public_key),
+                    )) => Ok((
+                        response.encrypted_aggregate_public_key,
+                        response.encrypted_subset_aggregates,
+                    )),
                     outcome => Err(KeyMeldError::EnclaveError(format!(
                         "Unexpected response for aggregate public key request: {outcome:?}"
                     ))),
@@ -1151,6 +1161,7 @@ impl EnclaveManager {
             aggregate_public_key: aggregate_public_key_bytes,
             participant_encrypted_public_keys,
             enclave_encrypted_session_secrets: all_encrypted_session_secrets,
+            encrypted_subset_aggregates,
         })
     }
 
@@ -1233,6 +1244,8 @@ impl EnclaveManager {
                         batch_item_id: item.batch_item_id,
                         encrypted_message: item.encrypted_message.clone().unwrap_or_default(),
                         encrypted_adaptor_configs: item.encrypted_adaptor_configs.clone(),
+                        encrypted_taproot_tweak: item.encrypted_taproot_tweak.clone(),
+                        subset_id: item.subset_id,
                     })
                     .collect();
 
@@ -1730,6 +1743,7 @@ impl EnclaveManager {
             expected_participant_count: completed.registered_participants.len(),
             expected_participants: expected_participants.clone(),
             enclave_public_keys: enclave_public_keys.clone(),
+            subset_definitions: completed.subset_definitions.clone(),
         };
 
         let command = Command::new(EnclaveCommand::Musig(MusigCommand::Keygen(
@@ -1933,6 +1947,8 @@ mod tests {
             message_hash: vec![0u8; 32],
             encrypted_message: Some("test_message".to_string()),
             encrypted_adaptor_configs: None,
+            encrypted_taproot_tweak: "test_tweak".to_string(),
+            subset_id: None,
         };
 
         let params = SigningSessionInitParams {

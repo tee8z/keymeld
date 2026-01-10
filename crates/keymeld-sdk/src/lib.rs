@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
@@ -15,6 +15,25 @@ pub use keymeld_core::protocol::{
 pub use keymeld_core::validation;
 pub use keymeld_core::AggregatePublicKey;
 
+// ============================================================================
+// Subset Aggregates Types
+// ============================================================================
+
+/// Maximum number of subset definitions allowed per keygen session
+pub const MAX_SUBSET_DEFINITIONS: usize = 200;
+
+/// Definition of a participant subset for aggregate key computation.
+/// Each subset produces its own aggregate public key from the specified participants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct SubsetDefinition {
+    /// Client-generated unique identifier for this subset
+    pub subset_id: Uuid,
+    /// List of user IDs that form this subset (must be subset of expected_participants)
+    pub participants: Vec<UserId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +46,11 @@ pub struct ReserveKeygenSessionRequest {
     /// Optional taproot tweak. Empty string means no tweak.
     #[serde(default)]
     pub encrypted_taproot_tweak: String,
+    /// Optional subset definitions for computing additional aggregate keys.
+    /// Each subset produces its own aggregate from the specified participants.
+    /// All participants in subsets must be in expected_participants.
+    #[serde(default)]
+    pub subset_definitions: Vec<SubsetDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +130,11 @@ pub struct KeygenSessionStatusResponse {
     pub registered_participants: usize,
     pub aggregate_public_key: Option<AggregatePublicKey>,
     pub expires_at: u64,
+    /// Encrypted aggregate keys for each defined subset.
+    /// Keys are subset_id -> encrypted_aggregate_public_key (hex-encoded).
+    /// Only populated when status is Completed.
+    #[serde(default)]
+    pub encrypted_subset_aggregates: BTreeMap<Uuid, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +475,15 @@ pub struct SigningBatchItem {
     /// Optional adaptor configuration for this specific message
     /// Empty string or None for regular signature
     pub encrypted_adaptor_configs: Option<String>,
+    /// Per-item taproot tweak (encrypted with session secret as JSON-serialized TaprootTweak)
+    /// Each batch item specifies its own tweak for the aggregate key
+    pub encrypted_taproot_tweak: String,
+    /// Which subset of participants signs this item.
+    /// None = all participants (full aggregate key).
+    /// Some(subset_id) = only participants in that subset sign.
+    /// Must reference a subset_id from keygen's subset_definitions.
+    #[serde(default)]
+    pub subset_id: Option<Uuid>,
 }
 
 /// Result for a single batch item
@@ -483,6 +521,69 @@ pub fn validate_reserve_keygen_session_request(
         "Expected participants",
     )?;
     validation::Validator::validate_timeout_range(Some(request.timeout_secs))?;
+    validate_subset_definitions(&request.subset_definitions, &request.expected_participants)?;
+    Ok(())
+}
+
+/// Validate subset definitions for a keygen session
+pub fn validate_subset_definitions(
+    subset_definitions: &[SubsetDefinition],
+    expected_participants: &[UserId],
+) -> Result<(), keymeld_core::KeyMeldError> {
+    use std::collections::HashSet;
+
+    // Check max subset count
+    if subset_definitions.len() > MAX_SUBSET_DEFINITIONS {
+        return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+            "Too many subset definitions: {} exceeds maximum of {}",
+            subset_definitions.len(),
+            MAX_SUBSET_DEFINITIONS
+        )));
+    }
+
+    let expected_set: HashSet<_> = expected_participants.iter().collect();
+    let mut seen_subset_ids = HashSet::new();
+
+    for subset in subset_definitions {
+        // Check for duplicate subset IDs
+        if !seen_subset_ids.insert(subset.subset_id) {
+            return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+                "Duplicate subset_id: {}",
+                subset.subset_id
+            )));
+        }
+
+        // Check subset has at least 2 participants
+        if subset.participants.len() < 2 {
+            return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+                "Subset {} must have at least 2 participants, got {}",
+                subset.subset_id,
+                subset.participants.len()
+            )));
+        }
+
+        // Check all participants in subset are in expected_participants
+        for user_id in &subset.participants {
+            if !expected_set.contains(user_id) {
+                return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+                    "Subset {} contains user {} who is not in expected_participants",
+                    subset.subset_id, user_id
+                )));
+            }
+        }
+
+        // Check for duplicate participants within subset
+        let mut seen_users = HashSet::new();
+        for user_id in &subset.participants {
+            if !seen_users.insert(user_id) {
+                return Err(keymeld_core::KeyMeldError::ValidationError(format!(
+                    "Subset {} contains duplicate user {}",
+                    subset.subset_id, user_id
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 
