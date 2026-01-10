@@ -1360,6 +1360,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlctix"
+version = "0.0.8"
+source = "git+https://github.com/tee8z/dlctix?branch=external-signing-api#ef1e675e136742539b4e1b28803f37e020e7a99c"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "musig2",
+ "rand 0.9.2",
+ "secp",
+ "serde",
+ "serdect",
+ "sha2",
+]
+
+[[package]]
 name = "dlv-list"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2337,6 +2352,7 @@ dependencies = [
  "bdk_wallet",
  "bitcoin",
  "clap",
+ "dlctix",
  "hex",
  "keymeld-sdk",
  "musig2",
@@ -2601,6 +2617,7 @@ dependencies = [
  "base16ct",
  "hmac",
  "once_cell",
+ "rand 0.9.2",
  "secp",
  "secp256k1 0.31.1",
  "serde",
@@ -3497,6 +3514,7 @@ checksum = "0d3b203895e8f18854c828d1cf7e5710683c3abc28d79330fe5ab723ce5b76e1"
 dependencies = [
  "base16ct",
  "once_cell",
+ "rand 0.9.2",
  "secp256k1 0.31.1",
  "serde",
  "serdect",

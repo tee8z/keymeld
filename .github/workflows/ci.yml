@@ -160,9 +160,9 @@ jobs:
           - name: single-signer
             command: just test-single-signer
             timeout: 10
-          - name: batch-signing
-            command: just test-batch-signing
-            timeout: 10
+          - name: dlctix-batch
+            command: just test-dlctix-batch
+            timeout: 15
           - name: kms-restart
             command: just test-kms-e2e
             timeout: 20
