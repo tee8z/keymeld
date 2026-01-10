@@ -5,20 +5,30 @@ End-to-end examples demonstrating MuSig2 Bitcoin signing with KeyMeld.
 ## Quick Start
 
 ```bash
-# Regular MuSig2
+# Single-signer (1-of-1)
+just test-single-signer
+
+# Regular MuSig2 (n-of-n)
 just quickstart
 
 # Adaptor signatures
 just quickstart-adaptors
-
-# Batch signing
-just test-batch-signing
 
 # DLC batch signing with subset keys
 just test-dlctix-batch
 ```
 
 ## Examples
+
+### Single-Signer (`single_signer`)
+
+1-of-1 signing for simple key custody without multi-party coordination.
+
+```bash
+just test-single-signer
+```
+
+Uses the SDK's `SingleSignerOps` extension trait for streamlined single-participant workflows.
 
 ### Regular MuSig2 (`keymeld_example`)
 
@@ -34,14 +44,6 @@ All adaptor types: Single, And, Or.
 
 ```bash
 just demo-adaptors  # All types
-```
-
-### Batch Signing (`batch_signing`)
-
-Sign multiple messages in a single session with per-item configuration.
-
-```bash
-just test-batch-signing
 ```
 
 ### DLC Batch Signing (`dlctix_batch`)
@@ -166,4 +168,8 @@ Delete to regenerate.
 ✅ Transaction broadcast: 70b5248f...
 ```
 
-See `regular_success.txt` and `adapter_success.txt` for full logs.
+See the `success/` directory for full example logs:
+- [`success/single_signer_success.txt`](success/single_signer_success.txt) - 1-of-1 signing
+- [`success/regular_success.txt`](success/regular_success.txt) - Regular MuSig2
+- [`success/adapter_success.txt`](success/adapter_success.txt) - Adaptor signatures
+- [`success/dlctix_success.txt`](success/dlctix_success.txt) - DLC batch signing

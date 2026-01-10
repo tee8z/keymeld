@@ -13,13 +13,11 @@ path = "src/lib.rs"
 name = "keymeld_demo"
 path = "src/main.rs"
 
-[[bin]]
-name = "keymeld_session_test"
-path = "src/session_restore_test_main.rs"
+
 
 
 [dependencies]
-keymeld-sdk = { path = "../crates/keymeld-sdk" }
+keymeld-sdk = { path = "../crates/keymeld-sdk", features = ["dlctix"] }
 bdk_wallet = { version = "2.3.0", features = ["keys-bip39"] }
 bdk_bitcoind_rpc = { version = "0.22.0" }
 bitcoin = { workspace = true, features = ["serde", "rand", "std"] }

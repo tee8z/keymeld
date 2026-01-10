@@ -1,0 +1,84 @@
+🔑 Running Single-Signer E2E Test...
+🧹 Cleaning all data...
+🛑 Stopping services...
+✅ All services stopped
+✅ Clean complete
+warning: Git tree '/home/teebz/repos/keymeld' is dirty
+🚀 KeyMeld Development Environment (Rust 1.88.0)
+Use 'just help' to see available commands
+✅ VSock available for enclave simulation
+🔨 Building KeyMeld...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s
+🚀 Starting services...
+🏦 Setting up Bitcoin regtest environment...
+Starting Bitcoin Core...
+Bitcoin Core starting
+Waiting for Bitcoin Core to start...
+Bitcoin Core RPC ready
+Generating initial blocks...
+✅ Bitcoin regtest ready with funded coordinator wallet
+🚀 Starting KeyMeld services...
+✅ Moto already running
+✅ Services started! Logs available in logs/ directory
+🌐 Gateway: http://localhost:8080
+⏳ Waiting for gateway to be ready...
+✅ Gateway is ready!
+⏳ Waiting for enclaves to initialize...
+🔑 Running single-signer E2E test...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target/debug/keymeld_demo single-signer --config config/example-nix.yaml`
+2026-01-10T22:21:40.343693Z  INFO keymeld_demo::single_signer: Single-Signer PSBT Example
+2026-01-10T22:21:40.343741Z  INFO keymeld_demo::single_signer: ===========================
+2026-01-10T22:21:40.343768Z  INFO keymeld_demo::single_signer: Gateway: http://127.0.0.1:8080
+2026-01-10T22:21:40.343783Z  INFO keymeld_demo::single_signer: Network: Regtest
+2026-01-10T22:21:40.345253Z  INFO keymeld_demo::single_signer: Generated keypair:
+2026-01-10T22:21:40.345293Z  INFO keymeld_demo::single_signer:   Public key: 0262a95bbaaa714bddfbacb00bbf0b727eb24f6e2eb70a176a458b411061dae7ee
+2026-01-10T22:21:40.345308Z  INFO keymeld_demo::single_signer:   Auth public key: 03183f1b5d5936c6b9c4dfb2f72d8eca76b289bf388735ce87c94fba00103d2fea
+2026-01-10T22:21:40.345618Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.345631Z  INFO keymeld_demo::single_signer: Step 1: Reserving key slot...
+2026-01-10T22:21:40.351367Z  INFO keymeld_demo::single_signer:   Key ID: 019baa00-3a7c-7f01-bc4c-fd73da5f2fd5
+2026-01-10T22:21:40.351432Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.351450Z  INFO keymeld_demo::single_signer: Step 2: Importing private key to enclave...
+2026-01-10T22:21:40.677342Z  INFO keymeld_demo::single_signer:   Key imported: 019baa00-3a7c-7f01-bc4c-fd73da5f2fd5
+2026-01-10T22:21:40.677414Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.677431Z  INFO keymeld_demo::single_signer: Step 3: Verifying key import...
+2026-01-10T22:21:40.683469Z  INFO keymeld_demo::single_signer:   Found 1 key(s)
+2026-01-10T22:21:40.683529Z  INFO keymeld_demo::single_signer:     - 019baa00-3a7c-7f01-bc4c-fd73da5f2fd5
+2026-01-10T22:21:40.685578Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.685607Z  INFO keymeld_demo::single_signer: Bitcoin RPC available - running full PSBT transaction test
+2026-01-10T22:21:40.685620Z  INFO keymeld_demo::single_signer: ============================================================
+2026-01-10T22:21:40.685685Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.685695Z  INFO keymeld_demo::single_signer: Step 4: Funding taproot address...
+2026-01-10T22:21:40.685711Z  INFO keymeld_demo::single_signer:   Address: bcrt1pv254hw42w99am7avkq9m7zmj06ey7m3wku9pw6j93dq3qcw6ulhqnam7mp
+2026-01-10T22:21:40.718124Z  INFO keymeld_demo::single_signer:   Funding txid: 85bb7cbc5be3bbfef471371566c6dfcb1cd4b9c4c69e984957b5f8b275d97acf
+2026-01-10T22:21:40.738049Z  INFO keymeld_demo::single_signer:   Funding confirmed
+2026-01-10T22:21:40.761530Z  INFO keymeld_demo::single_signer:   UTXO: 85bb7cbc5be3bbfef471371566c6dfcb1cd4b9c4c69e984957b5f8b275d97acf:1
+2026-01-10T22:21:40.761586Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.761595Z  INFO keymeld_demo::single_signer: Step 5: Creating PSBT...
+2026-01-10T22:21:40.777323Z  INFO keymeld_demo::single_signer:   Input: 16000 sats
+2026-01-10T22:21:40.777391Z  INFO keymeld_demo::single_signer:   Output: 10000 sats to bcrt1qpvlrg3e2829pgr3xwvxaeu8vr6wx8vvqn9k508
+2026-01-10T22:21:40.777450Z  INFO keymeld_demo::single_signer:   Change: 5000 sats back to bcrt1pv254hw42w99am7avkq9m7zmj06ey7m3wku9pw6j93dq3qcw6ulhqnam7mp
+2026-01-10T22:21:40.777512Z  INFO keymeld_demo::single_signer:   Fee: 1000 sats
+2026-01-10T22:21:40.777651Z  INFO keymeld_demo::single_signer:   PSBT created with 1 input(s), 2 output(s)
+2026-01-10T22:21:40.777681Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:40.777697Z  INFO keymeld_demo::single_signer: Step 6: Signing PSBT...
+2026-01-10T22:21:40.777944Z  INFO keymeld_demo::single_signer:   Sighash: de3178cd16e1423b7f8446b7007c79eb8f5719e4268ece3019f138085793fa48
+2026-01-10T22:21:40.777980Z  INFO keymeld_demo::single_signer:   Validating message before signing: de3178cd16e1423b7f8446b7007c79eb8f5719e4268ece3019f138085793fa48
+2026-01-10T22:21:41.071938Z  INFO keymeld_demo::single_signer:   Signature: a3da08fdd181f1172dc8485c57cb783c...
+2026-01-10T22:21:41.072003Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:41.072029Z  INFO keymeld_demo::single_signer: Step 7: Applying signature and broadcasting...
+2026-01-10T22:21:41.072106Z  INFO keymeld_demo::single_signer:   Message verified before broadcast
+2026-01-10T22:21:41.072254Z  INFO keymeld_demo::single_signer:   Transaction ID: 03dc7ad9a75c694d0f5f2360ea68b10c43e9bda42a6093b2c960d92f174cf238
+2026-01-10T22:21:41.095153Z  INFO keymeld_demo::single_signer:   Transaction broadcast successfully!
+2026-01-10T22:21:41.097162Z  INFO keymeld_demo::single_signer:   Transaction confirmed!
+2026-01-10T22:21:41.097226Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:41.097252Z  INFO keymeld_demo::single_signer: PSBT transaction test passed:
+2026-01-10T22:21:41.097273Z  INFO keymeld_demo::single_signer:   - Funded taproot address
+2026-01-10T22:21:41.097300Z  INFO keymeld_demo::single_signer:   - Created PSBT
+2026-01-10T22:21:41.097320Z  INFO keymeld_demo::single_signer:   - Signed with enclave (Schnorr BIP-340)
+2026-01-10T22:21:41.097343Z  INFO keymeld_demo::single_signer:   - Broadcast and confirmed: 03dc7ad9a75c694d0f5f2360ea68b10c43e9bda42a6093b2c960d92f174cf238
+2026-01-10T22:21:41.097523Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:41.097547Z  INFO keymeld_demo::single_signer: Cleaning up: Deleting key...
+2026-01-10T22:21:41.104209Z  INFO keymeld_demo::single_signer:   Key deleted
+2026-01-10T22:21:41.104270Z  INFO keymeld_demo::single_signer:
+2026-01-10T22:21:41.104296Z  INFO keymeld_demo::single_signer: Single-Signer PSBT Example Complete!
