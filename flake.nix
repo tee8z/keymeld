@@ -1011,6 +1011,54 @@ EOF
           echo "✅ All AWS Nitro Enclaves stopped"
         '';
 
+
+        # Docker images for k8s deployment
+        docker-gateway = pkgs.dockerTools.buildLayeredImage {
+          name = "keymeld-gateway";
+          tag = "latest";
+          contents = [
+            keymeld-gateway
+            pkgs.cacert
+            pkgs.tzdata
+          ];
+          config = {
+            Cmd = [ "${keymeld-gateway}/bin/keymeld-gateway" ];
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "RUST_LOG=info"
+              "TEST_MODE=true"
+            ];
+            ExposedPorts = {
+              "8080/tcp" = {};
+            };
+            WorkingDir = "/data";
+            Volumes = {
+              "/data" = {};
+            };
+          };
+        };
+
+        docker-enclave = pkgs.dockerTools.buildLayeredImage {
+          name = "keymeld-enclave";
+          tag = "latest";
+          contents = [
+            keymeld-enclave
+            pkgs.cacert
+            pkgs.tzdata
+          ];
+          config = {
+            Cmd = [ "${keymeld-enclave}/bin/keymeld-enclave" ];
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "RUST_LOG=info"
+              "TEST_MODE=true"
+            ];
+            ExposedPorts = {
+              "5000/tcp" = {};
+            };
+          };
+        };
+
       in
       {
         # Development shell
@@ -1021,6 +1069,8 @@ EOF
           default = keymeld-gateway;
           keymeld-gateway = keymeld-gateway;
           keymeld-enclave = keymeld-enclave;
+          docker-gateway = docker-gateway;
+          docker-enclave = docker-enclave;
           keymeld-demo = keymeld-demo;
 
           # Utility scripts
