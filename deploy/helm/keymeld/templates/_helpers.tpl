@@ -66,3 +66,16 @@ Return the image name
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end }}
+
+{{/*
+Return the enclave image name
+*/}}
+{{- define "keymeld.enclaveImage" -}}
+{{- if .Values.enclave.image -}}
+{{- $tag := default .Chart.AppVersion .Values.enclave.image.tag -}}
+{{- printf "%s:%s" .Values.enclave.image.repository $tag -}}
+{{- else -}}
+{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- printf "%s-enclave:%s" .Values.image.repository $tag -}}
+{{- end -}}
+{{- end }}

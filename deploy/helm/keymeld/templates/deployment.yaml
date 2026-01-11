@@ -64,7 +64,12 @@ spec:
             {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
             {{- end }}
+          {{- if .Values.devMode.enabled }}
+          image: {{ .Values.devMode.baseImage }}
+          command: ["/app/keymeld-gateway"]
+          {{- else }}
           image: {{ include "keymeld.image" . }}
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -109,6 +114,11 @@ spec:
               readOnly: true
             - name: vsock
               mountPath: /dev/vsock
+            {{- end }}
+            {{- if .Values.devMode.enabled }}
+            - name: dev-binary
+              mountPath: /app
+              readOnly: true
             {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
@@ -170,6 +180,12 @@ spec:
           hostPath:
             path: /dev/vsock
             type: CharDevice
+        {{- end }}
+        {{- if .Values.devMode.enabled }}
+        - name: dev-binary
+          hostPath:
+            path: {{ .Values.devMode.gateway.hostPath | dir }}
+            type: Directory
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
