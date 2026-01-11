@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "keymeld.fullname" . }}
+  labels:
+    {{- include "keymeld.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.enclave.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "keymeld.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "keymeld.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "keymeld.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.litestream.enabled }}
+      initContainers:
+        - name: litestream-restore
+          image: "{{ .Values.litestream.image.repository }}:{{ .Values.litestream.image.tag }}"
+          args:
+            - restore
+            - -if-db-not-exists
+            - -if-replica-exists
+            - "{{ .Values.persistence.mountPath }}/keymeld.db"
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            - name: litestream-config
+              mountPath: /etc/litestream.yml
+              subPath: litestream.yml
+          {{- if .Values.litestream.s3Endpoint }}
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: "testing"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "testing"
+          {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- if .Values.enclave.enabled }}
+            privileged: true
+            {{- else }}
+            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- end }}
+          image: {{ include "keymeld.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.server.port }}
+              protocol: TCP
+          env:
+            - name: KEYMELD_CONFIG
+              value: /etc/keymeld/config.yaml
+            {{- if .Values.kms.enabled }}
+            - name: KMS_KEY_ARN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" . }}-kms
+                  key: keyArn
+            - name: AWS_REGION
+              value: {{ .Values.kms.region | quote }}
+            {{- end }}
+            {{- if .Values.kms.mock }}
+            - name: KMS_MOCK
+              value: "true"
+            {{- end }}
+            {{- if .Values.enclave.enabled }}
+            - name: ENCLAVE_ENABLED
+              value: "true"
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            - name: config
+              mountPath: /etc/keymeld
+            {{- if .Values.enclave.enabled }}
+            - name: enclave-eif
+              mountPath: /opt/keymeld
+              readOnly: true
+            - name: vsock
+              mountPath: /dev/vsock
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.litestream.enabled }}
+        - name: litestream
+          image: "{{ .Values.litestream.image.repository }}:{{ .Values.litestream.image.tag }}"
+          args:
+            - replicate
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            - name: litestream-config
+              mountPath: /etc/litestream.yml
+              subPath: litestream.yml
+          {{- if .Values.litestream.s3Endpoint }}
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: "testing"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "testing"
+          {{- end }}
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+        {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "keymeld.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "keymeld.fullname" . }}
+        {{- if .Values.litestream.enabled }}
+        - name: litestream-config
+          configMap:
+            name: {{ include "keymeld.fullname" . }}-litestream
+        {{- end }}
+        {{- if .Values.enclave.enabled }}
+        - name: enclave-eif
+          hostPath:
+            path: {{ .Values.enclave.eifPath | dir }}
+            type: Directory
+        - name: vsock
+          hostPath:
+            path: /dev/vsock
+            type: CharDevice
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

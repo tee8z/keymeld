@@ -1,0 +1,21 @@
+apiVersion: v2
+name: keymeld
+description: Distributed MuSig2 signing system for AWS Nitro Enclaves
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+home: https://github.com/tee8z/keymeld
+sources:
+  - https://github.com/tee8z/keymeld
+
+maintainers:
+  - name: tee8z
+    email: tee8z@protonmail.com
+
+keywords:
+  - bitcoin
+  - musig2
+  - signing
+  - nitro-enclaves
+  - dlc

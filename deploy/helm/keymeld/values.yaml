@@ -1,0 +1,146 @@
+# KeyMeld Helm Chart Values
+# Distributed MuSig2 signing system for AWS Nitro Enclaves
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/tee8z/keymeld
+  tag: ""  # Defaults to appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+  automount: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+
+podSecurityContext: {}
+securityContext: {}
+
+healthCheck:
+  path: /health
+  port: 8080
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  mountPath: /var/lib/keymeld
+
+litestream:
+  enabled: true
+  image:
+    repository: litestream/litestream
+    tag: "0.3.13"
+  s3Bucket: ""
+  s3Path: "keymeld.db"
+  s3Region: "us-east-1"
+  s3Endpoint: ""
+  s3ForcePathStyle: false
+  syncInterval: "10s"
+  retention: "168h"
+  snapshotInterval: "1h"
+
+enclave:
+  enabled: false
+  enclaves:
+    - id: 0
+      cid: 3
+      port: 8000
+    - id: 1
+      cid: 4
+      port: 8000
+  eifPath: /opt/keymeld/keymeld.eif
+  vsockTimeoutSecs: 300
+  sessionInitTimeoutSecs: 1800
+  signingTimeoutSecs: 600
+
+kms:
+  enabled: false
+  keyArn: ""
+  region: "us-east-1"
+  mock: false
+
+config:
+  environment: production
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    enableCors: false
+    enableCompression: true
+  database:
+    maxConnections: 50
+    connectionTimeoutSecs: 10
+    idleTimeoutSecs: 300
+    enableWalMode: true
+  coordinator:
+    processingIntervalMs: 100
+    batchSize: 100
+    maxRetries: 5
+    processingTimeoutMins: 1
+  logging:
+    level: "info"
+    format: "json"
+    enableJson: true
+    enableFileOutput: false
+  security:
+    enableAttestation: true
+    strictValidation: true
+    allowInsecureConnections: false
+    requireTls: false
+
+env: {}
+envFrom: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+metrics:
+  enabled: false
+  path: /metrics
+  interval: 30s
