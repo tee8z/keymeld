@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keymeld.fullname" . }}
+  labels:
+    {{- include "keymeld.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    environment: {{ .Values.config.environment }}
+    server:
+      host: {{ .Values.config.server.host | quote }}
+      port: {{ .Values.config.server.port }}
+      enable_cors: {{ .Values.config.server.enableCors }}
+      enable_compression: {{ .Values.config.server.enableCompression }}
+    kms:
+      enabled: {{ .Values.kms.enabled }}
+      {{- if .Values.kms.enabled }}
+      endpoint_url: null
+      key_id: "${KMS_KEY_ARN}"
+      {{- end }}
+    database:
+      path: "{{ .Values.persistence.mountPath }}/keymeld.db"
+      max_connections: {{ .Values.config.database.maxConnections }}
+      connection_timeout_secs: {{ .Values.config.database.connectionTimeoutSecs }}
+      idle_timeout_secs: {{ .Values.config.database.idleTimeoutSecs }}
+      enable_wal_mode: {{ .Values.config.database.enableWalMode }}
+    {{- if .Values.enclave.enabled }}
+    enclaves:
+      enclaves:
+        {{- range .Values.enclave.enclaves }}
+        - id: {{ .id }}
+          cid: {{ .cid }}
+          port: {{ .port }}
+        {{- end }}
+      max_channel_size: 1000
+      vsock_timeout_secs: {{ .Values.enclave.vsockTimeoutSecs }}
+      nonce_generation_timeout_secs: 180
+      session_init_timeout_secs: {{ .Values.enclave.sessionInitTimeoutSecs }}
+      signing_timeout_secs: {{ .Values.enclave.signingTimeoutSecs }}
+      network_write_timeout_secs: 5
+      network_read_timeout_secs: 300
+      pool_acquire_timeout_secs: 30
+      connection_retry_delay_ms: 100
+      max_message_size_bytes: 16777216
+    {{- end }}
+    coordinator:
+      processing_interval_ms: {{ .Values.config.coordinator.processingIntervalMs }}
+      batch_size: {{ .Values.config.coordinator.batchSize }}
+      max_retries: {{ .Values.config.coordinator.maxRetries }}
+      processing_timeout_mins: {{ .Values.config.coordinator.processingTimeoutMins }}
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+      enable_json: {{ .Values.config.logging.enableJson }}
+      enable_file_output: {{ .Values.config.logging.enableFileOutput }}
+      {{- if .Values.config.logging.enableFileOutput }}
+      file_path: "/var/log/keymeld/keymeld.log"
+      {{- end }}
+    security:
+      enable_attestation: {{ .Values.config.security.enableAttestation }}
+      strict_validation: {{ .Values.config.security.strictValidation }}
+      allow_insecure_connections: {{ .Values.config.security.allowInsecureConnections }}
+      require_tls: {{ .Values.config.security.requireTls }}
+---
+{{- if .Values.litestream.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keymeld.fullname" . }}-litestream
+  labels:
+    {{- include "keymeld.labels" . | nindent 4 }}
+data:
+  litestream.yml: |
+    dbs:
+      - path: {{ .Values.persistence.mountPath }}/keymeld.db
+        replicas:
+          - type: s3
+            bucket: {{ .Values.litestream.s3Bucket }}
+            path: {{ .Values.litestream.s3Path }}
+            region: {{ .Values.litestream.s3Region }}
+            {{- if .Values.litestream.s3Endpoint }}
+            endpoint: {{ .Values.litestream.s3Endpoint }}
+            force-path-style: {{ .Values.litestream.s3ForcePathStyle }}
+            {{- end }}
+            sync-interval: {{ .Values.litestream.syncInterval }}
+            retention: {{ .Values.litestream.retention }}
+            snapshot-interval: {{ .Values.litestream.snapshotInterval }}
+{{- end }}
