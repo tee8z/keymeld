@@ -5,7 +5,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/tee8z/keymeld
-  tag: ""  # Defaults to appVersion
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -84,6 +84,18 @@ litestream:
 
 enclave:
   enabled: false
+  simulation: false
+  image:
+    repository: ghcr.io/tee8z/keymeld-enclave
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+  logLevel: "info,keymeld_enclave=debug"
   enclaves:
     - id: 0
       cid: 3
@@ -100,6 +112,7 @@ kms:
   enabled: false
   keyArn: ""
   region: "us-east-1"
+  endpoint: ""
   mock: false
 
 config:
@@ -129,14 +142,13 @@ config:
     strictValidation: true
     allowInsecureConnections: false
     requireTls: false
+  development: null
 
 env: {}
 envFrom: []
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
 podAnnotations: {}
 podLabels: {}
 
@@ -144,3 +156,16 @@ metrics:
   enabled: false
   path: /metrics
   interval: 30s
+
+# Dev mode configuration for fast local development
+# Uses locally-compiled cargo binaries instead of container images
+devMode:
+  enabled: false
+  gateway:
+    # Path to the gateway binary inside the k3d node (mounted from host)
+    hostPath: /mnt/keymeld/keymeld-gateway
+  enclave:
+    # Path to the enclave binary inside the k3d node (mounted from host)
+    hostPath: /mnt/keymeld/keymeld-enclave
+  # Base image for running the binaries (must have libc, ssl, etc.)
+  baseImage: debian:bookworm-slim

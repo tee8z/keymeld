@@ -1,0 +1,108 @@
+{{- if and .Values.enclave.enabled .Values.enclave.simulation }}
+{{- range $i, $e := .Values.enclave.enclaves }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}
+  labels:
+    {{- include "keymeld.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: enclave
+    keymeld.io/enclave-id: "{{ $e.id }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "keymeld.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: enclave
+      keymeld.io/enclave-id: "{{ $e.id }}"
+  template:
+    metadata:
+      labels:
+        {{- include "keymeld.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: enclave
+        keymeld.io/enclave-id: "{{ $e.id }}"
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: enclave
+          {{- if $.Values.devMode.enabled }}
+          image: {{ $.Values.devMode.baseImage }}
+          command: ["/app/keymeld-enclave"]
+          {{- else }}
+          image: {{ include "keymeld.enclaveImage" $ }}
+          {{- end }}
+          imagePullPolicy: {{ $.Values.enclave.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: vsock
+              containerPort: {{ $e.port }}
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
+            - name: VSOCK_PORT
+              value: {{ $e.port | quote }}
+            - name: ENCLAVE_ID
+              value: {{ $e.id | quote }}
+            - name: TEST_MODE
+              value: "true"
+            {{- if $.Values.kms.endpoint }}
+            - name: AWS_ENDPOINT_URL
+              value: {{ $.Values.kms.endpoint | quote }}
+            {{- end }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ $.Values.kms.region | default "us-east-1" | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              value: "testing"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "testing"
+          {{- if $.Values.devMode.enabled }}
+          volumeMounts:
+            - name: dev-binary
+              mountPath: /app
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml $.Values.enclave.resources | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: vsock
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: vsock
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      {{- if $.Values.devMode.enabled }}
+      volumes:
+        - name: dev-binary
+          hostPath:
+            path: {{ $.Values.devMode.enclave.hostPath | dir }}
+            type: Directory
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}
+  labels:
+    {{- include "keymeld.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: enclave
+    keymeld.io/enclave-id: "{{ $e.id }}"
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $e.port }}
+      targetPort: vsock
+      protocol: TCP
+      name: vsock
+  selector:
+    {{- include "keymeld.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: enclave
+    keymeld.io/enclave-id: "{{ $e.id }}"
+{{- end }}
+{{- end }}
