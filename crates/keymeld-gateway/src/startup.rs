@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, GatewayLimits},
+    config::{Config, GatewayLimits, TransportMode},
     coordinator::Coordinator,
     database::Database,
     enclave::{EnclaveConfig, EnclaveManager},
@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
     serve, Router,
 };
-use keymeld_core::managed_vsock::config::TimeoutConfig;
+use keymeld_core::managed_socket::{config::TimeoutConfig, SocketConnector};
 use keymeld_sdk::{
     ApiFeatures, ApiVersionResponse, AvailableUserSlot, CreateSigningSessionRequest,
     CreateSigningSessionResponse, DatabaseStats, DeleteUserKeyResponse, EnclaveAssignmentResponse,
@@ -311,10 +311,23 @@ impl Application {
             .enclaves
             .enclaves
             .iter()
-            .map(|enclave| EnclaveConfig {
-                id: enclave.id,
-                cid: enclave.cid,
-                port: enclave.port,
+            .map(|enclave| {
+                let connector = match enclave.transport {
+                    TransportMode::Vsock => SocketConnector::vsock(enclave.cid, enclave.port),
+                    TransportMode::Tcp => {
+                        let host = enclave
+                            .tcp_host
+                            .clone()
+                            .unwrap_or_else(|| "localhost".to_string());
+                        SocketConnector::tcp(host, enclave.port as u16)
+                    }
+                };
+                EnclaveConfig {
+                    id: enclave.id,
+                    cid: enclave.cid,
+                    port: enclave.port,
+                    connector,
+                }
             })
             .collect();
 
@@ -518,7 +531,7 @@ mod tests {
     use super::*;
     use crate::config::{
         CoordinatorConfig, DatabaseConfig, DevelopmentConfig, EnclaveConfig, EnclaveInfo,
-        Environment, KmsConfig, SecurityConfig, ServerConfig,
+        Environment, KmsConfig, SecurityConfig, ServerConfig, TransportMode,
     };
     use keymeld_core::logging::LoggingConfig;
     use tempfile::TempDir;
@@ -548,11 +561,15 @@ mod tests {
                         id: 0,
                         cid: 3,
                         port: 8000,
+                        transport: TransportMode::default(),
+                        tcp_host: None,
                     },
                     EnclaveInfo {
                         id: 1,
                         cid: 4,
                         port: 8001,
+                        transport: TransportMode::default(),
+                        tcp_host: None,
                     },
                 ],
                 connection_load_threshold: Some(100),

@@ -35,8 +35,8 @@ data:
         - id: {{ $e.id }}
           cid: {{ $e.cid }}
           {{- if $.Values.enclave.simulation }}
-          # Simulation mode: connect to local socat proxies on ports 9000+
-          port: {{ add 9000 $e.id }}
+          # Simulation mode: enclaves run as sidecars in same pod
+          port: {{ $e.port }}
           {{- else }}
           port: {{ $e.port }}
           {{- end }}

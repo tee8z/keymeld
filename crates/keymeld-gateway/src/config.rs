@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use keymeld_core::managed_vsock::config::{RetryConfig, TimeoutConfig};
+use keymeld_core::managed_socket::config::{RetryConfig, TimeoutConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -200,11 +200,30 @@ impl From<&EnclaveConfig> for RetryConfig {
     }
 }
 
+/// Transport mode for enclave connections
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    /// Direct vsock connection (AWS Nitro Enclaves)
+    #[default]
+    Vsock,
+    /// TCP connection via vsock-proxy/socat bridge (K8s simulation)
+    Tcp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclaveInfo {
     pub id: u32,
+    /// CID for vsock mode (ignored in TCP mode)
     pub cid: u32,
+    /// Port for both vsock and TCP modes
     pub port: u32,
+    /// Transport mode (vsock or tcp), defaults to vsock
+    #[serde(default)]
+    pub transport: TransportMode,
+    /// TCP host for TCP mode (e.g., K8s service name like "keymeld-enclave-0")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,10 +429,13 @@ impl Config {
             self.logging.level = log_level;
         }
 
-        // Dynamic enclave CID discovery for production deployment
+        // Dynamic enclave configuration from environment
         // In AWS Nitro Enclaves, CIDs are assigned dynamically by AWS
         // Use environment variables to override static configuration:
         // KEYMELD_ENCLAVE_0_CID, KEYMELD_ENCLAVE_1_CID, etc.
+        // For K8s/simulation mode, use:
+        // KEYMELD_ENCLAVE_0_TRANSPORT=tcp
+        // KEYMELD_ENCLAVE_0_TCP_HOST=keymeld-enclave-0
         for enclave in &mut self.enclaves.enclaves {
             let env_var_name = format!("KEYMELD_ENCLAVE_{}_CID", enclave.id);
             if let Ok(cid_str) = std::env::var(&env_var_name) {
@@ -422,12 +444,28 @@ impl Config {
                 }
             }
 
-            // Also support port override if needed
+            // Port override
             let port_env_var_name = format!("KEYMELD_ENCLAVE_{}_PORT", enclave.id);
             if let Ok(port_str) = std::env::var(&port_env_var_name) {
                 if let Ok(port) = port_str.parse::<u32>() {
                     enclave.port = port;
                 }
+            }
+
+            // Transport mode override (vsock or tcp)
+            let transport_env_var_name = format!("KEYMELD_ENCLAVE_{}_TRANSPORT", enclave.id);
+            if let Ok(transport_str) = std::env::var(&transport_env_var_name) {
+                match transport_str.to_lowercase().as_str() {
+                    "tcp" => enclave.transport = TransportMode::Tcp,
+                    "vsock" => enclave.transport = TransportMode::Vsock,
+                    _ => {} // Ignore invalid values
+                }
+            }
+
+            // TCP host override (for TCP mode, e.g., K8s service name)
+            let tcp_host_env_var_name = format!("KEYMELD_ENCLAVE_{}_TCP_HOST", enclave.id);
+            if let Ok(tcp_host) = std::env::var(&tcp_host_env_var_name) {
+                enclave.tcp_host = Some(tcp_host);
             }
         }
     }
@@ -633,16 +671,22 @@ impl Default for EnclaveConfig {
                     id: 0,
                     cid: 3,
                     port: 8000,
+                    transport: TransportMode::default(),
+                    tcp_host: None,
                 },
                 EnclaveInfo {
                     id: 1,
                     cid: 4,
                     port: 8000,
+                    transport: TransportMode::default(),
+                    tcp_host: None,
                 },
                 EnclaveInfo {
                     id: 2,
                     cid: 5,
                     port: 8000,
+                    transport: TransportMode::default(),
+                    tcp_host: None,
                 },
             ],
 

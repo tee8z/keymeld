@@ -1,4 +1,16 @@
-{{- if and .Values.enclave.enabled .Values.enclave.simulation }}
+{{/*
+Enclave deployments - separate pods for each enclave.
+In simulation mode, includes socat sidecar to bridge TCP (from gateway) to VSock (for enclave).
+
+Port mapping in simulation mode:
+- Gateway connects to VSock port X (e.g., 5000)
+- Gateway's socat listens on VSock X, forwards to TCP enclave-service:X
+- Enclave's socat listens on TCP X, forwards to VSock X+1000 (e.g., 6000)
+- Enclave binary listens on VSock X+1000
+
+This offset avoids VSock port conflicts since all pods share the host's /dev/vsock.
+*/}}
+{{- if .Values.enclave.enabled }}
 {{- range $i, $e := .Values.enclave.enclaves }}
 ---
 apiVersion: apps/v1
@@ -28,36 +40,32 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        # Enclave process - listens on VSock CID 2, port 5000+
         - name: enclave
           {{- if $.Values.devMode.enabled }}
           image: {{ $.Values.devMode.baseImage }}
+          imagePullPolicy: Never
           command: ["/app/keymeld-enclave"]
           {{- else }}
           image: {{ include "keymeld.enclaveImage" $ }}
-          {{- end }}
           imagePullPolicy: {{ $.Values.enclave.image.pullPolicy | default "IfNotPresent" }}
+          {{- end }}
           securityContext:
-            privileged: true  # Required for /dev/vsock access
+            privileged: true
           env:
             - name: RUST_LOG
               value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
+            {{- if $.Values.enclave.simulation }}
+            # In simulation mode, use offset port to avoid VSock conflicts
+            - name: VSOCK_PORT
+              value: "{{ add $e.port 1000 }}"
+            {{- else }}
             - name: VSOCK_PORT
               value: {{ $e.port | quote }}
+            {{- end }}
             - name: ENCLAVE_ID
               value: {{ $e.id | quote }}
-            - name: TEST_MODE
-              value: "true"
-            {{- if $.Values.kms.endpoint }}
-            - name: AWS_ENDPOINT_URL
-              value: {{ $.Values.kms.endpoint | quote }}
-            {{- end }}
-            - name: AWS_DEFAULT_REGION
-              value: {{ $.Values.kms.region | default "us-east-1" | quote }}
-            - name: AWS_ACCESS_KEY_ID
-              value: "testing"
-            - name: AWS_SECRET_ACCESS_KEY
-              value: "testing"
+            - name: ENCLAVE_CID
+              value: "2"
           volumeMounts:
             - name: vsock
               mountPath: /dev/vsock
@@ -68,37 +76,34 @@ spec:
             {{- end }}
           resources:
             {{- toYaml $.Values.enclave.resources | nindent 12 }}
-        # Socat sidecar - bridges TCP to VSock for gateway connectivity
-        - name: vsock-proxy
-          image: alpine/socat:1.8.0.0
+        {{- if $.Values.enclave.simulation }}
+        # Socat sidecar: bridges TCP (from gateway's socat) to VSock (enclave)
+        # Listens on TCP port, forwards to enclave's VSock port (offset by 1000)
+        - name: tcp-to-vsock
+          image: {{ $.Values.devMode.baseImage }}
+          imagePullPolicy: Never
+          command: ["socat"]
           args:
-            - TCP-LISTEN:{{ $e.port }},reuseaddr,fork
-            - VSOCK-CONNECT:2:{{ $e.port }}
+            - "-d"
+            - "-d"
+            - "TCP-LISTEN:{{ $e.port }},fork,reuseaddr"
+            - "VSOCK-CONNECT:2:{{ add $e.port 1000 }}"
+          securityContext:
+            privileged: true
           ports:
-            - name: tcp
+            - name: vsock-proxy
               containerPort: {{ $e.port }}
               protocol: TCP
-          securityContext:
-            privileged: true  # Required for /dev/vsock access
           volumeMounts:
             - name: vsock
               mountPath: /dev/vsock
-          livenessProbe:
-            tcpSocket:
-              port: tcp
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          readinessProbe:
-            tcpSocket:
-              port: tcp
-            initialDelaySeconds: 5
-            periodSeconds: 10
           resources:
             requests:
+              cpu: 5m
               memory: 16Mi
-              cpu: 10m
             limits:
               memory: 32Mi
+        {{- end }}
       volumes:
         - name: vsock
           hostPath:
@@ -110,25 +115,5 @@ spec:
             path: {{ $.Values.devMode.enclave.hostPath | dir }}
             type: Directory
         {{- end }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}
-  labels:
-    {{- include "keymeld.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: enclave
-    keymeld.io/enclave-id: "{{ $e.id }}"
-spec:
-  type: ClusterIP
-  ports:
-    - port: {{ $e.port }}
-      targetPort: tcp
-      protocol: TCP
-      name: tcp
-  selector:
-    {{- include "keymeld.selectorLabels" $ | nindent 4 }}
-    app.kubernetes.io/component: enclave
-    keymeld.io/enclave-id: "{{ $e.id }}"
 {{- end }}
 {{- end }}

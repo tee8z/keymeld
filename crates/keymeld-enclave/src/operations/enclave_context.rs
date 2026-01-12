@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use keymeld_core::{
     crypto::{SecureCrypto, SessionSecret},
     identifiers::EnclaveId,
-    managed_vsock::config::TimeoutConfig,
+    managed_socket::config::TimeoutConfig,
     protocol::{CryptoError, EnclaveError},
     EncryptedData,
 };

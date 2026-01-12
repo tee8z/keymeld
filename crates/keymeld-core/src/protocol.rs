@@ -1518,7 +1518,7 @@ impl From<KeyMeldError> for EnclaveError {
 
 pub struct EnclaveHealthCheck;
 
-impl crate::managed_vsock::pool::HealthCheckable for EnclaveHealthCheck {
+impl crate::managed_socket::pool::HealthCheckable for EnclaveHealthCheck {
     type Command = Command;
     type Response = Outcome;
 
@@ -1534,4 +1534,4 @@ impl crate::managed_vsock::pool::HealthCheckable for EnclaveHealthCheck {
     }
 }
 
-pub type VsockClient = crate::managed_vsock::VsockClient<Command, Outcome>;
+pub type SocketClient = crate::managed_socket::SocketClient<Command, Outcome>;

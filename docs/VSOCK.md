@@ -125,6 +125,185 @@ for i in {0..2}; do
 done
 ```
 
+## TCP Transport Mode (Kubernetes/Simulation)
+
+When running the gateway in an environment where VSock is not available (e.g., Kubernetes clusters for local development or simulation), you can configure the gateway to connect to enclaves via TCP instead. A vsock-proxy (or socat) running alongside the enclave bridges TCP connections to VSock.
+
+### Architecture with TCP Transport
+
+```
+┌─────────────────┐     TCP      ┌─────────────────┐    VSock    ┌─────────────────┐
+│   Gateway       │─────────────►│   vsock-proxy   │────────────►│   Enclave       │
+│   (K8s Pod)     │   :5000      │   (sidecar)     │  CID:3:5000 │   (VSock only)  │
+└─────────────────┘              └─────────────────┘             └─────────────────┘
+                                        │
+                                  socat bridge:
+                              TCP-LISTEN:5000 → 
+                              VSOCK-CONNECT:3:5000
+```
+
+**Key Points:**
+- The **gateway** connects via TCP to a proxy service
+- The **proxy** (socat/vsock-proxy) bridges TCP to VSock
+- The **enclave** always listens on VSock (unchanged)
+
+### Gateway Configuration for TCP Mode
+
+Configure each enclave with `transport: tcp` in your configuration:
+
+```yaml
+# config/development-k8s.yaml
+enclaves:
+  enclaves:
+    - id: 0
+      cid: 2           # Ignored in TCP mode
+      port: 5000       # TCP port to connect to
+      transport: tcp   # Use TCP instead of VSock
+      tcp_host: keymeld-enclave-0  # K8s service name or hostname
+    - id: 1
+      cid: 2
+      port: 5000
+      transport: tcp
+      tcp_host: keymeld-enclave-1
+    - id: 2
+      cid: 2
+      port: 5000
+      transport: tcp
+      tcp_host: keymeld-enclave-2
+```
+
+### Environment Variable Overrides
+
+You can also configure TCP mode via environment variables:
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `KEYMELD_ENCLAVE_0_TRANSPORT` | Transport mode | `tcp` or `vsock` |
+| `KEYMELD_ENCLAVE_0_TCP_HOST` | TCP hostname | `keymeld-enclave-0` |
+| `KEYMELD_ENCLAVE_0_PORT` | Port number | `5000` |
+
+Example:
+```bash
+export KEYMELD_ENCLAVE_0_TRANSPORT=tcp
+export KEYMELD_ENCLAVE_0_TCP_HOST=keymeld-enclave-0
+export KEYMELD_ENCLAVE_0_PORT=5000
+```
+
+### Kubernetes Deployment Example
+
+#### Enclave Pod with socat Sidecar
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: keymeld-enclave-0
+spec:
+  containers:
+    # Main enclave container (listens on VSock)
+    - name: enclave
+      image: keymeld-enclave:latest
+      env:
+        - name: VSOCK_PORT
+          value: "5000"
+        - name: ENCLAVE_CID
+          value: "3"
+    
+    # Sidecar: TCP to VSock bridge
+    - name: vsock-proxy
+      image: alpine/socat:latest
+      command: ["socat"]
+      args:
+        - "TCP-LISTEN:5000,fork,reuseaddr"
+        - "VSOCK-CONNECT:3:5000"
+      ports:
+        - containerPort: 5000
+          name: vsock-bridge
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keymeld-enclave-0
+spec:
+  selector:
+    app: keymeld-enclave-0
+  ports:
+    - port: 5000
+      targetPort: 5000
+```
+
+#### Gateway Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keymeld-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          image: keymeld-gateway:latest
+          env:
+            # Configure TCP transport for all enclaves
+            - name: KEYMELD_ENCLAVE_0_TRANSPORT
+              value: "tcp"
+            - name: KEYMELD_ENCLAVE_0_TCP_HOST
+              value: "keymeld-enclave-0"
+            - name: KEYMELD_ENCLAVE_0_PORT
+              value: "5000"
+            - name: KEYMELD_ENCLAVE_1_TRANSPORT
+              value: "tcp"
+            - name: KEYMELD_ENCLAVE_1_TCP_HOST
+              value: "keymeld-enclave-1"
+            - name: KEYMELD_ENCLAVE_1_PORT
+              value: "5000"
+            - name: KEYMELD_ENCLAVE_2_TRANSPORT
+              value: "tcp"
+            - name: KEYMELD_ENCLAVE_2_TCP_HOST
+              value: "keymeld-enclave-2"
+            - name: KEYMELD_ENCLAVE_2_PORT
+              value: "5000"
+```
+
+### When to Use TCP Transport
+
+| Scenario | Recommended Transport |
+|----------|----------------------|
+| AWS Nitro Enclaves (production) | `vsock` (default) |
+| Local development with VSock kernel module | `vsock` |
+| Kubernetes/k3s simulation | `tcp` |
+| Docker Compose without VSock | `tcp` |
+| CI/CD testing environments | `tcp` |
+
+### Troubleshooting TCP Mode
+
+#### Connection Refused
+```
+ERROR: Connection refused to keymeld-enclave-0:5000
+```
+- Verify the enclave pod is running: `kubectl get pods`
+- Check if the socat sidecar is healthy: `kubectl logs <pod> -c vsock-proxy`
+- Verify the K8s service exists: `kubectl get svc keymeld-enclave-0`
+
+#### DNS Resolution Failures
+```
+ERROR: Failed to resolve hostname: keymeld-enclave-0
+```
+- Ensure the service name matches `tcp_host` configuration
+- Check DNS is working: `kubectl run -it --rm debug --image=busybox -- nslookup keymeld-enclave-0`
+
+#### socat Bridge Issues
+```bash
+# Test the socat bridge manually
+kubectl exec -it <enclave-pod> -c vsock-proxy -- nc -z localhost 5000
+
+# Check socat logs
+kubectl logs <enclave-pod> -c vsock-proxy
+```
+
 ## Common Issues and Solutions
 
 ### Issue: "No such device (os error 19)"
