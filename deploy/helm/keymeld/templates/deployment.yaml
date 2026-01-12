@@ -59,18 +59,19 @@ spec:
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
-            {{- if .Values.enclave.enabled }}
+            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             privileged: true
             {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
             {{- end }}
           {{- if .Values.devMode.enabled }}
           image: {{ .Values.devMode.baseImage }}
+          imagePullPolicy: Never
           command: ["/app/keymeld-gateway"]
           {{- else }}
           image: {{ include "keymeld.image" . }}
-          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.config.server.port }}
@@ -95,6 +96,17 @@ spec:
             - name: ENCLAVE_ENABLED
               value: "true"
             {{- end }}
+            {{- if .Values.enclave.simulation }}
+            # TCP transport mode for simulation - gateway connects via TCP to enclave services
+            {{- range $i, $e := .Values.enclave.enclaves }}
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_TRANSPORT
+              value: "tcp"
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_TCP_HOST
+              value: "{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}"
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_PORT
+              value: {{ $e.port | quote }}
+            {{- end }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
@@ -108,14 +120,12 @@ spec:
               mountPath: {{ .Values.persistence.mountPath }}
             - name: config
               mountPath: /etc/keymeld
-            {{- if .Values.enclave.enabled }}
+            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             - name: vsock
               mountPath: /dev/vsock
-            {{- if not .Values.enclave.simulation }}
             - name: enclave-eif
               mountPath: /opt/keymeld
               readOnly: true
-            {{- end }}
             {{- end }}
             {{- if .Values.devMode.enabled }}
             - name: dev-binary
@@ -132,33 +142,6 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-        {{- if and .Values.enclave.enabled .Values.enclave.simulation }}
-        # Socat sidecars for simulation mode
-        # Bridge VSock (gateway connects here) to TCP (forwards to enclave service)
-        # This works around tokio-vsock not being able to create VSock sockets inside containers
-        {{- range $i, $e := .Values.enclave.enclaves }}
-        - name: vsock-to-tcp-{{ $e.id }}
-          image: {{ $.Values.devMode.baseImage }}
-          imagePullPolicy: Never
-          command: ["socat"]
-          args:
-            - "-d"
-            - "-d"
-            - "VSOCK-LISTEN:{{ $e.port }},fork,reuseaddr"
-            - "TCP:{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}:{{ $e.port }}"
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: vsock
-              mountPath: /dev/vsock
-          resources:
-            requests:
-              cpu: 5m
-              memory: 16Mi
-            limits:
-              memory: 32Mi
-        {{- end }}
-        {{- end }}
         {{- if .Values.litestream.enabled }}
         - name: litestream
           image: "{{ .Values.litestream.image.repository }}:{{ .Values.litestream.image.tag }}"
@@ -200,17 +183,15 @@ spec:
           configMap:
             name: {{ include "keymeld.fullname" . }}-litestream
         {{- end }}
-        {{- if .Values.enclave.enabled }}
+        {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
         - name: vsock
           hostPath:
             path: /dev/vsock
             type: CharDevice
-        {{- if not .Values.enclave.simulation }}
         - name: enclave-eif
           hostPath:
             path: {{ .Values.enclave.eifPath | dir }}
             type: Directory
-        {{- end }}
         {{- end }}
         {{- if .Values.devMode.enabled }}
         - name: dev-binary
