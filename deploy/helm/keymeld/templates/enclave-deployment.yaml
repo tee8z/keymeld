@@ -28,6 +28,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
+        # Enclave process - listens on VSock CID 2, port 5000+
         - name: enclave
           {{- if $.Values.devMode.enabled }}
           image: {{ $.Values.devMode.baseImage }}
@@ -36,10 +37,8 @@ spec:
           image: {{ include "keymeld.enclaveImage" $ }}
           {{- end }}
           imagePullPolicy: {{ $.Values.enclave.image.pullPolicy | default "IfNotPresent" }}
-          ports:
-            - name: vsock
-              containerPort: {{ $e.port }}
-              protocol: TCP
+          securityContext:
+            privileged: true  # Required for /dev/vsock access
           env:
             - name: RUST_LOG
               value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
@@ -59,31 +58,58 @@ spec:
               value: "testing"
             - name: AWS_SECRET_ACCESS_KEY
               value: "testing"
-          {{- if $.Values.devMode.enabled }}
           volumeMounts:
+            - name: vsock
+              mountPath: /dev/vsock
+            {{- if $.Values.devMode.enabled }}
             - name: dev-binary
               mountPath: /app
               readOnly: true
-          {{- end }}
+            {{- end }}
           resources:
             {{- toYaml $.Values.enclave.resources | nindent 12 }}
+        # Socat sidecar - bridges TCP to VSock for gateway connectivity
+        - name: vsock-proxy
+          image: alpine/socat:1.8.0.0
+          args:
+            - TCP-LISTEN:{{ $e.port }},reuseaddr,fork
+            - VSOCK-CONNECT:2:{{ $e.port }}
+          ports:
+            - name: tcp
+              containerPort: {{ $e.port }}
+              protocol: TCP
+          securityContext:
+            privileged: true  # Required for /dev/vsock access
+          volumeMounts:
+            - name: vsock
+              mountPath: /dev/vsock
           livenessProbe:
             tcpSocket:
-              port: vsock
+              port: tcp
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             tcpSocket:
-              port: vsock
+              port: tcp
             initialDelaySeconds: 5
             periodSeconds: 10
-      {{- if $.Values.devMode.enabled }}
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
       volumes:
+        - name: vsock
+          hostPath:
+            path: /dev/vsock
+            type: CharDevice
+        {{- if $.Values.devMode.enabled }}
         - name: dev-binary
           hostPath:
             path: {{ $.Values.devMode.enclave.hostPath | dir }}
             type: Directory
-      {{- end }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -97,9 +123,9 @@ spec:
   type: ClusterIP
   ports:
     - port: {{ $e.port }}
-      targetPort: vsock
+      targetPort: tcp
       protocol: TCP
-      name: vsock
+      name: tcp
   selector:
     {{- include "keymeld.selectorLabels" $ | nindent 4 }}
     app.kubernetes.io/component: enclave
