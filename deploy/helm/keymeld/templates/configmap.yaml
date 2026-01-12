@@ -33,9 +33,13 @@ data:
       enclaves:
         {{- range $i, $e := .Values.enclave.enclaves }}
         - id: {{ $e.id }}
-          # VSock mode - in simulation, socat proxies bridge to TCP services
           cid: {{ $e.cid }}
+          {{- if $.Values.enclave.simulation }}
+          # Simulation mode: connect to local socat proxies on ports 9000+
+          port: {{ add 9000 $e.id }}
+          {{- else }}
           port: {{ $e.port }}
+          {{- end }}
         {{- end }}
       max_channel_size: 1000
       vsock_timeout_secs: {{ .Values.enclave.vsockTimeoutSecs }}
