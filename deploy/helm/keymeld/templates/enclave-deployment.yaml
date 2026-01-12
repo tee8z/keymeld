@@ -52,6 +52,22 @@ spec:
               value: {{ $e.id | quote }}
             - name: ENCLAVE_CID
               value: "2"
+            {{- if $.Values.kms.enabled }}
+            {{- if $.Values.kms.endpoint }}
+            - name: AWS_ENDPOINT_URL
+              value: {{ $.Values.kms.endpoint | quote }}
+            {{- end }}
+            - name: AWS_REGION
+              value: {{ $.Values.kms.region | default "us-west-2" | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ $.Values.kms.region | default "us-west-2" | quote }}
+            {{- if $.Values.aws }}
+            - name: AWS_ACCESS_KEY_ID
+              value: {{ $.Values.aws.accessKeyId | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: {{ $.Values.aws.secretAccessKey | quote }}
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - name: vsock
               mountPath: /dev/vsock
