@@ -6,7 +6,7 @@ metadata:
     {{- include "keymeld.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  {{- if .Values.enclave.enabled }}
+  {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
   strategy:
     type: Recreate
   {{- end }}
@@ -59,7 +59,7 @@ spec:
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
-            {{- if .Values.enclave.enabled }}
+            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             privileged: true
             {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
@@ -91,7 +91,7 @@ spec:
             - name: KMS_MOCK
               value: "true"
             {{- end }}
-            {{- if .Values.enclave.enabled }}
+            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             - name: ENCLAVE_ENABLED
               value: "true"
             {{- end }}
@@ -108,7 +108,7 @@ spec:
               mountPath: {{ .Values.persistence.mountPath }}
             - name: config
               mountPath: /etc/keymeld
-            {{- if .Values.enclave.enabled }}
+            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             - name: enclave-eif
               mountPath: /opt/keymeld
               readOnly: true
@@ -171,7 +171,7 @@ spec:
           configMap:
             name: {{ include "keymeld.fullname" . }}-litestream
         {{- end }}
-        {{- if .Values.enclave.enabled }}
+        {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
         - name: enclave-eif
           hostPath:
             path: {{ .Values.enclave.eifPath | dir }}
