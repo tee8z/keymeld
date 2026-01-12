@@ -19,7 +19,7 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 secp256k1 = { workspace = true }
-getrandom = "0.2"
+getrandom = "0.3"
 reqwest = { workspace = true, default-features = false, features = ["json", "gzip"], optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
 flate2 = { version = "1.0", optional = true }
