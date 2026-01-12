@@ -1,14 +1,6 @@
 {{/*
 Enclave deployments - separate pods for each enclave.
 In simulation mode, includes socat sidecar to bridge TCP (from gateway) to VSock (for enclave).
-
-Port mapping in simulation mode:
-- Gateway connects to VSock port X (e.g., 5000)
-- Gateway's socat listens on VSock X, forwards to TCP enclave-service:X
-- Enclave's socat listens on TCP X, forwards to VSock X+1000 (e.g., 6000)
-- Enclave binary listens on VSock X+1000
-
-This offset avoids VSock port conflicts since all pods share the host's /dev/vsock.
 */}}
 {{- if .Values.enclave.enabled }}
 {{- range $i, $e := .Values.enclave.enclaves }}
@@ -54,14 +46,8 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
-            {{- if $.Values.enclave.simulation }}
-            # In simulation mode, use offset port to avoid VSock conflicts
-            - name: VSOCK_PORT
-              value: "{{ add $e.port 1000 }}"
-            {{- else }}
             - name: VSOCK_PORT
               value: {{ $e.port | quote }}
-            {{- end }}
             - name: ENCLAVE_ID
               value: {{ $e.id | quote }}
             - name: ENCLAVE_CID
@@ -77,8 +63,8 @@ spec:
           resources:
             {{- toYaml $.Values.enclave.resources | nindent 12 }}
         {{- if $.Values.enclave.simulation }}
-        # Socat sidecar: bridges TCP (from gateway's socat) to VSock (enclave)
-        # Listens on TCP port, forwards to enclave's VSock port (offset by 1000)
+        # Socat sidecar: bridges TCP (from gateway) to VSock (enclave)
+        # Gateway connects via TCP, socat forwards to enclave's VSock port
         - name: tcp-to-vsock
           image: {{ $.Values.devMode.baseImage }}
           imagePullPolicy: Never
@@ -87,7 +73,7 @@ spec:
             - "-d"
             - "-d"
             - "TCP-LISTEN:{{ $e.port }},fork,reuseaddr"
-            - "VSOCK-CONNECT:2:{{ add $e.port 1000 }}"
+            - "VSOCK-CONNECT:2:{{ $e.port }}"
           securityContext:
             privileged: true
           ports:
