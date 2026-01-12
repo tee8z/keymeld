@@ -59,7 +59,7 @@ spec:
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
-            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
+            {{- if .Values.enclave.enabled }}
             privileged: true
             {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
@@ -91,7 +91,7 @@ spec:
             - name: KMS_MOCK
               value: "true"
             {{- end }}
-            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
+            {{- if .Values.enclave.enabled }}
             - name: ENCLAVE_ENABLED
               value: "true"
             {{- end }}
@@ -108,12 +108,14 @@ spec:
               mountPath: {{ .Values.persistence.mountPath }}
             - name: config
               mountPath: /etc/keymeld
-            {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
+            {{- if .Values.enclave.enabled }}
+            - name: vsock
+              mountPath: /dev/vsock
+            {{- if not .Values.enclave.simulation }}
             - name: enclave-eif
               mountPath: /opt/keymeld
               readOnly: true
-            - name: vsock
-              mountPath: /dev/vsock
+            {{- end }}
             {{- end }}
             {{- if .Values.devMode.enabled }}
             - name: dev-binary
@@ -130,6 +132,28 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if and .Values.enclave.enabled .Values.enclave.simulation }}
+        # VSock-to-TCP proxy sidecars for simulation mode
+        # Gateway connects via VSock to these proxies, which forward to enclave TCP services
+        {{- range $i, $e := .Values.enclave.enclaves }}
+        - name: vsock-proxy-{{ $e.id }}
+          image: alpine/socat:1.8.0.0
+          args:
+            - VSOCK-LISTEN:{{ $e.port }},reuseaddr,fork
+            - TCP:{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $e.port }}
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: vsock
+              mountPath: /dev/vsock
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+        {{- end }}
+        {{- end }}
         {{- if .Values.litestream.enabled }}
         - name: litestream
           image: "{{ .Values.litestream.image.repository }}:{{ .Values.litestream.image.tag }}"
@@ -171,15 +195,17 @@ spec:
           configMap:
             name: {{ include "keymeld.fullname" . }}-litestream
         {{- end }}
-        {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
-        - name: enclave-eif
-          hostPath:
-            path: {{ .Values.enclave.eifPath | dir }}
-            type: Directory
+        {{- if .Values.enclave.enabled }}
         - name: vsock
           hostPath:
             path: /dev/vsock
             type: CharDevice
+        {{- if not .Values.enclave.simulation }}
+        - name: enclave-eif
+          hostPath:
+            path: {{ .Values.enclave.eifPath | dir }}
+            type: Directory
+        {{- end }}
         {{- end }}
         {{- if .Values.devMode.enabled }}
         - name: dev-binary

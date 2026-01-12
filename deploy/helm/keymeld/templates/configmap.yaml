@@ -33,15 +33,9 @@ data:
       enclaves:
         {{- range $i, $e := .Values.enclave.enclaves }}
         - id: {{ $e.id }}
-          {{- if $.Values.enclave.simulation }}
-          # TCP simulation mode - connect via service DNS
-          host: {{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}.{{ $.Release.Namespace }}.svc.cluster.local
-          port: {{ $e.port }}
-          {{- else }}
-          # Real VSock mode
+          # VSock mode - in simulation, socat proxies bridge to TCP services
           cid: {{ $e.cid }}
           port: {{ $e.port }}
-          {{- end }}
         {{- end }}
       max_channel_size: 1000
       vsock_timeout_secs: {{ .Values.enclave.vsockTimeoutSecs }}
