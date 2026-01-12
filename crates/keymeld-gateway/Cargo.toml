@@ -17,7 +17,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-toml = "0.9.10"
+toml = "0.9.11"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
