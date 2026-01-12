@@ -1,0 +1,28 @@
+{{/*
+Services for enclave pods in simulation mode.
+These expose the TCP port that the gateway's socat proxy connects to.
+*/}}
+{{- if and .Values.enclave.enabled .Values.enclave.simulation }}
+{{- range $i, $e := .Values.enclave.enclaves }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}
+  labels:
+    {{- include "keymeld.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: enclave
+    keymeld.io/enclave-id: "{{ $e.id }}"
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $e.port }}
+      targetPort: vsock-proxy
+      protocol: TCP
+      name: vsock-proxy
+  selector:
+    {{- include "keymeld.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: enclave
+    keymeld.io/enclave-id: "{{ $e.id }}"
+{{- end }}
+{{- end }}

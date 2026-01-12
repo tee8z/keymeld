@@ -1,12 +1,11 @@
 use super::config::TimeoutConfig;
+use super::transport::{SocketConnector, SocketStream};
 use crate::KeyMeldError;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tokio::time::timeout;
-use tokio_vsock::{VsockAddr, VsockStream};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -27,8 +26,8 @@ pub trait HealthCheckable {
     fn is_pong_response(response: &Self::Response) -> bool;
 }
 
-pub struct VsockPool<C, R> {
-    address: VsockAddr,
+pub struct SocketPool<C, R> {
+    connector: SocketConnector,
     connection_timeout: Duration,
     health_state: Arc<AtomicBool>,
     timeout_config: TimeoutConfig,
@@ -49,7 +48,7 @@ where
     C: Clone + Send + Sync + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
     R: Clone + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 {
-    fn new(stream: VsockStream, timeout_config: TimeoutConfig) -> Self {
+    fn new(stream: SocketStream, timeout_config: TimeoutConfig) -> Self {
         let active_connections = Arc::new(AtomicU32::new(0));
         let request_rate_tracker = Arc::new(RequestRateTracker::new());
 
@@ -175,18 +174,21 @@ where
     }
 }
 
-impl<C, R> VsockPool<C, R>
+impl<C, R> SocketPool<C, R>
 where
     C: Clone + Send + Sync + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
     R: Clone + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 {
-    pub fn new(cid: u32, port: u32, timeout_config: &TimeoutConfig) -> Result<Self, KeyMeldError> {
+    pub fn new(
+        connector: SocketConnector,
+        timeout_config: &TimeoutConfig,
+    ) -> Result<Self, KeyMeldError> {
         let health_state = Arc::new(AtomicBool::new(true));
 
-        debug!("Creating VsockPool for CID {}:{}", cid, port);
+        debug!("Creating SocketPool for {}", connector.address_string());
 
         Ok(Self {
-            address: VsockAddr::new(cid, port),
+            connector,
             connection_timeout: timeout_config.pool_acquire_timeout(),
             health_state,
             timeout_config: timeout_config.clone(),
@@ -469,31 +471,16 @@ where
         Some(least_loaded)
     }
 
-    /// Create a new VSock connection
+    /// Create a new socket connection
     async fn create_connection(&self) -> Result<Arc<ConnectionMetadata<C, R>>, KeyMeldError> {
         debug!(
-            "Creating new VSock connection to {:?} (current pool size: {})",
-            self.address,
+            "Creating new connection to {} (current pool size: {})",
+            self.connector.address_string(),
             self.connections.len()
         );
 
-        // Create VsockStream
-        let stream = timeout(self.connection_timeout, VsockStream::connect(self.address))
-            .await
-            .map_err(|_| {
-                error!(
-                    "Timeout connecting to VSock after {:?}",
-                    self.connection_timeout
-                );
-                KeyMeldError::EnclaveError(format!(
-                    "Timeout connecting to VSock after {:?}",
-                    self.connection_timeout
-                ))
-            })?
-            .map_err(|e| {
-                error!("Failed to connect to VSock: {}", e);
-                KeyMeldError::EnclaveError(format!("Failed to connect to VSock: {e}"))
-            })?;
+        // Create stream using the connector
+        let stream = self.connector.connect(self.connection_timeout).await?;
 
         // Create multiplexed connection wrapper
         let multiplexed_conn =
@@ -505,7 +492,7 @@ where
         self.connections.insert(metadata.id, metadata.clone());
 
         debug!(
-            "VSock connection {} created and added to pool (pool size: {})",
+            "Connection {} created and added to pool (pool size: {})",
             metadata.id,
             self.connections.len()
         );
@@ -704,7 +691,7 @@ where
     }
 }
 
-impl<C, R> VsockPool<C, R>
+impl<C, R> SocketPool<C, R>
 where
     C: Clone + Send + Sync + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
     R: Clone

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use aws_config::BehaviorVersion;
 use aws_sdk_kms::Client as KmsClient;
-use keymeld_core::protocol::{ConfigureCommand, SystemCommand};
+use keymeld_core::protocol::{ConfigureCommand, SocketClient, SystemCommand};
 use keymeld_core::{
     identifiers::EnclaveId,
-    protocol::{Command, EnclaveCommand, EnclaveOutcome, Outcome, SystemOutcome},
+    protocol::{Command, EnclaveCommand, EnclaveOutcome, SystemOutcome},
 };
 use tracing::{info, warn};
 
@@ -42,7 +42,7 @@ pub async fn init_kms_client(config: &KmsConfig) -> Result<Option<KmsClient>> {
 
 pub async fn configure_enclave_with_kms(
     enclave_id: EnclaveId,
-    client: &keymeld_core::managed_vsock::VsockClient<Command, Outcome>,
+    client: &SocketClient,
     db: &Database,
     kms_config: &KmsConfig,
 ) -> Result<()> {

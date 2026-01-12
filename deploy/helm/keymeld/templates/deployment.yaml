@@ -133,14 +133,19 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
         {{- if and .Values.enclave.enabled .Values.enclave.simulation }}
-        # VSock-to-TCP proxy sidecars for simulation mode
-        # Gateway connects via VSock to these proxies (ports 9000+), which forward to enclave TCP services
+        # Socat sidecars for simulation mode
+        # Bridge VSock (gateway connects here) to TCP (forwards to enclave service)
+        # This works around tokio-vsock not being able to create VSock sockets inside containers
         {{- range $i, $e := .Values.enclave.enclaves }}
-        - name: vsock-proxy-{{ $e.id }}
-          image: alpine/socat:1.8.0.0
+        - name: vsock-to-tcp-{{ $e.id }}
+          image: {{ $.Values.devMode.baseImage }}
+          imagePullPolicy: Never
+          command: ["socat"]
           args:
-            - VSOCK-LISTEN:{{ add 9000 $e.id }},reuseaddr,fork
-            - TCP:{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $e.port }}
+            - "-d"
+            - "-d"
+            - "VSOCK-LISTEN:{{ $e.port }},fork,reuseaddr"
+            - "TCP:{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}:{{ $e.port }}"
           securityContext:
             privileged: true
           volumeMounts:
@@ -148,8 +153,8 @@ spec:
               mountPath: /dev/vsock
           resources:
             requests:
+              cpu: 5m
               memory: 16Mi
-              cpu: 10m
             limits:
               memory: 32Mi
         {{- end }}

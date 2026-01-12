@@ -3,7 +3,7 @@ use crate::musig::MusigProcessor;
 use keymeld_core::{
     hash_message,
     identifiers::SessionId,
-    managed_vsock::TimeoutConfig,
+    managed_socket::TimeoutConfig,
     protocol::{
         CryptoError, EnclaveError, SessionError, SigningApproval, TaprootTweak, ValidationError,
     },

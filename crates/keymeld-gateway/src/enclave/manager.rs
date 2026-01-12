@@ -5,10 +5,11 @@ use crate::{config::KmsConfig, SigningSessionStatus};
 use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::{
     identifiers::{EnclaveId, SessionId, UserId},
-    managed_vsock::{
-        client::{ClientMetrics, VsockClient},
+    managed_socket::{
+        client::{ClientMetrics, SocketClient},
         config::{RetryConfig, TimeoutConfig},
         pool::ConnectionStats,
+        transport::SocketConnector,
     },
     protocol::{
         AddParticipantsBatchCommand, Command, ConfigureCommand, DistributeNoncesCommand,
@@ -33,7 +34,7 @@ use uuid::Uuid;
 
 use super::distribution::{EnclaveAssignmentManager, SessionAssignment};
 
-type EnclaveClient = VsockClient<Command, Outcome>;
+type EnclaveClient = SocketClient<Command, Outcome>;
 
 type BatchParticipantResult = (EnclaveId, Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>);
 
@@ -71,6 +72,8 @@ pub struct EnclaveConfig {
     pub id: u32,
     pub cid: u32,
     pub port: u32,
+    /// Socket connector for this enclave (vsock or tcp)
+    pub connector: SocketConnector,
 }
 
 /// Statistics about session restoration after restart
@@ -332,9 +335,8 @@ impl EnclaveManager {
 
         for config in enclave_configs {
             let enclave_id = EnclaveId::from(config.id);
-            let client = VsockClient::with_config(
-                config.cid,
-                config.port,
+            let client = SocketClient::with_config(
+                config.connector.clone(),
                 &timeout_config,
                 &RetryConfig::default(),
             );

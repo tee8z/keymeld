@@ -221,7 +221,7 @@ impl Metrics {
     pub fn update_enclave_connection_stats(
         &self,
         enclave_id: u32,
-        stats: &keymeld_core::managed_vsock::pool::ConnectionStats,
+        stats: &keymeld_core::managed_socket::pool::ConnectionStats,
     ) {
         let enclave_id_str = enclave_id.to_string();
 

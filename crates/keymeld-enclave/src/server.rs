@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use keymeld_core::{
-    managed_vsock::{create_server_handler, RequestRateTracker, TimeoutConfig},
+    managed_socket::{create_server_handler, RequestRateTracker, SocketStream, TimeoutConfig},
     protocol::{Command, Outcome},
     EnclaveId,
 };
@@ -139,7 +139,11 @@ impl VsockServer {
 
                     tokio::spawn(async move {
                         if let Err(e) = handler
-                            .handle(stream, request_rate_tracker, timeout_config)
+                            .handle(
+                                SocketStream::Vsock(stream),
+                                request_rate_tracker,
+                                timeout_config,
+                            )
                             .await
                         {
                             error!("Connection handler error: {}", e);

@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use hex;
 use keymeld_core::{
     identifiers::{EnclaveId, SessionId},
-    managed_vsock::ServerCommandHandler,
+    managed_socket::ServerCommandHandler,
     protocol::{
         AggregatePublicKeyResponse, AttestationError, Command, ConfigureCommand,
         ConfiguredResponse, EnclaveCommand, EnclaveError, EnclaveOutcome, FinalSignatureResponse,
@@ -706,7 +706,7 @@ impl EnclaveOperator {
             Vec::new(), // Will be set during Configure
             Vec::new(), // Will be set during Configure
             None,       // Attestation manager will be set during Configure command
-            keymeld_core::managed_vsock::config::TimeoutConfig::default(),
+            keymeld_core::managed_socket::config::TimeoutConfig::default(),
         )));
 
         Ok(EnclaveOperator {
@@ -796,7 +796,7 @@ impl EnclaveOperator {
                         Vec::new(),
                         Vec::new(),
                         self.attestation_manager.clone(),
-                        keymeld_core::managed_vsock::config::TimeoutConfig::default(),
+                        keymeld_core::managed_socket::config::TimeoutConfig::default(),
                     );
 
                     let (encrypted_dek, encrypted_private_key, public_key): (

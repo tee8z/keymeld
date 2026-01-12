@@ -17,7 +17,7 @@ pub type AggregatePublicKey = String;
 pub mod crypto;
 pub mod identifiers;
 pub mod logging;
-pub mod managed_vsock;
+pub mod managed_socket;
 pub mod protocol;
 pub mod validation;
 

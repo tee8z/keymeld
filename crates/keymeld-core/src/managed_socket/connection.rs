@@ -1,5 +1,5 @@
 use super::config::TimeoutConfig;
-use crate::managed_vsock::metrics::ConnectionMetrics;
+use crate::managed_socket::metrics::ConnectionMetrics;
 use anyhow::{anyhow, Result};
 use bincode;
 use dashmap::DashMap;
@@ -15,17 +15,18 @@ use std::{
     time::Instant,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     sync::mpsc,
     time::timeout,
 };
-use tokio_vsock::VsockStream;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+// Re-export SocketStream for client-side use
+pub use super::transport::SocketStream;
+
 use super::metrics::{MetricsTracker, RequestRateTracker};
 
-// Type aliases to fix clippy type complexity warnings
 type RequestWithResponse<C, R> = (Request<C>, mpsc::Sender<R>);
 type RequestSender<C, R> = mpsc::Sender<RequestWithResponse<C, R>>;
 
@@ -59,13 +60,16 @@ where
     C: Clone + Send + Sync + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
     R: Clone + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 {
-    pub async fn handle_connection(
+    pub async fn handle_connection<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         active_connections: Arc<AtomicU32>,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         match self {
             ConnectionHandler::Server(handler) => {
                 handler
@@ -111,13 +115,16 @@ where
         }
     }
 
-    async fn handle_connection(
+    async fn handle_connection<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         active_connections: Arc<AtomicU32>,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         // Increment active connections count
         active_connections.fetch_add(1, Ordering::AcqRel);
         debug!(
@@ -139,12 +146,15 @@ where
         result
     }
 
-    async fn handle_connection_inner(
+    async fn handle_connection_inner<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         let (response_tx, response_rx) =
             mpsc::channel::<Response<R>>(timeout_config.max_channel_size);
 
@@ -196,13 +206,16 @@ where
         Ok(())
     }
 
-    async fn handle_server_read_task(
-        mut reader: ReadHalf<VsockStream>,
+    async fn handle_server_read_task<S>(
+        mut reader: ReadHalf<S>,
         command_handler: Arc<dyn ServerCommandHandler<C, R>>,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
         response_tx: mpsc::Sender<Response<R>>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + Send + 'static,
+    {
         let mut buffer = vec![0u8; FRAME_HEADER_SIZE];
 
         loop {
@@ -230,11 +243,14 @@ where
         Ok(())
     }
 
-    async fn handle_server_write_task(
-        mut writer: WriteHalf<VsockStream>,
+    async fn handle_server_write_task<S>(
+        mut writer: WriteHalf<S>,
         mut response_rx: mpsc::Receiver<Response<R>>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncWrite + Send + 'static,
+    {
         while let Some(response) = response_rx.recv().await {
             if let Err(e) =
                 Self::send_response_to_writer(&mut writer, response, &timeout_config).await
@@ -248,11 +264,14 @@ where
         Ok(())
     }
 
-    async fn read_request_from_reader(
-        reader: &mut ReadHalf<VsockStream>,
+    async fn read_request_from_reader<S>(
+        reader: &mut ReadHalf<S>,
         buffer: &mut [u8],
         timeout_config: &TimeoutConfig,
-    ) -> Result<Option<Request<C>>> {
+    ) -> Result<Option<Request<C>>>
+    where
+        S: AsyncRead,
+    {
         match timeout(
             timeout_config.network_read_timeout(),
             reader.read_exact(buffer),
@@ -296,11 +315,14 @@ where
         }
     }
 
-    async fn send_response_to_writer(
-        writer: &mut WriteHalf<VsockStream>,
+    async fn send_response_to_writer<S>(
+        writer: &mut WriteHalf<S>,
         response: Response<R>,
         timeout_config: &TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncWrite,
+    {
         let response_data = bincode::serialize(&response)
             .map_err(|e| anyhow!("Failed to serialize response: {e}"))?;
 
@@ -423,13 +445,16 @@ where
         (handler, request_tx)
     }
 
-    async fn handle_connection(
+    async fn handle_connection<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         active_connections: Arc<AtomicU32>,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         // Increment active connections count
         active_connections.fetch_add(1, Ordering::AcqRel);
         debug!(
@@ -451,12 +476,15 @@ where
         result
     }
 
-    async fn handle_connection_inner(
+    async fn handle_connection_inner<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         let (reader, writer) = tokio::io::split(stream);
 
         debug!("Starting client connection with read/write tasks");
@@ -520,13 +548,16 @@ where
         Ok(())
     }
 
-    async fn handle_read_task(
-        mut reader: ReadHalf<VsockStream>,
+    async fn handle_read_task<S>(
+        mut reader: ReadHalf<S>,
         pending_requests: Arc<DashMap<u128, (mpsc::Sender<R>, Instant)>>,
         timeout_config: TimeoutConfig,
         metrics: Arc<MetricsTracker>,
         request_rate_tracker: Arc<RequestRateTracker>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + Send + 'static,
+    {
         let mut buffer = vec![0u8; FRAME_HEADER_SIZE];
 
         loop {
@@ -635,14 +666,17 @@ where
         Ok(())
     }
 
-    async fn handle_write_task(
-        mut writer: WriteHalf<VsockStream>,
+    async fn handle_write_task<S>(
+        mut writer: WriteHalf<S>,
         mut request_rx: mpsc::Receiver<RequestWithResponse<C, R>>,
         pending_requests: Arc<DashMap<u128, (mpsc::Sender<R>, Instant)>>,
         timeout_config: TimeoutConfig,
         metrics: Arc<MetricsTracker>,
         request_rate_tracker: Arc<RequestRateTracker>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncWrite + Send + 'static,
+    {
         while let Some((request, response_sender)) = request_rx.recv().await {
             let request_id = request.request_id;
             let start_time = Instant::now();
@@ -693,11 +727,14 @@ where
         Ok(())
     }
 
-    async fn send_message(
-        writer: &mut WriteHalf<VsockStream>,
+    async fn send_message<S>(
+        writer: &mut WriteHalf<S>,
         message_data: &[u8],
         timeout_config: &TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncWrite,
+    {
         let message_size = message_data.len();
 
         // Log message size for optimization tracking
@@ -812,12 +849,15 @@ where
         }
     }
 
-    pub async fn handle(
+    pub async fn handle<S>(
         self,
-        stream: VsockStream,
+        stream: S,
         request_rate_tracker: Arc<RequestRateTracker>,
         timeout_config: TimeoutConfig,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         self.active_connections.fetch_add(1, Ordering::AcqRel);
         info!("New multiplexed connection established");
 

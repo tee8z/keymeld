@@ -1,10 +1,11 @@
 use super::config::{RetryConfig, TimeoutConfig};
+use super::transport::SocketConnector;
 use crate::KeyMeldError;
 
 use super::connection::ConnectionState;
 use super::connection::{Request, Response};
 use super::metrics::ConnectionMetrics;
-use super::pool::{ConnectionStats, VsockPool};
+use super::pool::{ConnectionStats, SocketPool};
 
 use std::{
     sync::{
@@ -16,7 +17,7 @@ use std::{
 use tokio::time::Duration;
 use tracing::{debug, error, warn};
 
-pub struct VsockClient<C, R>
+pub struct SocketClient<C, R>
 where
     C: Clone
         + Send
@@ -33,7 +34,7 @@ where
         + std::fmt::Debug
         + 'static,
 {
-    pool: Arc<VsockPool<C, R>>,
+    pool: Arc<SocketPool<C, R>>,
     retry_config: RetryConfig,
     commands_sent: Arc<AtomicU64>,
     commands_successful: Arc<AtomicU64>,
@@ -41,7 +42,7 @@ where
     shutdown_signal: Arc<AtomicBool>,
 }
 
-impl<C, R> VsockClient<C, R>
+impl<C, R> SocketClient<C, R>
 where
     C: Clone
         + Send
@@ -58,22 +59,31 @@ where
         + std::fmt::Debug
         + 'static,
 {
-    pub fn new(cid: u32, port: u32) -> Self {
+    /// Create a new SocketClient for vsock connections
+    pub fn vsock(cid: u32, port: u32) -> Self {
         Self::with_config(
-            cid,
-            port,
+            SocketConnector::vsock(cid, port),
+            &TimeoutConfig::default(),
+            &RetryConfig::default(),
+        )
+    }
+
+    /// Create a new SocketClient for TCP connections
+    pub fn tcp(host: impl Into<String>, port: u16) -> Self {
+        Self::with_config(
+            SocketConnector::tcp(host, port),
             &TimeoutConfig::default(),
             &RetryConfig::default(),
         )
     }
 
     pub fn with_config(
-        cid: u32,
-        port: u32,
+        connector: SocketConnector,
         timeout_config: &TimeoutConfig,
         retry_config: &RetryConfig,
     ) -> Self {
-        let pool = VsockPool::new(cid, port, timeout_config).expect("Failed to create VsockPool");
+        let pool = SocketPool::new(connector.clone(), timeout_config)
+            .expect("Failed to create SocketPool");
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));
         let commands_sent = Arc::new(AtomicU64::new(0));
@@ -81,7 +91,8 @@ where
         let commands_failed = Arc::new(AtomicU64::new(0));
 
         debug!(
-            "VsockClient initialized (load threshold: {})",
+            "SocketClient initialized for {} (load threshold: {})",
+            connector.address_string(),
             timeout_config.connection_load_threshold
         );
 
@@ -370,7 +381,7 @@ impl ClientMetrics {
     }
 }
 
-impl<C, R> Drop for VsockClient<C, R>
+impl<C, R> Drop for SocketClient<C, R>
 where
     C: Clone
         + Send
@@ -394,7 +405,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::managed_vsock::pool::HealthCheckable;
+    use crate::managed_socket::pool::HealthCheckable;
 
     use super::*;
     use serde::{Deserialize, Serialize};
@@ -430,7 +441,7 @@ mod tests {
         }
     }
 
-    type TestClient = VsockClient<TestCommand, TestResponse>;
+    type TestClient = SocketClient<TestCommand, TestResponse>;
 
     fn init_test() {
         let _ = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
@@ -446,8 +457,11 @@ mod tests {
             backoff_multiplier: 2.0,
         };
 
-        let client: TestClient =
-            VsockClient::with_config(1, 5000, &TimeoutConfig::default(), &retry_config);
+        let client: TestClient = SocketClient::with_config(
+            SocketConnector::vsock(1, 5000),
+            &TimeoutConfig::default(),
+            &retry_config,
+        );
 
         assert_eq!(client.get_retry_config().max_attempts, 3);
         assert_eq!(client.get_retry_config().initial_delay_ms, 100);
@@ -456,7 +470,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_is_retriable_error() {
         init_test();
-        let client: TestClient = VsockClient::new(1, 5000);
+        let client: TestClient = SocketClient::vsock(1, 5000);
 
         // Connection-related errors should be retriable
         assert!(
@@ -481,7 +495,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_client_metrics() {
         init_test();
-        let client: TestClient = VsockClient::new(1, 5000);
+        let client: TestClient = SocketClient::vsock(1, 5000);
         let metrics = client.get_client_metrics();
 
         assert_eq!(metrics.commands_sent, 0);
@@ -533,7 +547,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_client_metrics_performance_check() {
         init_test();
-        let client: TestClient = VsockClient::new(1, 5000);
+        let client: TestClient = SocketClient::vsock(1, 5000);
         let metrics = client.get_client_metrics();
 
         // Initial metrics should not indicate good performance (no data)
@@ -550,7 +564,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_pool_health_methods() {
         init_test();
-        let client: TestClient = VsockClient::new(1, 5000);
+        let client: TestClient = SocketClient::vsock(1, 5000);
 
         // Pool should start as healthy
         assert!(client.is_healthy());

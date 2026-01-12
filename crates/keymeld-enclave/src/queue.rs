@@ -352,7 +352,7 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             None,
-            keymeld_core::managed_vsock::config::TimeoutConfig::default(),
+            keymeld_core::managed_socket::config::TimeoutConfig::default(),
         )));
 
         // Create test session context
@@ -429,7 +429,7 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             None,
-            keymeld_core::managed_vsock::config::TimeoutConfig::default(),
+            keymeld_core::managed_socket::config::TimeoutConfig::default(),
         )));
 
         // Add session to DashMap (simulates operator adding session)
