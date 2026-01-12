@@ -134,12 +134,12 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
         {{- if and .Values.enclave.enabled .Values.enclave.simulation }}
         # VSock-to-TCP proxy sidecars for simulation mode
-        # Gateway connects via VSock to these proxies, which forward to enclave TCP services
+        # Gateway connects via VSock to these proxies (ports 9000+), which forward to enclave TCP services
         {{- range $i, $e := .Values.enclave.enclaves }}
         - name: vsock-proxy-{{ $e.id }}
           image: alpine/socat:1.8.0.0
           args:
-            - VSOCK-LISTEN:{{ $e.port }},reuseaddr,fork
+            - VSOCK-LISTEN:{{ add 9000 $e.id }},reuseaddr,fork
             - TCP:{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $e.port }}
           securityContext:
             privileged: true
