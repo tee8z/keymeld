@@ -48,13 +48,24 @@ spec:
             - name: litestream-config
               mountPath: /etc/litestream.yml
               subPath: litestream.yml
-          {{- if .Values.litestream.s3Endpoint }}
           env:
+            {{- if .Values.litestream.s3Endpoint }}
             - name: AWS_ACCESS_KEY_ID
               value: "testing"
             - name: AWS_SECRET_ACCESS_KEY
               value: "testing"
-          {{- end }}
+            {{- else }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" . }}-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" . }}-s3
+                  key: secret-access-key
+            {{- end }}
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -97,7 +108,6 @@ spec:
               value: "true"
             {{- end }}
             {{- if .Values.enclave.simulation }}
-            # TCP transport mode for simulation - gateway connects via TCP to enclave services
             {{- range $i, $e := .Values.enclave.enclaves }}
             - name: KEYMELD_ENCLAVE_{{ $e.id }}_TRANSPORT
               value: "tcp"
@@ -153,13 +163,24 @@ spec:
             - name: litestream-config
               mountPath: /etc/litestream.yml
               subPath: litestream.yml
-          {{- if .Values.litestream.s3Endpoint }}
           env:
+            {{- if .Values.litestream.s3Endpoint }}
             - name: AWS_ACCESS_KEY_ID
               value: "testing"
             - name: AWS_SECRET_ACCESS_KEY
               value: "testing"
-          {{- end }}
+            {{- else }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" . }}-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" . }}-s3
+                  key: secret-access-key
+            {{- end }}
           resources:
             requests:
               memory: 32Mi
