@@ -89,12 +89,13 @@ spec:
           image: alpine/socat:latest
           imagePullPolicy: Always
           {{- end }}
-          command: ["socat"]
+          command: ["/bin/sh", "-c"]
           args:
-            - "-d"
-            - "-d"
-            - "TCP-LISTEN:{{ $e.port }},fork,reuseaddr"
-            - "VSOCK-CONNECT:2:{{ $e.port }}"
+            - |
+              echo "Waiting for enclave to bind VSock port {{ $e.port }}..."
+              sleep 5
+              echo "Starting socat proxy: TCP:{{ $e.port }} -> VSOCK:2:{{ $e.port }}"
+              exec socat -d -d TCP-LISTEN:{{ $e.port }},fork,reuseaddr VSOCK-CONNECT:2:{{ $e.port }}
           securityContext:
             privileged: true
           ports:
