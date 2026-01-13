@@ -1,8 +1,12 @@
 {{/*
-Enclave deployments - separate pods for each enclave.
-In simulation mode, includes socat sidecar to bridge TCP (from gateway) to VSock (for enclave).
+Enclave deployments for DEVELOPMENT/STAGING ONLY.
+These are simulated enclaves using TCP transport - NOT real Nitro Enclaves.
+For production, use AWS Nitro Enclaves directly (not Kubernetes).
 */}}
 {{- if .Values.enclave.enabled }}
+{{- if not $.Values.enclave.simulation }}
+{{- fail "ERROR: enclave.simulation must be true. This helm chart only supports simulated enclaves (TCP mode) for dev/staging. Production requires real AWS Nitro Enclaves." }}
+{{- end }}
 {{- range $i, $e := .Values.enclave.enclaves }}
 ---
 apiVersion: apps/v1
@@ -13,6 +17,8 @@ metadata:
     {{- include "keymeld.labels" $ | nindent 4 }}
     app.kubernetes.io/component: enclave
     keymeld.io/enclave-id: "{{ $e.id }}"
+  annotations:
+    keymeld.io/warning: "SIMULATED ENCLAVE - Development/Staging use only. Not for production."
 spec:
   replicas: 1
   selector:
@@ -41,8 +47,6 @@ spec:
           image: {{ include "keymeld.enclaveImage" $ }}
           imagePullPolicy: {{ include "keymeld.enclaveImagePullPolicy" $ }}
           {{- end }}
-          securityContext:
-            privileged: true
           env:
             - name: RUST_LOG
               value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
@@ -52,6 +56,11 @@ spec:
               value: {{ $e.id | quote }}
             - name: ENCLAVE_CID
               value: "2"
+            # TCP mode for simulation (no real VSock/Nitro Enclave)
+            - name: TRANSPORT_MODE
+              value: "tcp"
+            - name: TCP_HOST
+              value: "0.0.0.0"
             {{- if $.Values.kms.enabled }}
             {{- if $.Values.kms.endpoint }}
             - name: AWS_ENDPOINT_URL
@@ -68,60 +77,24 @@ spec:
               value: {{ $.Values.aws.secretAccessKey | quote }}
             {{- end }}
             {{- end }}
+          ports:
+            - name: enclave
+              containerPort: {{ $e.port }}
+              protocol: TCP
+          {{- if $.Values.devMode.enabled }}
           volumeMounts:
-            - name: vsock
-              mountPath: /dev/vsock
-            {{- if $.Values.devMode.enabled }}
             - name: dev-binary
               mountPath: /app
               readOnly: true
-            {{- end }}
+          {{- end }}
           resources:
             {{- toYaml $.Values.enclave.resources | nindent 12 }}
-        {{- if $.Values.enclave.simulation }}
-        # Socat sidecar: bridges TCP (from gateway) to VSock (enclave)
-        # Gateway connects via TCP, socat forwards to enclave's VSock port
-        - name: tcp-to-vsock
-          {{- if $.Values.devMode.enabled }}
-          image: {{ $.Values.devMode.baseImage }}
-          imagePullPolicy: Never
-          {{- else }}
-          image: alpine/socat:latest
-          imagePullPolicy: Always
-          {{- end }}
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              echo "Waiting for enclave to bind VSock port {{ $e.port }}..."
-              sleep 5
-              echo "Starting socat proxy: TCP:{{ $e.port }} -> VSOCK:2:{{ $e.port }}"
-              exec socat -d -d TCP-LISTEN:{{ $e.port }},fork,reuseaddr VSOCK-CONNECT:2:{{ $e.port }}
-          securityContext:
-            privileged: true
-          ports:
-            - name: vsock-proxy
-              containerPort: {{ $e.port }}
-              protocol: TCP
-          volumeMounts:
-            - name: vsock
-              mountPath: /dev/vsock
-          resources:
-            requests:
-              cpu: 5m
-              memory: 16Mi
-            limits:
-              memory: 32Mi
-        {{- end }}
+      {{- if $.Values.devMode.enabled }}
       volumes:
-        - name: vsock
-          hostPath:
-            path: /dev/vsock
-            type: CharDevice
-        {{- if $.Values.devMode.enabled }}
         - name: dev-binary
           hostPath:
             path: {{ $.Values.devMode.enclave.hostPath | dir }}
             type: Directory
-        {{- end }}
+      {{- end }}
 {{- end }}
 {{- end }}
