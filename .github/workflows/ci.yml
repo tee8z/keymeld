@@ -169,6 +169,11 @@ jobs:
 
       - name: Build SDK for WASM
         run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --features client --locked
+        env:
+          # Workaround for secp256k1-sys WASM build with clang 16+
+          # The wasm-sysroot in secp256k1-sys is missing memmove declaration in string.h
+          # Newer clang versions treat implicit function declarations as errors
+          CFLAGS_wasm32_unknown_unknown: "-Wno-error=implicit-function-declaration"
 
   # End-to-end integration tests (uses pre-built binaries)
   e2e-test:
