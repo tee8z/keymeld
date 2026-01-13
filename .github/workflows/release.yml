@@ -293,7 +293,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build x86_64 image
+      - name: Build and push x86_64 image
         run: |
           nix build .#${{ matrix.nix_output }} --print-build-logs
           docker load < result
@@ -301,37 +301,26 @@ jobs:
           docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-amd64
           docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-amd64
 
-      - name: Build ARM64 image (cross-compiled)
-        run: |
-          # Cross-compile for ARM64 using Nix (no QEMU needed)
-          nix build .#packages.aarch64-linux.${{ matrix.nix_output }} --print-build-logs
-          docker load < result
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-arm64
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-arm64
+          # Push amd64 images
+          if [ "${{ needs.prepare-release.outputs.dry_run }}" != "true" ]; then
+            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-amd64
+            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-amd64
+          fi
 
-      - name: Push images and create manifest
+      - name: Create and push manifest (amd64 only)
         if: needs.prepare-release.outputs.dry_run != 'true'
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${REPO_LOWER}/${{ matrix.image }}"
 
-          # Push architecture-specific images
-          docker push ${IMAGE}:${VERSION}-amd64
-          docker push ${IMAGE}:${VERSION}-arm64
-          docker push ${IMAGE}:latest-amd64
-          docker push ${IMAGE}:latest-arm64
-
-          # Create and push multi-arch manifests
+          # Create and push single-arch manifests (can add arm64 later when cross-compilation is set up)
           docker manifest create ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
+            ${IMAGE}:${VERSION}-amd64
           docker manifest push ${IMAGE}:${VERSION}
 
           docker manifest create ${IMAGE}:latest \
-            ${IMAGE}:latest-amd64 \
-            ${IMAGE}:latest-arm64
+            ${IMAGE}:latest-amd64
           docker manifest push ${IMAGE}:latest
 
-          echo "Pushed multi-arch image: ${IMAGE}:${VERSION}"
+          echo "Pushed image: ${IMAGE}:${VERSION}"
