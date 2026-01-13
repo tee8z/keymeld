@@ -27,6 +27,10 @@ impl From<ReserveKeySlotResponse> for KeySlotReservation {
     }
 }
 
+// On non-WASM targets, futures must be Send for use with multi-threaded runtimes.
+// On WASM, there's only a single thread so Send is not required (and reqwest's WASM
+// implementation doesn't support it).
+#[cfg(not(target_arch = "wasm32"))]
 pub trait SingleSignerOps {
     fn reserve_key_slot(
         &self,
@@ -54,6 +58,34 @@ pub trait SingleSignerOps {
         &self,
         key_id: &KeyId,
     ) -> impl std::future::Future<Output = Result<(), SdkError>> + Send;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait SingleSignerOps {
+    fn reserve_key_slot(
+        &self,
+    ) -> impl std::future::Future<Output = Result<KeySlotReservation, SdkError>>;
+
+    fn import_key(
+        &self,
+        reservation: &KeySlotReservation,
+        private_key: &[u8],
+    ) -> impl std::future::Future<Output = Result<KeyId, SdkError>>;
+
+    fn list_keys(
+        &self,
+        key_id: &KeyId,
+    ) -> impl std::future::Future<Output = Result<Vec<UserKeyInfo>, SdkError>>;
+
+    fn sign(
+        &self,
+        key_id: &KeyId,
+        message_hash: [u8; 32],
+        signature_type: SignatureType,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, SdkError>>;
+
+    fn delete_key(&self, key_id: &KeyId)
+        -> impl std::future::Future<Output = Result<(), SdkError>>;
 }
 
 impl SingleSignerOps for KeyMeldClient {

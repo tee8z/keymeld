@@ -11,7 +11,7 @@ keymeld-core = { path = "../keymeld-core", features = ["enclave"] }
 musig2 = { workspace = true }
 secp256k1 = { workspace = true }
 
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tokio-vsock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

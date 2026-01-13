@@ -14,13 +14,13 @@ categories.workspace = true
 keymeld-core = { path = "../keymeld-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true, features = ["v7", "serde"] }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 secp256k1 = { workspace = true }
-getrandom = "0.2"
+
 reqwest = { workspace = true, default-features = false, features = ["json", "gzip"], optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
 flate2 = { version = "1.0", optional = true }
@@ -42,6 +42,19 @@ openapi = ["dep:utoipa", "keymeld-core/openapi"]
 
 # DLC protocol utilities
 dlctix = ["dep:dlctix"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uuid = { workspace = true, features = ["v7", "serde"] }
+getrandom = { version = "0.2" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# uuid needs "js" feature for WASM random generation
+uuid = { workspace = true, features = ["v7", "serde", "js"] }
+# getrandom 0.2 (used by crypto deps) needs "js" feature for WASM
+getrandom = { version = "0.2", features = ["js"] }
+# getrandom 0.3 (used by rand 0.9) needs "wasm_js" feature for WASM
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
 
 [lints]
 workspace = true

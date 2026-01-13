@@ -199,7 +199,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [prepare-release, build-release]
+    needs: [prepare-release, build-release, build-wasm-sdk]
     if: needs.prepare-release.outputs.dry_run == 'false'
     permissions:
       contents: write
@@ -249,6 +249,79 @@ jobs:
   #         cargo publish -p keymeld-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
   #         sleep 10
   #         cargo publish -p keymeld-gateway --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Build WASM SDK
+  build-wasm-sdk:
+    name: Build WASM SDK
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: always() && needs.prepare-release.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Build WASM SDK (release)
+        run: |
+          cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client
+
+      - name: Package WASM artifacts
+        run: |
+          mkdir -p release/wasm
+          cp target/wasm32-unknown-unknown/release/keymeld_sdk.wasm release/wasm/
+          
+          # Create a package with metadata
+          cat > release/wasm/package.json << EOF
+          {
+            "name": "keymeld-sdk-wasm",
+            "version": "${{ needs.prepare-release.outputs.version }}",
+            "description": "KeyMeld SDK for WebAssembly",
+            "main": "keymeld_sdk.wasm",
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/${{ github.repository }}"
+            },
+            "license": "MIT"
+          }
+          EOF
+          
+          cd release
+          tar czf keymeld-sdk-${{ needs.prepare-release.outputs.version }}-wasm32-unknown-unknown.tar.gz wasm/
+          ls -lh
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wasm32-unknown-unknown
+          path: release/*.tar.gz
+          retention-days: 7
 
   # Build and push Docker images to GHCR
   build-docker-images:

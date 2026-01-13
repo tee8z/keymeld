@@ -12,7 +12,7 @@ keymeld-sdk = { path = "../keymeld-sdk", features = ["openapi"] }
 axum = { workspace = true, features = ["macros", "tokio", "http1"] }
 axum-extra = { version = "0.12.1", features = ["typed-header"] }
 tower-http = { workspace = true, features = ["compression-gzip", "decompression-gzip"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

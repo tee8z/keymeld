@@ -137,6 +137,11 @@ lto = "fat"
 codegen-units = 1
 opt-level = "s"  # Optimize for size in enclaves
 
+# WASM target configuration
+# getrandom 0.3 requires setting the backend via cfg flag
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
 [unstable]
 # Enable unstable features for development
 # trim-paths = true  # Uncomment when stabilized

@@ -28,7 +28,7 @@ bitcoin = { workspace = true, features = ["serde", "rand", "std"] }
 secp256k1 = { workspace = true }
 musig2 = { workspace = true }
 dlctix = { git = "https://github.com/tee8z/dlctix", branch = "external-signing-api" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

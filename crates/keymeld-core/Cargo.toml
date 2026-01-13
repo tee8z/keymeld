@@ -47,5 +47,12 @@ sqlite = ["sqlx"]
 # Disable this for WASM builds
 networking = ["tokio", "tokio-vsock"]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# getrandom 0.2 (used by crypto deps like aes-gcm) needs "js" feature for WASM
+getrandom = { version = "0.2", features = ["js"] }
+# getrandom 0.3 (used by rand 0.9) needs "wasm_js" feature for WASM
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+
 [lints]
 workspace = true

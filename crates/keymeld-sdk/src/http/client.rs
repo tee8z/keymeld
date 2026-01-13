@@ -15,9 +15,17 @@ impl HttpClient {
     }
 
     pub fn with_config(config: HttpConfig) -> Result<Self, SdkError> {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .gzip(true)
+        let builder = reqwest::Client::builder();
+
+        // timeout() is not available on WASM
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.timeout(config.timeout);
+
+        // gzip() is not available on WASM (browser handles compression)
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.gzip(true);
+
+        let client = builder
             .build()
             .map_err(|e| SdkError::Network(NetworkError::ConnectionFailed(e.to_string())))?;
 

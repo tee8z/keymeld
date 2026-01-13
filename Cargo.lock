@@ -2291,6 +2291,8 @@ dependencies = [
  "anyhow",
  "bincode",
  "dashmap",
+ "getrandom 0.2.16",
+ "getrandom 0.3.4",
  "hex",
  "hkdf",
  "musig2",
@@ -2310,6 +2312,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
+ "wasm-bindgen",
  "zeroize",
 ]
 
@@ -2414,6 +2417,7 @@ dependencies = [
  "dlctix",
  "flate2",
  "getrandom 0.2.16",
+ "getrandom 0.3.4",
  "gloo-timers",
  "hex",
  "keymeld-core",
@@ -2426,6 +2430,7 @@ dependencies = [
  "tokio",
  "utoipa",
  "uuid",
+ "wasm-bindgen",
  "zeroize",
 ]
 
