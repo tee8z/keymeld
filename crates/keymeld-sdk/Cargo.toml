@@ -58,3 +58,9 @@ wasm-bindgen = "0.2"
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-machete]
+# These are WASM target-specific dependencies that enable proper random number
+# generation and JS interop. cargo-machete doesn't detect their usage because
+# they're only compiled for wasm32 targets.
+ignored = ["getrandom", "getrandom_03", "wasm-bindgen"]
