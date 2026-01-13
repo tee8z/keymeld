@@ -60,22 +60,56 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Return the image name
+Return the gateway image name
+Supports both flat structure (image.repository) and nested structure (image.gateway.repository)
 */}}
 {{- define "keymeld.image" -}}
+{{- if .Values.image.gateway -}}
+{{- $tag := default .Chart.AppVersion .Values.image.gateway.tag -}}
+{{- printf "%s:%s" .Values.image.gateway.repository $tag -}}
+{{- else -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- end -}}
 {{- end }}
 
 {{/*
 Return the enclave image name
+Supports both enclave.image structure and image.enclave structure
 */}}
 {{- define "keymeld.enclaveImage" -}}
-{{- if .Values.enclave.image -}}
+{{- if .Values.image.enclave -}}
+{{- $tag := default .Chart.AppVersion .Values.image.enclave.tag -}}
+{{- printf "%s:%s" .Values.image.enclave.repository $tag -}}
+{{- else if .Values.enclave.image -}}
 {{- $tag := default .Chart.AppVersion .Values.enclave.image.tag -}}
 {{- printf "%s:%s" .Values.enclave.image.repository $tag -}}
 {{- else -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s-enclave:%s" .Values.image.repository $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Return the image pull policy for gateway
+*/}}
+{{- define "keymeld.imagePullPolicy" -}}
+{{- if .Values.image.gateway -}}
+{{- .Values.image.gateway.pullPolicy | default "IfNotPresent" -}}
+{{- else -}}
+{{- .Values.image.pullPolicy | default "IfNotPresent" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Return the image pull policy for enclave
+*/}}
+{{- define "keymeld.enclaveImagePullPolicy" -}}
+{{- if .Values.image.enclave -}}
+{{- .Values.image.enclave.pullPolicy | default "IfNotPresent" -}}
+{{- else if .Values.enclave.image -}}
+{{- .Values.enclave.image.pullPolicy | default "IfNotPresent" -}}
+{{- else -}}
+{{- .Values.image.pullPolicy | default "IfNotPresent" -}}
 {{- end -}}
 {{- end }}

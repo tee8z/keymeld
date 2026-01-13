@@ -70,7 +70,7 @@ spec:
           command: ["/app/keymeld-gateway"]
           {{- else }}
           image: {{ include "keymeld.image" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ include "keymeld.imagePullPolicy" . }}
           {{- end }}
           ports:
             - name: http

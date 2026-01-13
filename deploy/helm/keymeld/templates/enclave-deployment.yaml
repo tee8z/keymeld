@@ -39,7 +39,7 @@ spec:
           command: ["/app/keymeld-enclave"]
           {{- else }}
           image: {{ include "keymeld.enclaveImage" $ }}
-          imagePullPolicy: {{ $.Values.enclave.image.pullPolicy | default "IfNotPresent" }}
+          imagePullPolicy: {{ include "keymeld.enclaveImagePullPolicy" $ }}
           {{- end }}
           securityContext:
             privileged: true
