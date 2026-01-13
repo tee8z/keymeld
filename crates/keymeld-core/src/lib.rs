@@ -17,6 +17,7 @@ pub type AggregatePublicKey = String;
 pub mod crypto;
 pub mod identifiers;
 pub mod logging;
+#[cfg(feature = "networking")]
 pub mod managed_socket;
 pub mod protocol;
 pub mod validation;

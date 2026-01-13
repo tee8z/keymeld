@@ -15,8 +15,6 @@ serde_cbor = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "sync", "io-util", "net"] }
-tokio-vsock = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
@@ -32,15 +30,22 @@ dashmap = { workspace = true }
 utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
 sqlx = { workspace = true, optional = true }
 
+# Networking dependencies - not available on WASM
+tokio = { workspace = true, features = ["rt", "macros", "sync", "io-util", "net"], optional = true }
+tokio-vsock = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 
 [features]
 default = ["gateway"]
-gateway = ["sqlite", "openapi"]
-enclave = []
+gateway = ["sqlite", "openapi", "networking"]
+enclave = ["networking"]
 openapi = ["utoipa"]
 sqlite = ["sqlx"]
+# Networking feature enables tokio and managed_socket module
+# Disable this for WASM builds
+networking = ["tokio", "tokio-vsock"]
 
 [lints]
 workspace = true

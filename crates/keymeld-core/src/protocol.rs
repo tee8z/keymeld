@@ -1516,8 +1516,10 @@ impl From<KeyMeldError> for EnclaveError {
     }
 }
 
+#[cfg(feature = "networking")]
 pub struct EnclaveHealthCheck;
 
+#[cfg(feature = "networking")]
 impl crate::managed_socket::pool::HealthCheckable for EnclaveHealthCheck {
     type Command = Command;
     type Response = Outcome;
@@ -1534,4 +1536,5 @@ impl crate::managed_socket::pool::HealthCheckable for EnclaveHealthCheck {
     }
 }
 
+#[cfg(feature = "networking")]
 pub type SocketClient = crate::managed_socket::SocketClient<Command, Outcome>;

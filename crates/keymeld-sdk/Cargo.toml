@@ -10,7 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-keymeld-core = { path = "../keymeld-core" }
+# Use keymeld-core without default features (no networking) for WASM compatibility
+keymeld-core = { path = "../keymeld-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v7", "serde"] }
