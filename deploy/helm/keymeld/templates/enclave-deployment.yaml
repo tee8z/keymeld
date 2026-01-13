@@ -82,8 +82,13 @@ spec:
         # Socat sidecar: bridges TCP (from gateway) to VSock (enclave)
         # Gateway connects via TCP, socat forwards to enclave's VSock port
         - name: tcp-to-vsock
+          {{- if $.Values.devMode.enabled }}
           image: {{ $.Values.devMode.baseImage }}
           imagePullPolicy: Never
+          {{- else }}
+          image: alpine/socat:latest
+          imagePullPolicy: Always
+          {{- end }}
           command: ["socat"]
           args:
             - "-d"
