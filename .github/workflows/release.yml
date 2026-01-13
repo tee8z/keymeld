@@ -249,3 +249,89 @@ jobs:
   #         cargo publish -p keymeld-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
   #         sleep 10
   #         cargo publish -p keymeld-gateway --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Build and push Docker images to GHCR
+  build-docker-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [prepare-release]
+    if: always() && needs.prepare-release.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: gateway
+            nix_output: docker-gateway
+          - image: enclave
+            nix_output: docker-enclave
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-gha-cache: false
+          use-flakehub: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build x86_64 image
+        run: |
+          nix build .#${{ matrix.nix_output }} --print-build-logs
+          docker load < result
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-amd64
+          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-amd64
+
+      - name: Build ARM64 image (cross-compiled)
+        run: |
+          # Cross-compile for ARM64 using Nix (no QEMU needed)
+          nix build .#packages.aarch64-linux.${{ matrix.nix_output }} --print-build-logs
+          docker load < result
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-arm64
+          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-arm64
+
+      - name: Push images and create manifest
+        if: needs.prepare-release.outputs.dry_run != 'true'
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_LOWER}/${{ matrix.image }}"
+
+          # Push architecture-specific images
+          docker push ${IMAGE}:${VERSION}-amd64
+          docker push ${IMAGE}:${VERSION}-arm64
+          docker push ${IMAGE}:latest-amd64
+          docker push ${IMAGE}:latest-arm64
+
+          # Create and push multi-arch manifests
+          docker manifest create ${IMAGE}:${VERSION} \
+            ${IMAGE}:${VERSION}-amd64 \
+            ${IMAGE}:${VERSION}-arm64
+          docker manifest push ${IMAGE}:${VERSION}
+
+          docker manifest create ${IMAGE}:latest \
+            ${IMAGE}:latest-amd64 \
+            ${IMAGE}:latest-arm64
+          docker manifest push ${IMAGE}:latest
+
+          echo "Pushed multi-arch image: ${IMAGE}:${VERSION}"
