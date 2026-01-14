@@ -72,14 +72,14 @@ spec:
           securityContext:
             {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
             privileged: true
-            {{- else if not .Values.litestream.useIAMRole }}
+            {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
             {{- end }}
           {{- if .Values.devMode.enabled }}
           image: {{ .Values.devMode.baseImage }}
           imagePullPolicy: Never
           command: ["/app/keymeld-gateway"]
-          {{- else if not .Values.litestream.useIAMRole }}
+          {{- else }}
           image: {{ include "keymeld.image" . }}
           imagePullPolicy: {{ include "keymeld.imagePullPolicy" . }}
           {{- end }}
@@ -193,7 +193,7 @@ spec:
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "keymeld.fullname" . }}
-          {{- else if not .Values.litestream.useIAMRole }}
+          {{- else }}
           emptyDir: {}
           {{- end }}
         - name: config
