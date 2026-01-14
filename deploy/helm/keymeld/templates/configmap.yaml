@@ -97,6 +97,9 @@ data:
             endpoint: {{ .Values.litestream.s3Endpoint }}
             force-path-style: {{ .Values.litestream.s3ForcePathStyle }}
             {{- end }}
+            {{- if or .Values.litestream.encryptionKey .Values.litestream.encryptionKeySecret.enabled }}
+            encryption-key: {{ if .Values.litestream.encryptionKeySecret.enabled }}$LITESTREAM_ENCRYPTION_KEY{{ else }}{{ .Values.litestream.encryptionKey }}{{ end }}
+            {{- end }}
             sync-interval: {{ .Values.litestream.syncInterval }}
             retention: {{ .Values.litestream.retention }}
             snapshot-interval: {{ .Values.litestream.snapshotInterval }}

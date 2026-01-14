@@ -81,6 +81,13 @@ litestream:
   syncInterval: "10s"
   retention: "168h"
   snapshotInterval: "1h"
+  # Encryption key for Litestream backups (age key format)
+  encryptionKey: ""
+  encryptionKeySecret:
+    enabled: false
+    name: ""
+    key: "encryption-key"
+  useIAMRole: false
 
 enclave:
   enabled: false

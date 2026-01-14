@@ -66,6 +66,13 @@ spec:
                   name: {{ include "keymeld.fullname" . }}-s3
                   key: secret-access-key
             {{- end }}
+            {{- if .Values.litestream.encryptionKeySecret.enabled }}
+            - name: LITESTREAM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.litestream.encryptionKeySecret.name }}
+                  key: {{ .Values.litestream.encryptionKeySecret.key }}
+            {{- end }}
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -180,6 +187,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "keymeld.fullname" . }}-s3
                   key: secret-access-key
+            {{- end }}
+            {{- if .Values.litestream.encryptionKeySecret.enabled }}
+            - name: LITESTREAM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.litestream.encryptionKeySecret.name }}
+                  key: {{ .Values.litestream.encryptionKeySecret.key }}
             {{- end }}
           resources:
             requests:
