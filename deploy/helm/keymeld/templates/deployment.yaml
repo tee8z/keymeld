@@ -80,7 +80,6 @@ spec:
           imagePullPolicy: Never
           command: ["/app/keymeld-gateway"]
           {{- else }}
-          command: ["/keymeld-gateway"]
           image: {{ include "keymeld.image" . }}
           imagePullPolicy: {{ include "keymeld.imagePullPolicy" . }}
           {{- end }}

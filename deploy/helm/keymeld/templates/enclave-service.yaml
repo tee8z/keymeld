@@ -17,9 +17,9 @@ spec:
   type: ClusterIP
   ports:
     - port: {{ $e.port }}
-      targetPort: vsock-proxy
+      targetPort: enclave
       protocol: TCP
-      name: vsock-proxy
+      name: enclave
   selector:
     {{- include "keymeld.selectorLabels" $ | nindent 4 }}
     app.kubernetes.io/component: enclave
