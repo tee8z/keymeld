@@ -227,6 +227,10 @@ impl Database {
         Ok(DatabaseStats {
             total_sessions: keygen_session_count + signing_session_count,
             active_sessions: active_keygen_sessions + active_signing_sessions,
+            total_keygen_sessions: keygen_session_count,
+            total_signing_sessions: signing_session_count,
+            active_keygen_sessions,
+            active_signing_sessions,
             total_participants,
             database_size_bytes: Some(database_size),
         })
@@ -2645,6 +2649,83 @@ impl Database {
 
         Ok(None)
     }
+
+    /// List keygen sessions, optionally limited to most recent
+    pub async fn list_keygen_sessions(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<KeygenSessionStatus>, ApiError> {
+        let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
+
+        let query = format!(
+            "SELECT keygen_session_id, status FROM keygen_sessions ORDER BY created_at DESC{}",
+            limit_clause
+        );
+
+        let rows = sqlx::query_as::<_, (String, String)>(&query)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        for (session_id_str, status_json) in rows {
+            let session_id: SessionId = SessionId::parse(&session_id_str)
+                .map_err(|e| ApiError::Serialization(format!("Failed to parse session ID: {e}")))?;
+
+            let mut status: KeygenSessionStatus =
+                serde_json::from_str(&status_json).map_err(|e| {
+                    ApiError::Serialization(format!("Failed to deserialize keygen status: {e}"))
+                })?;
+
+            // Load and merge participants
+            let participants = self.get_keygen_participants(&session_id).await?;
+            let participants_map: BTreeMap<UserId, ParticipantData> = participants
+                .into_iter()
+                .map(|p| (p.user_id.clone(), p))
+                .collect();
+
+            if let Err(e) = status.merge_participants(participants_map) {
+                warn!(
+                    "Failed to merge participants for session {}: {}",
+                    session_id, e
+                );
+            }
+
+            sessions.push(status);
+        }
+
+        Ok(sessions)
+    }
+
+    /// List signing sessions, optionally limited to most recent
+    pub async fn list_signing_sessions(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<SigningSessionStatus>, ApiError> {
+        let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
+
+        let query = format!(
+            "SELECT signing_session_id, status FROM signing_sessions ORDER BY created_at DESC{}",
+            limit_clause
+        );
+
+        let rows = sqlx::query_as::<_, (String, String)>(&query)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        for (session_id_str, status_json) in rows {
+            let _session_id: SessionId = SessionId::parse(&session_id_str)
+                .map_err(|e| ApiError::Serialization(format!("Failed to parse session ID: {e}")))?;
+
+            let status: SigningSessionStatus = serde_json::from_str(&status_json).map_err(|e| {
+                ApiError::Serialization(format!("Failed to deserialize signing status: {e}"))
+            })?;
+
+            sessions.push(status);
+        }
+
+        Ok(sessions)
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -2734,10 +2815,14 @@ pub struct EnclaveHealthInfo {
     pub active_sessions: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DatabaseStats {
     pub total_sessions: i64,
     pub active_sessions: i64,
+    pub total_keygen_sessions: i64,
+    pub total_signing_sessions: i64,
+    pub active_keygen_sessions: i64,
+    pub active_signing_sessions: i64,
     pub total_participants: i64,
     pub database_size_bytes: Option<u64>,
 }

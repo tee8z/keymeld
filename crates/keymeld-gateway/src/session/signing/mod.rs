@@ -360,6 +360,51 @@ impl SigningSessionStatus {
         }
     }
 
+    pub fn session_id(&self) -> &SessionId {
+        match self {
+            SigningSessionStatus::CollectingParticipants(s) => &s.signing_session_id,
+            SigningSessionStatus::InitializingSession(s) => &s.signing_session_id,
+            SigningSessionStatus::DistributingNonces(s) => &s.signing_session_id,
+            SigningSessionStatus::FinalizingSignature(s) => &s.signing_session_id,
+            SigningSessionStatus::Completed(s) => &s.signing_session_id,
+            SigningSessionStatus::Failed(s) => &s.signing_session_id,
+        }
+    }
+
+    pub fn created_at(&self) -> u64 {
+        match self {
+            SigningSessionStatus::CollectingParticipants(s) => s.created_at,
+            SigningSessionStatus::InitializingSession(s) => s.created_at,
+            SigningSessionStatus::DistributingNonces(s) => s.created_at,
+            SigningSessionStatus::FinalizingSignature(s) => s.created_at,
+            SigningSessionStatus::Completed(s) => s.created_at,
+            SigningSessionStatus::Failed(s) => s.created_at,
+        }
+    }
+
+    pub fn expires_at(&self) -> Option<u64> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(s) => Some(s.expires_at),
+            SigningSessionStatus::InitializingSession(s) => Some(s.expires_at),
+            SigningSessionStatus::DistributingNonces(s) => Some(s.expires_at),
+            SigningSessionStatus::FinalizingSignature(s) => Some(s.expires_at),
+            SigningSessionStatus::Completed(s) => Some(s.expires_at),
+            SigningSessionStatus::Failed(_) => None,
+        }
+    }
+
+    pub fn approved_participants(&self) -> Vec<UserId> {
+        match self {
+            SigningSessionStatus::CollectingParticipants(s) => s.approved_participants.clone(),
+            // After collecting, all participants are effectively "approved"
+            SigningSessionStatus::InitializingSession(s) => s.expected_participants.clone(),
+            SigningSessionStatus::DistributingNonces(s) => s.expected_participants.clone(),
+            SigningSessionStatus::FinalizingSignature(s) => s.expected_participants.clone(),
+            SigningSessionStatus::Completed(s) => s.expected_participants.clone(),
+            SigningSessionStatus::Failed(s) => s.expected_participants.clone(),
+        }
+    }
+
     pub fn merge_fresh_participant_data(
         &mut self,
         fresh_participants: BTreeMap<UserId, ParticipantData>,

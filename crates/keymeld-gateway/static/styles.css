@@ -1,0 +1,329 @@
+/* KeyMeld Admin Portal Styles */
+
+/* Theme toggle button */
+#theme-toggle {
+    background: transparent;
+    border: 1px solid var(--bulma-border);
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#theme-toggle:hover {
+    background: var(--bulma-scheme-main-bis);
+}
+
+#theme-toggle .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Status badge colors */
+.tag.is-reserved {
+    background-color: #9ca3af;
+    color: #fff;
+}
+
+.tag.is-collecting {
+    background-color: #ffe08a;
+    color: rgba(0, 0, 0, 0.7);
+}
+
+.tag.is-initializing {
+    background-color: #3b82f6;
+    color: #fff;
+}
+
+.tag.is-completed {
+    background-color: #48c78e;
+    color: #fff;
+}
+
+.tag.is-failed {
+    background-color: #f14668;
+    color: #fff;
+}
+
+.tag.is-keygen {
+    background-color: #7c3aed;
+    color: #fff;
+}
+
+.tag.is-signing {
+    background-color: #0ea5e9;
+    color: #fff;
+}
+
+/* Health status indicators */
+.health-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+}
+
+.health-indicator.is-healthy {
+    background-color: #48c78e;
+}
+
+.health-indicator.is-unhealthy {
+    background-color: #f14668;
+}
+
+/* Card improvements */
+.box {
+    transition: box-shadow 0.2s ease;
+}
+
+.box:hover {
+    box-shadow:
+        0 0.5em 1em -0.125em rgba(10, 10, 10, 0.15),
+        0 0px 0 1px rgba(10, 10, 10, 0.02);
+}
+
+/* Stat cards */
+.stat-card {
+    text-align: center;
+    padding: 1rem;
+}
+
+.stat-card .stat-value {
+    font-size: 2rem;
+    font-weight: bold;
+    line-height: 1.2;
+}
+
+.stat-card .stat-label {
+    font-size: 0.875rem;
+    color: var(--bulma-text-weak);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Enclave card */
+.enclave-card {
+    margin-bottom: 1rem;
+}
+
+.enclave-card .enclave-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+}
+
+.enclave-card .enclave-id {
+    font-weight: bold;
+    font-size: 1.1rem;
+}
+
+.enclave-card .info-label {
+    font-size: 0.75rem;
+    color: var(--bulma-text-weak);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+
+.enclave-card .info-value {
+    font-family: monospace;
+    font-size: 0.875rem;
+    word-break: break-all;
+    background: var(--bulma-scheme-main-bis);
+    padding: 0.5rem;
+    border-radius: 4px;
+}
+
+/* Copy button */
+.copy-btn {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s ease;
+}
+
+.copy-btn:hover {
+    opacity: 1;
+}
+
+.copy-btn.copied {
+    color: #48c78e;
+}
+
+/* Table improvements */
+.table-container {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.table th {
+    white-space: nowrap;
+}
+
+/* Clickable table rows */
+.table tr.is-clickable {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.table tr.is-clickable:hover {
+    background-color: var(--bulma-scheme-main-bis) !important;
+}
+
+/* Session ID styling */
+.session-id {
+    font-family: monospace;
+    font-size: 0.875rem;
+}
+
+/* Progress indicator */
+.progress-text {
+    font-family: monospace;
+    font-size: 0.875rem;
+}
+
+.progress-text.is-complete {
+    color: #48c78e;
+}
+
+/* Truncate long text with ellipsis */
+.truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 150px;
+}
+
+/* Loading indicator */
+.htmx-request .htmx-indicator {
+    display: inline-block;
+}
+
+.htmx-indicator {
+    display: none;
+}
+
+/* Smooth transitions for HTMX content swaps */
+#main-content {
+    transition: opacity 0.15s ease;
+}
+
+.htmx-swapping #main-content {
+    opacity: 0.5;
+}
+
+/* Active navbar item styling */
+.navbar-item.is-active {
+    font-weight: 600;
+}
+
+/* Session detail page */
+.session-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.session-detail-header .back-btn {
+    flex-shrink: 0;
+}
+
+/* Participant table */
+.participant-row .pubkey {
+    font-family: monospace;
+    font-size: 0.75rem;
+    word-break: break-all;
+}
+
+/* Mobile-specific adjustments */
+@media screen and (max-width: 768px) {
+    /* Reduce padding on mobile */
+    .section {
+        padding: 1.5rem 1rem;
+    }
+
+    /* Stack level items vertically on mobile */
+    .level {
+        display: block;
+    }
+
+    .level-left,
+    .level-right {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 0.5rem;
+    }
+
+    .level-right {
+        margin-bottom: 0;
+    }
+
+    /* Smaller title on mobile */
+    .title {
+        font-size: 1.5rem;
+    }
+
+    /* Stat cards adjust */
+    .stat-card .stat-value {
+        font-size: 1.5rem;
+    }
+
+    /* Table font size reduction */
+    .table {
+        font-size: 0.875rem;
+    }
+
+    /* Truncate smaller on mobile */
+    .truncate {
+        max-width: 80px;
+    }
+
+    /* Enclave card adjustments */
+    .enclave-card .info-value {
+        font-size: 0.75rem;
+    }
+}
+
+/* Tablet adjustments */
+@media screen and (min-width: 769px) and (max-width: 1023px) {
+    .stat-card .stat-value {
+        font-size: 1.75rem;
+    }
+
+    .truncate {
+        max-width: 120px;
+    }
+}
+
+/* Timestamp styling */
+.timestamp {
+    font-family: monospace;
+    font-size: 0.875rem;
+    color: var(--bulma-text-weak);
+}
+
+/* Expiry warning */
+.expires-soon {
+    color: #f14668;
+    font-weight: 600;
+}
+
+/* Refresh button */
+.refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.refresh-btn .icon {
+    transition: transform 0.3s ease;
+}
+
+.htmx-request .refresh-btn .icon {
+    transform: rotate(180deg);
+}
