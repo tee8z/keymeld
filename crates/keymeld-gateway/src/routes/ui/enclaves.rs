@@ -1,15 +1,24 @@
-use axum::{extract::State, response::Html};
+use axum::{extract::State, http::HeaderMap, response::Html};
 use keymeld_core::identifiers::EnclaveId;
 
 use crate::{
     handlers::AppState,
-    templates::{fragments::EnclaveView, pages::enclaves_page},
+    templates::{
+        fragments::EnclaveView,
+        pages::{enclaves_content, enclaves_page},
+    },
 };
 
 /// Handler for enclaves page (GET /enclaves)
-pub async fn enclaves_handler(State(state): State<AppState>) -> Html<String> {
+/// Returns full page for normal requests, just content for HTMX requests
+pub async fn enclaves_handler(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
     let enclaves = build_enclave_views(&state).await;
-    Html(enclaves_page(&enclaves).into_string())
+
+    if headers.contains_key("hx-request") {
+        Html(enclaves_content(&enclaves).into_string())
+    } else {
+        Html(enclaves_page(&enclaves).into_string())
+    }
 }
 
 pub async fn build_enclave_views(state: &AppState) -> Vec<EnclaveView> {

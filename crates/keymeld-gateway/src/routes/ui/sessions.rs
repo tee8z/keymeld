@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     response::Html,
 };
 use keymeld_core::identifiers::SessionId;
@@ -13,22 +14,32 @@ use crate::{
         pages::{
             session_detail_page,
             sessions::{ParticipantView, SessionDetailView},
-            sessions_page,
+            sessions_content, sessions_page,
         },
     },
 };
 
 /// Handler for sessions page (GET /sessions)
-pub async fn sessions_handler(State(state): State<AppState>) -> Html<String> {
+/// Returns full page for normal requests, just content for HTMX requests
+pub async fn sessions_handler(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
     let sessions = build_session_views(&state, None).await;
-    Html(sessions_page(&sessions).into_string())
+
+    if headers.contains_key("hx-request") {
+        Html(sessions_content(&sessions).into_string())
+    } else {
+        Html(sessions_page(&sessions).into_string())
+    }
 }
 
 /// Handler for session detail page (GET /sessions/{session_id})
+/// Returns full page for normal requests, just content for HTMX requests
 pub async fn session_detail_handler(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Html<String> {
+    let is_htmx = headers.contains_key("hx-request");
+
     let session_id_parsed = match SessionId::parse(&session_id) {
         Ok(id) => id,
         Err(_) => {
@@ -73,7 +84,11 @@ pub async fn session_detail_handler(
             participants,
         };
 
-        return Html(session_detail_page(&detail).into_string());
+        return if is_htmx {
+            Html(crate::templates::pages::session_detail_content(&detail).into_string())
+        } else {
+            Html(session_detail_page(&detail).into_string())
+        };
     }
 
     // Try signing session
@@ -119,7 +134,11 @@ pub async fn session_detail_handler(
             participants,
         };
 
-        return Html(session_detail_page(&detail).into_string());
+        return if is_htmx {
+            Html(crate::templates::pages::session_detail_content(&detail).into_string())
+        } else {
+            Html(session_detail_page(&detail).into_string())
+        };
     }
 
     // Session not found - return to sessions list

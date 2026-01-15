@@ -1,19 +1,28 @@
-use axum::{extract::State, response::Html};
+use axum::{extract::State, http::HeaderMap, response::Html};
 
 use crate::{
     handlers::AppState,
-    templates::{fragments::AdminStats, pages::dashboard_page},
+    templates::{
+        fragments::AdminStats,
+        pages::{dashboard_content, dashboard_page},
+    },
 };
 
 use super::{enclaves::build_enclave_views, sessions::build_session_views};
 
 /// Handler for dashboard page (GET /)
-pub async fn dashboard_handler(State(state): State<AppState>) -> Html<String> {
+/// Returns full page for normal requests, just content for HTMX requests
+pub async fn dashboard_handler(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
     let stats = build_admin_stats(&state).await;
     let recent_sessions = build_session_views(&state, Some(10)).await;
     let enclaves = build_enclave_views(&state).await;
 
-    Html(dashboard_page(&stats, &recent_sessions, &enclaves).into_string())
+    // Check if this is an HTMX request
+    if headers.contains_key("hx-request") {
+        Html(dashboard_content(&stats, &recent_sessions, &enclaves).into_string())
+    } else {
+        Html(dashboard_page(&stats, &recent_sessions, &enclaves).into_string())
+    }
 }
 
 pub async fn build_admin_stats(state: &AppState) -> AdminStats {
