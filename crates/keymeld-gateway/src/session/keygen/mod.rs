@@ -309,6 +309,24 @@ impl KeygenSessionStatus {
             KeygenSessionStatus::Failed(_) => None,
         }
     }
+
+    pub fn session_id(&self) -> &SessionId {
+        match self {
+            KeygenSessionStatus::Reserved(s) => &s.keygen_session_id,
+            KeygenSessionStatus::CollectingParticipants(s) => &s.keygen_session_id,
+            KeygenSessionStatus::Completed(s) => &s.keygen_session_id,
+            KeygenSessionStatus::Failed(s) => &s.keygen_session_id,
+        }
+    }
+
+    pub fn created_at(&self) -> u64 {
+        match self {
+            KeygenSessionStatus::Reserved(s) => s.created_at,
+            KeygenSessionStatus::CollectingParticipants(s) => s.created_at,
+            KeygenSessionStatus::Completed(s) => s.created_at,
+            KeygenSessionStatus::Failed(s) => s.created_at,
+        }
+    }
 }
 
 impl AsRef<str> for KeygenSessionStatus {

@@ -390,6 +390,10 @@ impl<'a> KeygenSession<'a> {
         self.is_registered
     }
 
+    pub fn coordinator_enclave_pubkey(&self) -> Option<&str> {
+        self.coordinator_enclave_pubkey.as_deref()
+    }
+
     pub async fn register_self(
         &mut self,
         options: RegisterOptions,

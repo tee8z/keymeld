@@ -11,7 +11,8 @@ keymeld-core = { path = "../keymeld-core", features = ["gateway"] }
 keymeld-sdk = { path = "../keymeld-sdk", features = ["openapi"] }
 axum = { workspace = true, features = ["macros", "tokio", "http1"] }
 axum-extra = { version = "0.12.1", features = ["typed-header"] }
-tower-http = { workspace = true, features = ["compression-gzip", "decompression-gzip"] }
+tower-http = { workspace = true, features = ["compression-gzip", "decompression-gzip", "fs"] }
+maud = { version = "0.26", features = ["axum"] }
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -49,6 +50,12 @@ utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
 [dev-dependencies]
 tempfile = "3.15.0"
+
+[build-dependencies]
+minify-js = "0.6"
+walkdir = "2.5"
+sha2 = "0.10"
+hex = "0.4"
 
 [[bin]]
 name = "keymeld-gateway"

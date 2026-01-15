@@ -8,6 +8,7 @@ use crate::{
     kms,
     metrics::Metrics,
     middleware::metrics_middleware,
+    routes,
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -40,6 +41,7 @@ use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     decompression::RequestDecompressionLayer,
+    services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -458,7 +460,35 @@ impl Application {
                 get(|| async { Html(utoipa_scalar::Scalar::new(ApiDoc::openapi()).to_html()) }),
             );
 
-        let app = Router::new().nest("/api/v1", api_routes);
+        // UI routes for admin portal
+        let ui_routes = Router::new()
+            .route("/", get(routes::dashboard_handler))
+            .route("/sessions", get(routes::sessions_handler))
+            .route(
+                "/sessions/{session_id}",
+                get(routes::session_detail_handler),
+            )
+            .route("/enclaves", get(routes::enclaves_handler))
+            // HTMX fragment routes
+            .route("/fragments/stats", get(routes::stats_fragment_handler))
+            .route(
+                "/fragments/sessions-rows",
+                get(routes::sessions_rows_handler),
+            )
+            .route(
+                "/fragments/enclaves",
+                get(routes::enclaves_fragment_handler),
+            );
+
+        // Static file serving for UI assets
+        let static_dir = std::env::var("KEYMELD_STATIC_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string());
+        let serve_static = ServeDir::new(&static_dir);
+
+        let app = Router::new()
+            .merge(ui_routes)
+            .nest("/api/v1", api_routes)
+            .nest_service("/static", serve_static);
 
         let mut app = app
             .layer(

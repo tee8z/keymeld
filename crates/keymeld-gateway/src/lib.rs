@@ -10,8 +10,10 @@ pub mod headers;
 pub mod kms;
 pub mod metrics;
 pub mod middleware;
+pub mod routes;
 pub mod session;
 pub mod startup;
+pub mod templates;
 
 // Re-exports
 pub use keymeld_core::{identifiers, AggregatePublicKey, EncryptedData, KeyMeldError};

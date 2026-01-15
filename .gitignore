@@ -64,3 +64,8 @@ logs/*
 .cargo/config.toml.backup
 .cargo/config.toml.cache
 .cargo/config.toml.temp
+
+# Generated static assets (bundled by build.rs)
+crates/keymeld-gateway/static/*.min.js
+crates/keymeld-gateway/static/*.min.css
+crates/keymeld-gateway/static/app.debug.js
