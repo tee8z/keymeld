@@ -20,7 +20,7 @@ data:
       {{- else }}
       endpoint_url: null
       {{- end }}
-      key_id: "${KMS_KEY_ARN}"
+      key_id: {{ .Values.kms.keyId | quote }}
       {{- end }}
     database:
       path: "{{ .Values.persistence.mountPath }}/keymeld.db"
