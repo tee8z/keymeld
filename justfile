@@ -26,6 +26,8 @@ help:
     @echo "  test-dlctix-batch   Run DLC batch signing E2E test"
     @echo "  test-single-signer  Run single-signer E2E test"
     @echo "  test-kms-e2e        Run KMS end-to-end tests with restart"
+    @echo "  test-ui             Run Playwright UI tests (services must be running)"
+    @echo "  test-ui-e2e         Run full UI E2E test (starts services automatically)"
     @echo "  mine <blocks>       Mine Bitcoin regtest blocks"
     @echo "  setup-regtest       Setup Bitcoin regtest environment"
     @echo ""
@@ -508,6 +510,98 @@ lint:
 # Run all checks
 check: fmt lint test
     @echo "✅ All checks passed!"
+
+# Run Playwright UI tests (requires services to be running)
+test-ui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🎭 Running Playwright UI tests..."
+    cd e2e
+    if [ ! -d "node_modules" ]; then
+        echo "📦 Installing Playwright dependencies..."
+        npm install
+        npx playwright install chromium
+    fi
+    npx playwright test
+
+# Run Playwright UI tests in headed mode (for debugging)
+test-ui-headed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🎭 Running Playwright UI tests (headed)..."
+    cd e2e
+    if [ ! -d "node_modules" ]; then
+        echo "📦 Installing Playwright dependencies..."
+        npm install
+        npx playwright install chromium
+    fi
+    npx playwright test --headed
+
+# Run full UI E2E test (starts services, runs tests, stops services)
+test-ui-e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🎭 Running full UI E2E test..."
+
+    # Clean first
+    ./scripts/clean.sh
+
+    # Run everything in a single nix develop session
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ]; then
+            echo "🔨 Building KeyMeld..."
+            cargo build
+        else
+            echo "Using pre-built binaries (SKIP_BUILD=1)"
+        fi
+        echo "🚀 Starting services..."
+        ./scripts/setup-regtest.sh
+        ./scripts/start-services.sh
+        echo "⏳ Waiting for gateway to be ready..."
+        for i in {1..30}; do
+            if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+                echo "✅ Gateway ready"
+                break
+            fi
+            echo "Waiting for gateway... ($i/30)"
+            sleep 1
+        done
+        echo "🎭 Running Playwright tests..."
+        cd e2e
+        if [ ! -d "node_modules" ]; then
+            npm install
+            npx playwright install chromium
+        fi
+        npx playwright test
+    else
+        nix develop -c bash -c '
+            if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ]; then
+                echo "🔨 Building KeyMeld..."
+                cargo build
+            else
+                echo "Using pre-built binaries (SKIP_BUILD=1)"
+            fi
+            echo "🚀 Starting services..."
+            ./scripts/setup-regtest.sh
+            ./scripts/start-services.sh
+            echo "⏳ Waiting for gateway to be ready..."
+            for i in {1..30}; do
+                if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+                    echo "✅ Gateway ready"
+                    break
+                fi
+                echo "Waiting for gateway... ($i/30)"
+                sleep 1
+            done
+            echo "🎭 Running Playwright tests..."
+            cd e2e
+            if [ ! -d "node_modules" ]; then
+                npm install
+                npx playwright install chromium
+            fi
+            npx playwright test
+        '
+    fi
 
 # Enter development shell
 dev:
