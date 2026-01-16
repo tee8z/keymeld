@@ -37,11 +37,11 @@ use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::OpenApi;
 
+use axum::http::header;
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     decompression::RequestDecompressionLayer,
-    services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -480,15 +480,55 @@ impl Application {
                 get(routes::enclaves_fragment_handler),
             );
 
-        // Static file serving for UI assets
+        // Static file serving for UI assets with explicit MIME types
+        // This ensures JavaScript files are served with the correct Content-Type
+        // even in environments where the system MIME database is missing
         let static_dir = std::env::var("KEYMELD_STATIC_DIR")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string());
-        let serve_static = ServeDir::new(&static_dir);
+
+        // Create a handler for serving static files with explicit Content-Type headers
+        // to avoid MIME type issues in containerized environments
+        let static_dir_clone = static_dir.clone();
+        let serve_static_with_mime = axum::routing::get(
+            move |axum::extract::Path(path): axum::extract::Path<String>| {
+                let static_dir = static_dir_clone.clone();
+                async move {
+                    let file_path = std::path::Path::new(&static_dir).join(&path);
+
+                    // Determine Content-Type based on file extension
+                    let content_type = match file_path.extension().and_then(|e| e.to_str()) {
+                        Some("js") => "application/javascript; charset=utf-8",
+                        Some("css") => "text/css; charset=utf-8",
+                        Some("html") => "text/html; charset=utf-8",
+                        Some("json") => "application/json; charset=utf-8",
+                        Some("png") => "image/png",
+                        Some("jpg") | Some("jpeg") => "image/jpeg",
+                        Some("svg") => "image/svg+xml",
+                        Some("woff") => "font/woff",
+                        Some("woff2") => "font/woff2",
+                        Some("ttf") => "font/ttf",
+                        Some("ico") => "image/x-icon",
+                        _ => "application/octet-stream",
+                    };
+
+                    match tokio::fs::read(&file_path).await {
+                        Ok(contents) => axum::response::Response::builder()
+                            .header(header::CONTENT_TYPE, content_type)
+                            .body(axum::body::Body::from(contents))
+                            .unwrap(),
+                        Err(_) => axum::response::Response::builder()
+                            .status(axum::http::StatusCode::NOT_FOUND)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    }
+                }
+            },
+        );
 
         let app = Router::new()
             .merge(ui_routes)
             .nest("/api/v1", api_routes)
-            .nest_service("/static", serve_static);
+            .route("/static/{*path}", serve_static_with_mime);
 
         let mut app = app
             .layer(
