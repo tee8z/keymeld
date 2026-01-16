@@ -84,6 +84,7 @@
           filter = path: type:
             (craneLib.filterCargoSources path type) ||
             (builtins.match ".*crates/keymeld-gateway/.*" path != null) ||
+            (builtins.match ".*crates/keymeld-gateway/static/.*" path != null) ||
             (builtins.match ".*crates/keymeld-core/.*" path != null) ||
             (builtins.match ".*\\.sqlx/.*" path != null) ||
             (builtins.match ".*config/.*" path != null);
@@ -125,6 +126,7 @@
           postInstall = ''
             mkdir -p $out/share/keymeld-gateway
             cp -r crates/keymeld-gateway/migrations $out/share/keymeld-gateway/
+            cp -r crates/keymeld-gateway/static $out/share/keymeld-gateway/
             cp -r config $out/share/keymeld-gateway/
           '';
         } // commonEnvs;
@@ -1027,6 +1029,7 @@ EOF
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "RUST_LOG=info"
               "TEST_MODE=true"
+              "KEYMELD_STATIC_DIR=${keymeld-gateway}/share/keymeld-gateway/static"
             ];
             ExposedPorts = {
               "8080/tcp" = {};
