@@ -95,7 +95,7 @@ spec:
               containerPort: {{ .Values.config.server.port }}
               protocol: TCP
           env:
-            - name: KEYMELD_CONFIG
+            - name: CONFIG_PATH
               value: /etc/keymeld/config.yaml
             {{- if .Values.kms.enabled }}
             - name: KMS_KEY_ARN
