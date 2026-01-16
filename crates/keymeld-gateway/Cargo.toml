@@ -61,5 +61,8 @@ hex = "0.4"
 name = "keymeld-gateway"
 path = "src/main.rs"
 
+[package.metadata.cargo-machete]
+ignored = ["minify-js", "sha2", "walkdir"]
+
 [lints]
 workspace = true
