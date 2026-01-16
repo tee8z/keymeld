@@ -207,6 +207,9 @@ jobs:
           - name: kms-restart
             command: just test-kms-e2e
             timeout: 20
+          - name: ui-playwright
+            command: just test-ui-e2e
+            timeout: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -243,6 +246,19 @@ jobs:
           echo "AUTOMATED_RUN=true" >> $GITHUB_ENV
           ./scripts/vsock-setup.sh setup
 
+      - name: Setup Node.js for Playwright
+        if: matrix.test.name == 'ui-playwright'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright browsers
+        if: matrix.test.name == 'ui-playwright'
+        run: |
+          cd e2e
+          npm install
+          npx playwright install chromium --with-deps
+
       - name: Run ${{ matrix.test.name }}
         run: |
           # Use nix develop to get 'just' command
@@ -260,4 +276,12 @@ jobs:
             logs/
             data/
             *.log
+          retention-days: 7
+
+      - name: Upload Playwright report on failure
+        if: failure() && matrix.test.name == 'ui-playwright'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: e2e/playwright-report/
           retention-days: 7
