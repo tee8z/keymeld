@@ -177,11 +177,9 @@ jobs:
 
   # End-to-end integration tests (uses pre-built binaries)
   e2e-test:
-    name: E2E - ${{ matrix.test.name }}
     runs-on: ubuntu-latest
     needs: [build, fmt, clippy, machete, test, wasm]
     if: "!contains(github.event.pull_request.labels.*.name, 'skip-e2e')"
-    timeout-minutes: ${{ matrix.test.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -210,6 +208,8 @@ jobs:
           - name: ui-playwright
             command: just test-ui-e2e
             timeout: 15
+    name: E2E - ${{ matrix.test.name }}
+    timeout-minutes: ${{ matrix.test.timeout }}
     steps:
       - uses: actions/checkout@v4
 
