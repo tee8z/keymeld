@@ -103,4 +103,5 @@ data:
             sync-interval: {{ .Values.litestream.syncInterval }}
             retention: {{ .Values.litestream.retention }}
             snapshot-interval: {{ .Values.litestream.snapshotInterval }}
+            retention-check-interval: {{ .Values.litestream.retentionCheckInterval }}
 {{- end }}
