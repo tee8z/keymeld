@@ -167,7 +167,7 @@ fn minify_css(css: &str) -> String {
 }
 
 fn is_release_build() -> bool {
-    env::var("PROFILE").map_or(false, |p| p == "release")
+    env::var("PROFILE").is_ok_and(|p| p == "release")
 }
 
 fn clean_old_bundles(output: &Path) {
