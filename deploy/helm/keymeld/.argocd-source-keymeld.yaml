@@ -4,5 +4,5 @@ helm:
     value: ghcr.io/tee8z/keymeld/gateway
     forcestring: true
   - name: image.gateway.tag
-    value: 0.2.2
+    value: 0.2.3-arm64
     forcestring: true
