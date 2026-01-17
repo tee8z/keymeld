@@ -12,6 +12,11 @@ fn main() {
         return;
     }
 
+    // In debug mode, clean up old hashed bundles to avoid duplicates
+    if !is_release_build() {
+        clean_old_bundles(&output);
+    }
+
     // Track changes for JS and CSS
     println!("cargo:rerun-if-changed={}", templates.display());
     for entry in WalkDir::new(&templates).into_iter().filter_map(|e| e.ok()) {
@@ -159,4 +164,44 @@ fn minify_css(css: &str) -> String {
         out.push(c);
     }
     out
+}
+
+fn is_release_build() -> bool {
+    env::var("PROFILE").map_or(false, |p| p == "release")
+}
+
+fn clean_old_bundles(output: &Path) {
+    if !output.exists() {
+        return;
+    }
+
+    // Remove old hashed bundle files (pattern: name.hash.min.js, name.hash.min.css)
+    for entry in fs::read_dir(output).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Check if file matches hashed bundle pattern (e.g., app.a1b2c3d4.min.js)
+        let parts: Vec<&str> = filename.split('.').collect();
+        if parts.len() >= 4 {
+            let is_hashed_bundle = (parts.len() == 4
+                && parts[2] == "min"
+                && (parts[3] == "js" || parts[3] == "css"))
+                || (parts.len() == 5 && parts[2] == "min" && parts[3] == "js" && parts[4] == "map");
+
+            // Verify second part looks like a hash (8 hex chars)
+            let looks_like_hash =
+                parts[1].len() == 8 && parts[1].chars().all(|c| c.is_ascii_hexdigit());
+
+            if is_hashed_bundle && looks_like_hash {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
