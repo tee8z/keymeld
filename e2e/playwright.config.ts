@@ -10,7 +10,7 @@ export default defineConfig({
   timeout: 30000,
 
   use: {
-    baseURL: process.env.BASE_URL || 'http://localhost:8080',
+    baseURL: process.env.BASE_URL || 'http://localhost:8090',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },

@@ -210,8 +210,8 @@ start: build-dev
     '
 
     echo "✅ Services started! Logs available in logs/ directory"
-    echo "🌐 Gateway: http://localhost:8080"
-    echo "📊 Health: http://localhost:8080/health"
+    echo "🌐 Gateway: http://localhost:8090"
+    echo "📊 Health: http://localhost:8090/health"
     echo "🔗 VSock Proxies: localhost:9000-9002 → Enclaves 0-2"
 
 # Stop all services
@@ -290,9 +290,9 @@ status:
         echo "❌ KeyMeld Enclaves: None running"
     fi
     echo ""
-    if command -v curl >/dev/null && curl -s http://localhost:8080/health >/dev/null 2>&1; then
+    if command -v curl >/dev/null && curl -s http://localhost:8090/health >/dev/null 2>&1; then
         echo "🌐 Gateway Health Check: ✅ Healthy"
-        curl -s http://localhost:8080/health | head -5
+        curl -s http://localhost:8090/health | head -5
     else
         echo "🌐 Gateway Health Check: ❌ Unhealthy or not running"
     fi
@@ -559,7 +559,7 @@ test-ui-e2e:
         ./scripts/start-services.sh
         echo "⏳ Waiting for gateway to be ready..."
         for i in {1..30}; do
-            if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+            if curl -s http://localhost:8090/api/v1/health > /dev/null 2>&1; then
                 echo "✅ Gateway ready"
                 break
             fi
@@ -586,7 +586,7 @@ test-ui-e2e:
             ./scripts/start-services.sh
             echo "⏳ Waiting for gateway to be ready..."
             for i in {1..30}; do
-                if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+                if curl -s http://localhost:8090/api/v1/health > /dev/null 2>&1; then
                     echo "✅ Gateway ready"
                     break
                 fi
@@ -607,6 +607,45 @@ test-ui-e2e:
 dev:
     @echo "🚀 Entering Nix development shell..."
     nix develop
+
+# Run KeyMeld services in background (gateway, moto/KMS, enclaves)
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🚀 Starting KeyMeld services..."
+
+    # Clean old data to avoid KMS key mismatch issues
+    echo "🧹 Cleaning old data..."
+    rm -rf data/keymeld.db data/keymeld.db-* logs/*.log 2>/dev/null || true
+    mkdir -p data logs
+
+    # Build if binaries don't exist
+    if [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ]; then
+        echo "🔨 Building binaries..."
+        if [ -n "${IN_NIX_SHELL:-}" ]; then
+            cargo build
+        else
+            nix develop -c cargo build
+        fi
+    fi
+
+    # Start services
+    if [ -n "${IN_NIX_SHELL:-}" ]; then
+        ./scripts/start-services.sh
+    else
+        nix develop -c ./scripts/start-services.sh
+    fi
+
+    echo ""
+    echo "🎉 KeyMeld is running in the background!"
+    echo "   Gateway: http://localhost:8090"
+    echo "   Health:  http://localhost:8090/health"
+    echo "   Logs:    logs/"
+    echo ""
+    echo "Run 'just down' to stop all services."
+
+# Stop all KeyMeld services (alias for stop)
+down: stop
 
 # ==================================================================================
 # Maintenance & Utilities
@@ -739,7 +778,7 @@ info:
     echo ""
     echo "🌐 Gateway:"
     if pgrep -f keymeld-gateway > /dev/null; then
-        echo "  Status: ✅ Running on http://localhost:8080"
+        echo "  Status: ✅ Running on http://localhost:8090"
     else
         echo "  Status: ❌ Not running"
     fi

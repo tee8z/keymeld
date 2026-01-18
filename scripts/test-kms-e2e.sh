@@ -8,7 +8,7 @@
 #   just test-kms-e2e
 set -euo pipefail
 
-GATEWAY_URL="http://localhost:8080/api/v1"
+GATEWAY_URL="http://localhost:8090/api/v1"
 TEST_AMOUNT=25000
 TEST_DEST="bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80"
 

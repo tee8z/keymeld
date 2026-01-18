@@ -61,12 +61,12 @@ for i in {0..2}; do
 done
 
 echo "✅ Services started! Logs available in logs/ directory"
-echo "🌐 Gateway: http://localhost:8080"
+echo "🌐 Gateway: http://localhost:8090"
 
 # Wait for gateway to be ready
 echo "⏳ Waiting for gateway to be ready..."
 for i in {1..30}; do
-    if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+    if curl -s http://localhost:8090/health > /dev/null 2>&1; then
         echo "✅ Gateway is ready!"
         break
     fi

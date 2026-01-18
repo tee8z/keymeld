@@ -578,7 +578,7 @@ EOF
           set -e
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_gateway=debug"}
           export KEYMELD_HOST=''${KEYMELD_HOST:-"127.0.0.1"}
-          export KEYMELD_PORT=''${KEYMELD_PORT:-"8080"}
+          export KEYMELD_PORT=''${KEYMELD_PORT:-"8090"}
           export KEYMELD_DATABASE_PATH=''${KEYMELD_DATABASE_PATH:-"$PWD/data/keymeld.db"}
           export CONFIG_PATH=''${CONFIG_PATH:-"$PWD/config/development.yaml"}
           export TEST_MODE=''${TEST_MODE:-"true"}
@@ -624,14 +624,14 @@ EOF
         run-demo = pkgs.writeShellScriptBin "run-demo" ''
           set -e
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_demo=debug"}
-          export GATEWAY_URL=''${GATEWAY_URL:-"http://127.0.0.1:8080"}
+          export GATEWAY_URL=''${GATEWAY_URL:-"http://127.0.0.1:8090"}
           export ESPLORA_URL=''${ESPLORA_URL:-"http://127.0.0.1:3002/api"}
           export BITCOIN_NETWORK=''${BITCOIN_NETWORK:-"regtest"}
           export NUM_SIGNERS=''${NUM_SIGNERS:-"2"}
           export KEYMELD_CONFIG_PATH=''${KEYMELD_CONFIG_PATH:-"$PWD/config/example-nix.yaml"}
           export KEYMELD_KEYS_DIR=''${KEYMELD_KEYS_DIR:-"/tmp/keymeld-keys"}
           export BITCOIN_RPC_URL=''${BITCOIN_RPC_URL:-"http://keymeld:keymeldpass123@127.0.0.1:18443"}
-          export GATEWAY_URL=''${GATEWAY_URL:-"http://127.0.0.1:8080"}
+          export GATEWAY_URL=''${GATEWAY_URL:-"http://127.0.0.1:8090"}
 
           mkdir -p "$KEYMELD_KEYS_DIR"
           mkdir -p "$PWD/logs"
@@ -1032,7 +1032,7 @@ EOF
               "KEYMELD_STATIC_DIR=${keymeld-gateway}/share/keymeld-gateway/static"
             ];
             ExposedPorts = {
-              "8080/tcp" = {};
+              "8090/tcp" = {};
             };
             WorkingDir = "/data";
             Volumes = {
