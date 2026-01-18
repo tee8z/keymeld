@@ -383,7 +383,7 @@ impl Config {
                     extended_logging: true,
                 });
                 config.database.path = "./data/keymeld-dev.db".to_string();
-                config.server.port = 8080;
+                config.server.port = 8090;
             }
             Environment::Production => {
                 config.security.enable_attestation = true;
@@ -500,7 +500,7 @@ impl Config {
                 if self.development.is_some() {
                     anyhow::bail!("Development configuration is not allowed in production");
                 }
-                if self.server.port == 8080 || self.server.port == 3000 {
+                if self.server.port == 8090 || self.server.port == 3000 {
                     anyhow::bail!("Default development ports are not allowed in production");
                 }
             }
@@ -585,7 +585,7 @@ impl Config {
             anyhow::bail!("Production database path should be absolute, not relative");
         }
 
-        if self.server.port == 8080 || self.server.port == 3000 {
+        if self.server.port == 8090 || self.server.port == 3000 {
             anyhow::bail!("Production should not use default development ports");
         }
 
@@ -644,7 +644,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".to_string(),
-            port: 8080,
+            port: 8090,
             enable_cors: true,
             enable_compression: true,
         }
@@ -805,7 +805,7 @@ require_tls = false
 
         config.server.port = 0;
         assert!(config.validate().is_err());
-        config.server.port = 8080;
+        config.server.port = 8090;
 
         assert!(config.validate().is_ok());
     }

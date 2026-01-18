@@ -35,7 +35,7 @@
 environment: development # Runtime environment (development/production) - affects validation and security settings
 server:
   host: "0.0.0.0" # Server bind address - 0.0.0.0 listens on all interfaces
-  port: 8080 # HTTP server port
+  port: 8090 # HTTP server port
   enable_cors: true # Enable Cross-Origin Resource Sharing for web clients
   enable_compression: true # Enable HTTP response compression (gzip)
 kms:

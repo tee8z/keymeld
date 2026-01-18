@@ -77,7 +77,7 @@ sleep 3
 echo "⏳ Waiting for gateway to be ready..."
 for i in {1..30}; do
     # Check if gateway process is running and try a simple connection
-    if pgrep -f keymeld-gateway >/dev/null && nc -z localhost 8080 2>/dev/null; then
+    if pgrep -f keymeld-gateway >/dev/null && nc -z localhost 8090 2>/dev/null; then
         echo "✅ Services ready"
         break
     fi
@@ -85,8 +85,8 @@ for i in {1..30}; do
         echo "❌ Gateway failed to start after 30 seconds"
         echo "Gateway process status:"
         pgrep -f keymeld-gateway || echo "No gateway process found"
-        echo "Port 8080 status:"
-        ss -tlnp | grep :8080 || netstat -tlnp 2>/dev/null | grep :8080 || echo "Nothing listening on port 8080"
+        echo "Port 8090 status:"
+        ss -tlnp | grep :8090 || netstat -tlnp 2>/dev/null | grep :8090 || echo "Nothing listening on port 8090"
         echo "Gateway logs:"
         tail -50 logs/gateway.log 2>/dev/null || echo "No gateway log"
         echo "Enclave 0 logs:"

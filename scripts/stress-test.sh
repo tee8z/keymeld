@@ -70,7 +70,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     cat > "$cfg" <<EOF
 network: regtest
 num_signers: 3
-gateway_url: "http://127.0.0.1:8080"
+gateway_url: "http://127.0.0.1:8090"
 bitcoin_rpc_url: "http://127.0.0.1:${BITCOIN_RPC_PORT}"
 bitcoin_rpc_auth:
   username: "keymeld"

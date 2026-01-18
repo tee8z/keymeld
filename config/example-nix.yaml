@@ -9,7 +9,7 @@ network: regtest
 num_signers: 2
 
 # KeyMeld gateway URL (localhost for Nix setup)
-gateway_url: "http://127.0.0.1:8080"
+gateway_url: "http://127.0.0.1:8090"
 
 # Bitcoin Core RPC connection (localhost for Nix setup)
 bitcoin_rpc_url: "http://127.0.0.1:18443"
