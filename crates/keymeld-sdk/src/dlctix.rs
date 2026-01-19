@@ -201,18 +201,14 @@ impl<'a> DlcBatchBuilder<'a> {
 
             let message_hash: [u8; 32] = *sighash;
 
-            let outcome_idx = match win_condition.outcome {
-                Outcome::Attestation(idx) => idx,
-                Outcome::Expiry => {
-                    return Err(SdkError::InvalidInput(
-                        "Expiry outcome not supported for split transactions".to_string(),
-                    ));
-                }
+            // For attestation outcomes, look up the subset ID
+            // For expiry outcomes, no subset is needed (n-of-n signing)
+            let subset_id = match win_condition.outcome {
+                Outcome::Attestation(idx) => self
+                    .outcome_subset_ids
+                    .and_then(|ids| ids.get(&idx).copied()),
+                Outcome::Expiry => None,
             };
-
-            let subset_id = self
-                .outcome_subset_ids
-                .and_then(|ids| ids.get(&outcome_idx).copied());
 
             split_batch_ids.insert(*win_condition, batch_item_id);
 
