@@ -1361,8 +1361,8 @@ dependencies = [
 
 [[package]]
 name = "dlctix"
-version = "0.0.8"
-source = "git+https://github.com/tee8z/dlctix?branch=external-signing-api#ef1e675e136742539b4e1b28803f37e020e7a99c"
+version = "0.0.9"
+source = "git+https://github.com/tee8z/dlctix?branch=external-signing-api#73d6c6bd7c76cebb0e8a34538d447c1a33d85f5c"
 dependencies = [
  "bitcoin",
  "hex",
