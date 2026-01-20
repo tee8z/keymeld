@@ -11,7 +11,7 @@ use dashmap::DashSet;
 use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::identifiers::{EnclaveId, SessionId};
 use keymeld_core::protocol::{KeygenStatusKind, SigningStatusKind};
-
+use log::trace;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -330,7 +330,7 @@ impl Coordinator {
             };
 
             if sessions.is_empty() {
-                info!("No more {} sessions to process", kind_str);
+                trace!("No more {} sessions to process", kind_str);
                 break;
             }
 
@@ -358,9 +358,10 @@ impl Coordinator {
             }
         }
 
-        info!(
+        trace!(
             "Completed cursor-based processing: {} batches, {} sessions processed",
-            batch_count, total_processed_count
+            batch_count,
+            total_processed_count
         );
 
         timer.finish();
