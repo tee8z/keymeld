@@ -11,14 +11,5 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
-    {{- if and .Values.litestream.enabled .Values.litestream.httpServer.enabled }}
-    - port: {{ .Values.litestream.httpServer.port }}
-      targetPort: litestream-http
-      protocol: TCP
-      name: litestream
-      {{- if .Values.litestream.httpServer.nodePort }}
-      nodePort: {{ .Values.litestream.httpServer.nodePort }}
-      {{- end }}
-    {{- end }}
   selector:
     {{- include "keymeld.selectorLabels" . | nindent 4 }}
