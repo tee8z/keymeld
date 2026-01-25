@@ -72,7 +72,7 @@ litestream:
   enabled: true
   image:
     repository: litestream/litestream
-    tag: "0.3.13"
+    tag: "0.5.6"
   s3Bucket: ""
   s3Path: "keymeld.db"
   s3Region: "us-west-2"
