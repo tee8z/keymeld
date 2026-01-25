@@ -86,6 +86,9 @@ metadata:
     {{- include "keymeld.labels" . | nindent 4 }}
 data:
   litestream.yml: |
+    {{- if .Values.litestream.httpServer.enabled }}
+    addr: ":{{ .Values.litestream.httpServer.port }}"
+    {{- end }}
     dbs:
       - path: {{ .Values.persistence.mountPath }}/keymeld.db
         replicas:
