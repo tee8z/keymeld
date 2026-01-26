@@ -57,7 +57,7 @@ hex = "0.4.3"
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls"] }
 reqwest-middleware = "0.4.2"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "uuid", "time", "migrate"] }
-uuid = { version = "1.11", features = ["v7", "serde"] }
+uuid = { version = "1.20", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
 config = "0.15.19"
 aws-config = "1.8.7"
