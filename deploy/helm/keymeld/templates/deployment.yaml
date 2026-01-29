@@ -6,10 +6,8 @@ metadata:
     {{- include "keymeld.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "keymeld.selectorLabels" . | nindent 6 }}
