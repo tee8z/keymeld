@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub struct DlcSignatureResults {
     pub outcome_signatures: BTreeMap<usize, AdaptorSignature>,
     pub split_signatures: BTreeMap<WinCondition, CompactSignature>,
+    pub expiry_signature: Option<CompactSignature>,
 }
 
 /// Result of building subset definitions for a DLC contract.
@@ -170,6 +171,7 @@ impl<'a> DlcBatchBuilder<'a> {
         let mut batch_items = Vec::new();
         let mut outcome_batch_ids = BTreeMap::new();
         let mut split_batch_ids = BTreeMap::new();
+        let mut expiry_batch_id = None;
 
         // Build outcome transaction items (adaptor signatures, n-of-n)
         for (outcome, sighash) in &self.signing_data.outcome_sighashes {
@@ -189,7 +191,10 @@ impl<'a> DlcBatchBuilder<'a> {
                         BatchSigningItem::new(message_hash).with_id(batch_item_id)
                     }
                 }
-                Outcome::Expiry => BatchSigningItem::new(message_hash).with_id(batch_item_id),
+                Outcome::Expiry => {
+                    expiry_batch_id = Some(batch_item_id);
+                    BatchSigningItem::new(message_hash).with_id(batch_item_id)
+                }
             };
 
             batch_items.push(item);
@@ -224,6 +229,7 @@ impl<'a> DlcBatchBuilder<'a> {
             items: batch_items,
             outcome_batch_ids,
             split_batch_ids,
+            expiry_batch_id,
         })
     }
 }
@@ -232,6 +238,7 @@ pub struct DlcBatchItems {
     pub items: Vec<BatchSigningItem>,
     pub outcome_batch_ids: BTreeMap<usize, Uuid>,
     pub split_batch_ids: BTreeMap<WinCondition, Uuid>,
+    pub expiry_batch_id: Option<Uuid>,
 }
 
 impl DlcBatchItems {
@@ -285,9 +292,24 @@ impl DlcBatchItems {
             split_signatures.insert(*win_condition, compact_sig);
         }
 
+        let expiry_signature = if let Some(batch_id) = &self.expiry_batch_id {
+            let result = results_by_id.get(batch_id).ok_or_else(|| {
+                SdkError::Internal("Missing result for expiry transaction".to_string())
+            })?;
+
+            let sig_bytes = result.signature.as_ref().ok_or_else(|| {
+                SdkError::Internal("No signature for expiry transaction".to_string())
+            })?;
+
+            Some(sig_bytes.to_compact_signature()?)
+        } else {
+            None
+        };
+
         Ok(DlcSignatureResults {
             outcome_signatures,
             split_signatures,
+            expiry_signature,
         })
     }
 }

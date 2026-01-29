@@ -390,7 +390,7 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     );
 
     let contract_signatures = ContractSignatures {
-        expiry_tx_signature: None,
+        expiry_tx_signature: dlc_sigs.expiry_signature,
         outcome_tx_signatures: dlc_sigs.outcome_signatures,
         split_tx_signatures: dlc_sigs.split_signatures,
     };
