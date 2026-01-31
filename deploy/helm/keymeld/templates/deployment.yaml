@@ -1,3 +1,256 @@
+{{- if .Values.blueGreen.enabled }}
+{{- range $slot := list "blue" "green" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "keymeld.fullname" $ }}-{{ $slot }}
+  labels:
+    {{- include "keymeld.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ $.Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "keymeld.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/slot: {{ $slot }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        {{- with $.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "keymeld.labels" $ | nindent 8 }}
+        app.kubernetes.io/slot: {{ $slot }}
+        {{- with $.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "keymeld.serviceAccountName" $ }}
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      {{- if $.Values.litestream.enabled }}
+      initContainers:
+        - name: litestream-restore
+          image: "{{ $.Values.litestream.image.repository }}:{{ $.Values.litestream.image.tag }}"
+          args:
+            - restore
+            - -if-db-not-exists
+            - -if-replica-exists
+            - "{{ $.Values.persistence.mountPath }}/keymeld.db"
+          volumeMounts:
+            - name: data
+              mountPath: {{ $.Values.persistence.mountPath }}
+            - name: litestream-config
+              mountPath: /etc/litestream.yml
+              subPath: litestream.yml
+          env:
+            {{- if $.Values.litestream.s3Endpoint }}
+            - name: AWS_ACCESS_KEY_ID
+              value: "testing"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "testing"
+            {{- else if not $.Values.litestream.useIAMRole }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" $ }}-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" $ }}-s3
+                  key: secret-access-key
+            {{- end }}
+            {{- if $.Values.litestream.encryptionKeySecret.enabled }}
+            - name: LITESTREAM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.litestream.encryptionKeySecret.name }}
+                  key: {{ $.Values.litestream.encryptionKeySecret.key }}
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ $.Chart.Name }}
+          securityContext:
+            {{- if and $.Values.enclave.enabled (not $.Values.enclave.simulation) }}
+            privileged: true
+            {{- else }}
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+            {{- end }}
+          {{- if $.Values.devMode.enabled }}
+          image: {{ $.Values.devMode.baseImage }}
+          imagePullPolicy: Never
+          command: ["/app/keymeld-gateway"]
+          {{- else }}
+          image: {{ include "keymeld.image" $ }}
+          imagePullPolicy: {{ include "keymeld.imagePullPolicy" $ }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.config.server.port }}
+              protocol: TCP
+          env:
+            - name: CONFIG_PATH
+              value: /etc/keymeld/config.yaml
+            {{- if $.Values.kms.enabled }}
+            - name: KMS_KEY_ARN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" $ }}-kms
+                  key: keyArn
+            - name: AWS_REGION
+              value: {{ $.Values.kms.region | quote }}
+            {{- end }}
+            {{- if $.Values.kms.mock }}
+            - name: KMS_MOCK
+              value: "true"
+            {{- end }}
+            {{- if $.Values.enclave.enabled }}
+            - name: ENCLAVE_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if $.Values.enclave.simulation }}
+            {{- range $i, $e := $.Values.enclave.enclaves }}
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_TRANSPORT
+              value: "tcp"
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_TCP_HOST
+              value: "{{ include "keymeld.fullname" $ }}-enclave-{{ $e.id }}"
+            - name: KEYMELD_ENCLAVE_{{ $e.id }}_PORT
+              value: {{ $e.port | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $key, $value := $.Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- with $.Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ $.Values.persistence.mountPath }}
+            - name: config
+              mountPath: /etc/keymeld
+            {{- if and $.Values.enclave.enabled (not $.Values.enclave.simulation) }}
+            - name: vsock
+              mountPath: /dev/vsock
+            - name: enclave-eif
+              mountPath: /opt/keymeld
+              readOnly: true
+            {{- end }}
+            {{- if $.Values.devMode.enabled }}
+            - name: dev-binary
+              mountPath: /app
+              readOnly: true
+            {{- end }}
+          {{- with $.Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+        {{- if $.Values.litestream.enabled }}
+        - name: litestream
+          image: "{{ $.Values.litestream.image.repository }}:{{ $.Values.litestream.image.tag }}"
+          args:
+            - replicate
+          volumeMounts:
+            - name: data
+              mountPath: {{ $.Values.persistence.mountPath }}
+            - name: litestream-config
+              mountPath: /etc/litestream.yml
+              subPath: litestream.yml
+          env:
+            {{- if $.Values.litestream.s3Endpoint }}
+            - name: AWS_ACCESS_KEY_ID
+              value: "testing"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "testing"
+            {{- else if not $.Values.litestream.useIAMRole }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" $ }}-s3
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "keymeld.fullname" $ }}-s3
+                  key: secret-access-key
+            {{- end }}
+            {{- if $.Values.litestream.encryptionKeySecret.enabled }}
+            - name: LITESTREAM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.litestream.encryptionKeySecret.name }}
+                  key: {{ $.Values.litestream.encryptionKeySecret.key }}
+            {{- end }}
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+        {{- end }}
+      volumes:
+        - name: data
+          {{- if $.Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "keymeld.fullname" $ }}-{{ $slot }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "keymeld.fullname" $ }}
+        {{- if $.Values.litestream.enabled }}
+        - name: litestream-config
+          configMap:
+            name: {{ include "keymeld.fullname" $ }}-litestream
+        {{- end }}
+        {{- if and $.Values.enclave.enabled (not $.Values.enclave.simulation) }}
+        - name: vsock
+          hostPath:
+            path: /dev/vsock
+            type: CharDevice
+        - name: enclave-eif
+          hostPath:
+            path: {{ $.Values.enclave.eifPath | dir }}
+            type: Directory
+        {{- end }}
+        {{- if $.Values.devMode.enabled }}
+        - name: dev-binary
+          hostPath:
+            path: {{ $.Values.devMode.gateway.hostPath | dir }}
+            type: Directory
+        {{- end }}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -244,3 +497,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

@@ -1,0 +1,122 @@
+{{- if .Values.blueGreen.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "keymeld.fullname" . }}-bg-switchover
+  labels:
+    {{- include "keymeld.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "keymeld.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bg-switchover
+    spec:
+      serviceAccountName: {{ include "keymeld.fullname" . }}-bg-hook
+      restartPolicy: Never
+      containers:
+        - name: switchover
+          image: bitnami/kubectl:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              NAMESPACE="{{ .Release.Namespace }}"
+              SERVICE="{{ include "keymeld.fullname" . }}"
+              DEPLOY_PREFIX="{{ include "keymeld.fullname" . }}"
+              CONTAINER="{{ .Chart.Name }}"
+              NEW_IMAGE="{{ include "keymeld.image" . }}"
+
+              echo "=== Blue/Green PreSync Switchover ==="
+              echo "Namespace: $NAMESPACE"
+              echo "Service: $SERVICE"
+              echo "New image: $NEW_IMAGE"
+
+              # Get current active slot from Service selector
+              ACTIVE=$(kubectl -n "$NAMESPACE" get svc "$SERVICE" \
+                -o jsonpath='{.spec.selector.app\.kubernetes\.io/slot}' 2>/dev/null || echo "")
+
+              if [[ -z "$ACTIVE" ]]; then
+                echo "No slot selector found on Service. First deploy - initializing."
+                echo "Scaling up ${DEPLOY_PREFIX}-blue..."
+                kubectl -n "$NAMESPACE" scale deployment "${DEPLOY_PREFIX}-blue" --replicas=1 || true
+                echo "Waiting for ${DEPLOY_PREFIX}-blue to be ready..."
+                kubectl -n "$NAMESPACE" rollout status deployment "${DEPLOY_PREFIX}-blue" --timeout=300s || true
+                echo "Patching Service selector to blue..."
+                kubectl -n "$NAMESPACE" patch svc "$SERVICE" --type=json \
+                  -p '[{"op": "add", "path": "/spec/selector/app.kubernetes.io~1slot", "value": "blue"}]' || true
+                echo "Scaling down ${DEPLOY_PREFIX}-green..."
+                kubectl -n "$NAMESPACE" scale deployment "${DEPLOY_PREFIX}-green" --replicas=0 || true
+                echo "First deploy initialization complete."
+                exit 0
+              fi
+
+              if [[ "$ACTIVE" == "blue" ]]; then STANDBY="green"; else STANDBY="blue"; fi
+
+              ACTIVE_DEPLOY="${DEPLOY_PREFIX}-${ACTIVE}"
+              STANDBY_DEPLOY="${DEPLOY_PREFIX}-${STANDBY}"
+
+              echo "Active: $ACTIVE ($ACTIVE_DEPLOY)"
+              echo "Standby: $STANDBY ($STANDBY_DEPLOY)"
+
+              CURRENT_IMAGE=$(kubectl -n "$NAMESPACE" get deployment "$ACTIVE_DEPLOY" \
+                -o jsonpath="{.spec.template.spec.containers[?(@.name=='$CONTAINER')].image}" 2>/dev/null || echo "")
+
+              echo "Current active image: $CURRENT_IMAGE"
+
+              if [[ "$CURRENT_IMAGE" == "$NEW_IMAGE" ]]; then
+                echo "Active deployment already running $NEW_IMAGE. No switchover needed."
+                kubectl -n "$NAMESPACE" scale deployment "$STANDBY_DEPLOY" --replicas=0 2>/dev/null || true
+                exit 0
+              fi
+
+              echo ""
+              echo "=== Starting switchover: $ACTIVE -> $STANDBY ==="
+
+              echo "Step 1/5: Setting $STANDBY_DEPLOY image to $NEW_IMAGE"
+              kubectl -n "$NAMESPACE" set image "deployment/$STANDBY_DEPLOY" "$CONTAINER=$NEW_IMAGE"
+
+              echo "Step 2/5: Scaling up $STANDBY_DEPLOY"
+              kubectl -n "$NAMESPACE" scale deployment "$STANDBY_DEPLOY" --replicas=1
+
+              echo "Step 3/5: Waiting for $STANDBY_DEPLOY to be ready..."
+              if ! kubectl -n "$NAMESPACE" rollout status deployment "$STANDBY_DEPLOY" --timeout=300s; then
+                echo "ERROR: Standby deployment failed readiness check"
+                echo "Rolling back: scaling down standby"
+                kubectl -n "$NAMESPACE" scale deployment "$STANDBY_DEPLOY" --replicas=0
+                exit 1
+              fi
+
+              echo "Step 4/5: Flipping Service selector to $STANDBY"
+              kubectl -n "$NAMESPACE" scale deployment "$ACTIVE_DEPLOY" --replicas=0
+              sleep 2
+              kubectl -n "$NAMESPACE" patch svc "$SERVICE" --type=json \
+                -p "[{\"op\": \"replace\", \"path\": \"/spec/selector/app.kubernetes.io~1slot\", \"value\": \"$STANDBY\"}]"
+
+              echo "Step 5/5: Verifying switchover"
+              NEW_ACTIVE=$(kubectl -n "$NAMESPACE" get svc "$SERVICE" \
+                -o jsonpath='{.spec.selector.app\.kubernetes\.io/slot}')
+              echo "Service now pointing to: $NEW_ACTIVE"
+
+              kubectl -n "$NAMESPACE" wait --for=delete pod \
+                -l "app.kubernetes.io/slot=$ACTIVE,app.kubernetes.io/name={{ include "keymeld.name" . }}" \
+                --timeout=60s 2>/dev/null || true
+
+              echo ""
+              echo "=== Switchover complete ==="
+              echo "Active: $STANDBY ($STANDBY_DEPLOY) running $NEW_IMAGE"
+              echo "Standby: $ACTIVE ($ACTIVE_DEPLOY) scaled to 0"
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+{{- end }}

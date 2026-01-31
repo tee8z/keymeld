@@ -60,6 +60,48 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Deployment name - includes slot suffix when blue/green is enabled
+*/}}
+{{- define "keymeld.deploymentName" -}}
+{{- if .Values.blueGreen.enabled }}
+{{- printf "%s-%s" (include "keymeld.fullname" .) .Values.blueGreen.slot }}
+{{- else }}
+{{- include "keymeld.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+PVC name - includes slot suffix when blue/green is enabled
+*/}}
+{{- define "keymeld.pvcName" -}}
+{{- if .Values.blueGreen.enabled }}
+{{- printf "%s-%s" (include "keymeld.fullname" .) .Values.blueGreen.slot }}
+{{- else }}
+{{- include "keymeld.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Deployment selector labels - includes slot when blue/green is enabled
+*/}}
+{{- define "keymeld.deploymentSelectorLabels" -}}
+{{ include "keymeld.selectorLabels" . }}
+{{- if .Values.blueGreen.enabled }}
+app.kubernetes.io/slot: {{ .Values.blueGreen.slot }}
+{{- end }}
+{{- end }}
+
+{{/*
+Service selector labels - uses activeSlot when blue/green is enabled
+*/}}
+{{- define "keymeld.serviceSelectorLabels" -}}
+{{ include "keymeld.selectorLabels" . }}
+{{- if .Values.blueGreen.enabled }}
+app.kubernetes.io/slot: {{ .Values.blueGreen.activeSlot }}
+{{- end }}
+{{- end }}
+
+{{/*
 Return the gateway image name
 Supports both flat structure (image.repository) and nested structure (image.gateway.repository)
 */}}

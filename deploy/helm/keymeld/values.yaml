@@ -3,6 +3,13 @@
 
 replicaCount: 1
 
+# Blue/Green deployment support
+# When enabled, renders both blue and green Deployments and PVCs from a single release
+# The Service selector uses activeSlot to route traffic to the active deployment
+blueGreen:
+  enabled: false
+  activeSlot: blue    # Which slot the Service routes traffic to
+
 image:
   repository: ghcr.io/tee8z/keymeld
   tag: ""
