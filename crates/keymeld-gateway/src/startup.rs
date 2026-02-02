@@ -194,6 +194,7 @@ pub struct Application {
     app: Router,
     coordinator_handle: JoinHandle<Result<(), ApiError>>,
     coordinator_shutdown: tokio::sync::oneshot::Sender<()>,
+    db: Database,
 }
 
 impl Application {
@@ -209,6 +210,7 @@ impl Application {
 
         let enclave_manager = Self::setup_enclave_manager(&config, &db).await?;
         let metrics = Arc::new(Metrics);
+        let db_for_shutdown = db.clone();
         let app_state = AppState {
             db: db.clone(),
             enclave_manager: enclave_manager.clone(),
@@ -252,6 +254,7 @@ impl Application {
             app,
             coordinator_handle,
             coordinator_shutdown,
+            db: db_for_shutdown,
         })
     }
 
@@ -295,6 +298,10 @@ impl Application {
                         warn!("Session coordinator shutdown timed out after 10 seconds");
                     }
                 }
+
+                // Checkpoint WAL before exit so Litestream replicates a complete database
+                info!("Checkpointing WAL before shutdown...");
+                self.db.checkpoint().await;
 
                 Ok(())
             }

@@ -29,7 +29,7 @@ use tokio::{
     fs::create_dir_all,
     sync::{mpsc, oneshot},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct DbUtils;
 
@@ -242,7 +242,33 @@ impl Database {
             .await
             .map_err(|e| ApiError::database(format!("Database health check failed: {e}")))?;
 
+        // Verify database page structure integrity
+        let result: String = sqlx::query_scalar("PRAGMA quick_check;")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ApiError::database(format!("Database integrity check failed: {e}")))?;
+        if result != "ok" {
+            error!("PRAGMA quick_check failed: {}", result);
+            return Err(ApiError::database(format!(
+                "Database integrity check failed: {}",
+                result
+            )));
+        }
+
         Ok(())
+    }
+
+    /// Checkpoint WAL to main database file before shutdown.
+    /// This ensures all pending writes are flushed so Litestream
+    /// can replicate a complete database to S3.
+    pub async fn checkpoint(&self) {
+        match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&self.pool)
+            .await
+        {
+            Ok(_) => info!("WAL checkpoint completed successfully"),
+            Err(e) => error!("WAL checkpoint failed: {}", e),
+        }
     }
 
     pub async fn cleanup_expired_keygen_sessions(&self) -> Result<usize, ApiError> {
