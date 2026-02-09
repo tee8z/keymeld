@@ -24,7 +24,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+aws-sdk-kms = "1.99.0"
 secp256k1 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
