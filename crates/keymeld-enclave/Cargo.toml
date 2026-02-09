@@ -20,7 +20,7 @@ serde_bytes = "0.11"
 aws-nitro-enclaves-nsm-api = "0.4"
 aws-nitro-enclaves-cose = "0.5"
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+aws-sdk-kms = "1.99.0"
 hex = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
