@@ -29,7 +29,7 @@ rules:
     resources: ["services"]
     verbs: ["get", "patch"]
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

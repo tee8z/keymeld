@@ -82,19 +82,19 @@ spec:
               echo "=== Starting switchover: $ACTIVE -> $STANDBY ==="
 
               # Step 1: Update standby image
-              echo "Step 1/10: Setting $STANDBY_DEPLOY image to $NEW_IMAGE"
+              echo "Step 1/11: Setting $STANDBY_DEPLOY image to $NEW_IMAGE"
               kubectl -n "$NAMESPACE" set image "deployment/$STANDBY_DEPLOY" "$CONTAINER=$NEW_IMAGE"
 
               # Step 2: Scale down active so Litestream flushes WAL to S3 on SIGTERM.
               # This must happen BEFORE the standby starts, otherwise the standby
               # restores stale data from S3 (the active's latest writes haven't
               # been synced yet).
-              echo "Step 2/10: Scaling down $ACTIVE_DEPLOY (Litestream will flush WAL to S3)"
+              echo "Step 2/11: Scaling down $ACTIVE_DEPLOY (Litestream will flush WAL to S3)"
               kubectl -n "$NAMESPACE" scale deployment "$ACTIVE_DEPLOY" --replicas=0
 
               # Step 3: Wait for active pods to fully terminate so Litestream
               # completes its S3 sync on shutdown.
-              echo "Step 3/10: Waiting for $ACTIVE_DEPLOY pods to terminate"
+              echo "Step 3/11: Waiting for $ACTIVE_DEPLOY pods to terminate"
               kubectl -n "$NAMESPACE" wait --for=delete pod \
                 -l "app.kubernetes.io/slot=$ACTIVE,app.kubernetes.io/name={{ include "keymeld.name" . }}" \
                 --timeout=60s 2>/dev/null || true
@@ -102,14 +102,14 @@ spec:
 
               # Step 4: Wait for Litestream S3 sync to propagate.
               # The pod is gone but the S3 PUT may still be in-flight or eventually-consistent.
-              echo "Step 4/10: Waiting for Litestream S3 sync to propagate"
+              echo "Step 4/11: Waiting for Litestream S3 sync to propagate"
               sleep 10
               echo "S3 sync propagation window complete"
 
               # Step 5: Clean standby PVC so the litestream-restore init container
               # does a full restore from S3 instead of skipping (it uses -if-db-not-exists).
               # Without this, stale DB files on the standby PVC would be used as-is.
-              echo "Step 5/10: Cleaning standby PVC (${DEPLOY_PREFIX}-${STANDBY})"
+              echo "Step 5/11: Cleaning standby PVC (${DEPLOY_PREFIX}-${STANDBY})"
               CLEANUP_POD="pvc-cleanup-${STANDBY}-$(date +%s)"
               CLEANUP_CMD="echo Cleaning PVC files...; find $MOUNT_PATH -type f -name '*.db' -exec rm -fv {} +; find $MOUNT_PATH -type f -name '*.db-shm' -exec rm -fv {} +; find $MOUNT_PATH -type f -name '*.db-wal' -exec rm -fv {} +; find $MOUNT_PATH -type f -name '*.sqlite' -exec rm -fv {} +; find $MOUNT_PATH -type f -name '*.sqlite-shm' -exec rm -fv {} +; find $MOUNT_PATH -type f -name '*.sqlite-wal' -exec rm -fv {} +; find $MOUNT_PATH -type d -name '*-litestream' -exec rm -rfv {} + 2>/dev/null; echo PVC cleaned"
               printf '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"%s"},"spec":{"restartPolicy":"Never","containers":[{"name":"cleanup","image":"alpine:latest","command":["sh","-c","%s"],"volumeMounts":[{"name":"data","mountPath":"%s"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"%s"}}]}}' \
@@ -130,7 +130,7 @@ spec:
               # Step 6: Verify standby PVC is clean. If stale DB files remain,
               # the litestream-restore init container will skip restore (-if-db-not-exists)
               # and the standby starts with old/corrupt data.
-              echo "Step 6/10: Verifying standby PVC is clean"
+              echo "Step 6/11: Verifying standby PVC is clean"
               VERIFY_POD="pvc-verify-${STANDBY}-$(date +%s)"
               printf '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"%s"},"spec":{"restartPolicy":"Never","containers":[{"name":"verify","image":"alpine:latest","command":["sh","-c","find %s -name '"'"'*.db'"'"' -o -name '"'"'*.sqlite'"'"' -o -name '"'"'*-litestream'"'"' 2>/dev/null | wc -l"],"volumeMounts":[{"name":"data","mountPath":"%s"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"%s"}}]}}' \
                 "$VERIFY_POD" "$MOUNT_PATH" "$MOUNT_PATH" "${DEPLOY_PREFIX}-${STANDBY}" \
@@ -151,11 +151,11 @@ spec:
               echo "Standby PVC is clean, restore will fetch fresh data from S3"
 
               # Step 7: Scale up standby (triggers Litestream restore from fresh S3 data)
-              echo "Step 7/10: Scaling up $STANDBY_DEPLOY (will restore DB from S3)"
+              echo "Step 7/11: Scaling up $STANDBY_DEPLOY (will restore DB from S3)"
               kubectl -n "$NAMESPACE" scale deployment "$STANDBY_DEPLOY" --replicas=1
 
               # Step 8: Wait for readiness
-              echo "Step 8/10: Waiting for $STANDBY_DEPLOY to be ready..."
+              echo "Step 8/11: Waiting for $STANDBY_DEPLOY to be ready..."
               if ! kubectl -n "$NAMESPACE" rollout status deployment "$STANDBY_DEPLOY" --timeout=300s; then
                 echo "ERROR: Standby deployment failed readiness check"
                 echo "Rolling back: scaling down standby, scaling up previous active"
@@ -166,7 +166,7 @@ spec:
 
               # Step 9: Verify restored database integrity before routing traffic.
               # Uses a temporary pod pinned to the standby node for RWO PVC access.
-              echo "Step 9/10: Verifying database integrity on standby"
+              echo "Step 9/11: Verifying database integrity on standby"
               STANDBY_NODE=$(kubectl -n "$NAMESPACE" get pod \
                 -l "app.kubernetes.io/slot=$STANDBY,app.kubernetes.io/name={{ include "keymeld.name" . }}" \
                 -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)
@@ -225,7 +225,7 @@ spec:
               fi
 
               # Step 10: Flip Service selector (503 window ends)
-              echo "Step 10/10: Flipping Service selector to $STANDBY"
+              echo "Step 10/11: Flipping Service selector to $STANDBY"
               kubectl -n "$NAMESPACE" patch svc "$SERVICE" --type=json \
                 -p "[{\"op\": \"replace\", \"path\": \"/spec/selector/app.kubernetes.io~1slot\", \"value\": \"$STANDBY\"}]"
 
@@ -234,6 +234,10 @@ spec:
                 -o jsonpath='{.spec.selector.app\.kubernetes\.io/slot}')
               echo "Service now pointing to: $NEW_ACTIVE"
 
+
+              # Step 11: Scale down old active
+              echo "Step 11/11: Scaling down old active $ACTIVE_DEPLOY"
+              kubectl -n "$NAMESPACE" scale deployment "$ACTIVE_DEPLOY" --replicas=0 2>/dev/null || true
               echo ""
               echo "=== Switchover complete ==="
               echo "Active: $STANDBY ($STANDBY_DEPLOY) running $NEW_IMAGE"
