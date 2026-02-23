@@ -24,7 +24,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+aws-sdk-kms = "1.102.0"
 secp256k1 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
@@ -49,7 +49,7 @@ utoipa = { version = "5.4.0", features = [
 utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
 [dev-dependencies]
-tempfile = "3.15.0"
+tempfile = "3.25.0"
 
 [build-dependencies]
 minify-js = "0.6"
