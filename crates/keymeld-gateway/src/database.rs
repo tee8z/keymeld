@@ -1357,6 +1357,7 @@ impl Database {
             FROM keygen_sessions ks
             LEFT JOIN user_keys uk ON ks.keygen_session_id = uk.origin_keygen_session_id
             WHERE ks.status_name = 'completed'
+              AND ks.restoration_failed_at IS NULL
               AND (ks.coordinator_enclave_id = $1 OR uk.enclave_id = $1)
             "#,
             enclave_id
@@ -1402,6 +1403,43 @@ impl Database {
         );
 
         Ok(sessions)
+    }
+
+    /// Record a failed restoration attempt for a keygen session. After
+    /// `max_attempts` consecutive failures the session is permanently marked
+    /// as unrestorable and excluded from future restore attempts. This
+    /// prevents the gateway from blocking for 300s per session on every
+    /// restart when the encrypted session secret can no longer be decrypted
+    /// (e.g., after a key rotation where the original enclave keys are lost).
+    pub async fn record_keygen_restoration_failure(
+        &self,
+        session_id: &SessionId,
+        max_attempts: i64,
+    ) -> Result<(), ApiError> {
+        let session_id_bytes = session_id.uuid().as_bytes().to_vec();
+        let now = DbUtils::current_timestamp();
+
+        // Increment the attempt counter; if we hit the threshold, also set
+        // restoration_failed_at so the session is excluded from future queries.
+        sqlx::query!(
+            r#"
+            UPDATE keygen_sessions
+            SET restoration_attempts = restoration_attempts + 1,
+                restoration_failed_at = CASE
+                    WHEN restoration_attempts + 1 >= $1 THEN $2
+                    ELSE restoration_failed_at
+                END
+            WHERE keygen_session_id = $3
+              AND restoration_failed_at IS NULL
+            "#,
+            max_attempts,
+            now,
+            session_id_bytes
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Get all ACTIVE (non-completed, non-failed) signing sessions for an enclave.

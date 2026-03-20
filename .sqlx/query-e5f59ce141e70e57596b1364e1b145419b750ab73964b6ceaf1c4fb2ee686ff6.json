@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE keygen_sessions\n            SET restoration_attempts = restoration_attempts + 1,\n                restoration_failed_at = CASE\n                    WHEN restoration_attempts + 1 >= $1 THEN $2\n                    ELSE restoration_failed_at\n                END\n            WHERE keygen_session_id = $3\n              AND restoration_failed_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e5f59ce141e70e57596b1364e1b145419b750ab73964b6ceaf1c4fb2ee686ff6"
+}

@@ -1485,6 +1485,11 @@ impl EnclaveManager {
         );
 
         for keygen_status in keygen_sessions {
+            let session_id = match &keygen_status {
+                KeygenSessionStatus::Completed(c) => c.keygen_session_id.clone(),
+                _ => continue,
+            };
+
             match self
                 .restore_keygen_session(enclave_id, &keygen_status, db)
                 .await
@@ -1495,10 +1500,40 @@ impl EnclaveManager {
                 }
                 Err(e) => {
                     stats.keygen_failed += 1;
-                    warn!(
-                        "Failed to restore keygen session for enclave {}: {}",
-                        enclave_id, e
-                    );
+
+                    // Check if the error indicates a permanent decryption failure.
+                    // If the error message contains "decrypt" or "AES-GCM", the
+                    // session secret was encrypted with keys that no longer exist
+                    // and can never be restored — mark it immediately.
+                    // For transient errors (timeouts, etc.) we still record the
+                    // attempt; after 2 consecutive failures the session is marked
+                    // as permanently unrestorable to prevent infinite retry loops.
+                    let err_str = e.to_string();
+                    let is_permanent = err_str.contains("decrypt")
+                        || err_str.contains("AES-GCM")
+                        || err_str.contains("aead");
+
+                    let max_attempts = if is_permanent { 1 } else { 2 };
+
+                    if let Err(db_err) = db
+                        .record_keygen_restoration_failure(&session_id, max_attempts)
+                        .await
+                    {
+                        warn!(
+                            "Failed to record restoration failure for session {}: {}",
+                            session_id, db_err
+                        );
+                    } else if is_permanent {
+                        warn!(
+                            "Keygen session {} permanently unrestorable (decryption failure), excluded from future restores",
+                            session_id
+                        );
+                    } else {
+                        warn!(
+                            "Failed to restore keygen session {} for enclave {}: {}",
+                            session_id, enclave_id, e
+                        );
+                    }
                 }
             }
         }
