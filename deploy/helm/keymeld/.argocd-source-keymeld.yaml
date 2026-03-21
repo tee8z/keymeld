@@ -1,8 +1,0 @@
-helm:
-  parameters:
-  - name: image.gateway.repository
-    value: ghcr.io/tee8z/keymeld/gateway
-    forcestring: true
-  - name: image.gateway.tag
-    value: 0.3.2
-    forcestring: true
