@@ -1466,6 +1466,7 @@ impl EnclaveManager {
         db: &Database,
     ) -> Result<RestorationStats, KeyMeldError> {
         let mut stats = RestorationStats::default();
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
         info!("Starting session restoration for enclave {}", enclave_id);
 
@@ -1484,22 +1485,39 @@ impl EnclaveManager {
             enclave_id
         );
 
+        const KEYGEN_RESTORE_TIMEOUT: Duration = Duration::from_secs(60);
+        let mut keygen_consecutive_failures: u32 = 0;
+
         for keygen_status in keygen_sessions {
             let session_id = match &keygen_status {
                 KeygenSessionStatus::Completed(c) => c.keygen_session_id.clone(),
                 _ => continue,
             };
 
-            match self
-                .restore_keygen_session(enclave_id, &keygen_status, db)
-                .await
-            {
-                Ok(_) => {
+            if keygen_consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                warn!(
+                    "Circuit breaker: {} consecutive keygen restore failures on enclave {}, skipping remaining sessions",
+                    keygen_consecutive_failures, enclave_id
+                );
+                stats.keygen_failed += 1;
+                continue;
+            }
+
+            let result = tokio::time::timeout(
+                KEYGEN_RESTORE_TIMEOUT,
+                self.restore_keygen_session(enclave_id, &keygen_status, db),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(_)) => {
                     stats.keygen_restored += 1;
+                    keygen_consecutive_failures = 0;
                     debug!("Restored keygen session for enclave {}", enclave_id);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     stats.keygen_failed += 1;
+                    keygen_consecutive_failures += 1;
 
                     // Check if the error indicates a permanent decryption failure.
                     // If the error message contains "decrypt" or "AES-GCM", the
@@ -1532,6 +1550,26 @@ impl EnclaveManager {
                         warn!(
                             "Failed to restore keygen session {} for enclave {}: {}",
                             session_id, enclave_id, e
+                        );
+                    }
+                }
+                Err(_) => {
+                    stats.keygen_failed += 1;
+                    keygen_consecutive_failures += 1;
+                    warn!(
+                        "Timed out restoring keygen session {} for enclave {} ({}s limit)",
+                        session_id,
+                        enclave_id,
+                        KEYGEN_RESTORE_TIMEOUT.as_secs()
+                    );
+
+                    if let Err(db_err) = db
+                        .record_keygen_restoration_failure(&session_id, 2)
+                        .await
+                    {
+                        warn!(
+                            "Failed to record restoration failure for session {}: {}",
+                            session_id, db_err
                         );
                     }
                 }
@@ -1583,6 +1621,10 @@ impl EnclaveManager {
         }
 
         // Step 3: Restore user keys (for single-signer operations)
+        // Use a circuit breaker: if consecutive failures exceed the threshold,
+        // the enclave is likely unreachable or has lost state — skip remaining keys.
+        const RESTORE_KEY_TIMEOUT: Duration = Duration::from_secs(30);
+
         let user_keys = db
             .get_user_keys_for_enclave(*enclave_id)
             .await
@@ -1594,22 +1636,51 @@ impl EnclaveManager {
             enclave_id
         );
 
-        for key in user_keys {
-            match self.restore_user_key(enclave_id, &key).await {
-                Ok(_) => {
+        let mut consecutive_failures: u32 = 0;
+
+        for key in &user_keys {
+            let result =
+                tokio::time::timeout(RESTORE_KEY_TIMEOUT, self.restore_user_key(enclave_id, key))
+                    .await;
+
+            match result {
+                Ok(Ok(_)) => {
                     stats.user_keys_restored += 1;
+                    consecutive_failures = 0;
                     debug!(
                         "Restored user key {} for user {} to enclave {}",
                         key.key_id, key.user_id, enclave_id
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     stats.user_keys_failed += 1;
+                    consecutive_failures += 1;
                     warn!(
                         "Failed to restore user key {} for user {} to enclave {}: {}",
                         key.key_id, key.user_id, enclave_id, e
                     );
                 }
+                Err(_) => {
+                    stats.user_keys_failed += 1;
+                    consecutive_failures += 1;
+                    warn!(
+                        "Timed out restoring user key {} for user {} to enclave {} ({}s limit)",
+                        key.key_id,
+                        key.user_id,
+                        enclave_id,
+                        RESTORE_KEY_TIMEOUT.as_secs()
+                    );
+                }
+            }
+
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                let skipped = user_keys.len() - stats.user_keys_restored as usize - stats.user_keys_failed as usize;
+                warn!(
+                    "Circuit breaker: {} consecutive failures restoring user keys to enclave {}, skipping {} remaining keys",
+                    consecutive_failures, enclave_id, skipped
+                );
+                stats.user_keys_failed += skipped as u32;
+                break;
             }
         }
 
