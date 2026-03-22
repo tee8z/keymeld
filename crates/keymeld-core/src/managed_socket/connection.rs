@@ -372,8 +372,14 @@ where
             let response = match command_handler.handle_command(command).await {
                 Ok(response) => response,
                 Err(e) => {
-                    error!("Error processing request {}: {}", request_id, e);
-                    // Return error handling to the implementation
+                    // This should not happen — implementations should catch errors
+                    // and return them as part of the response type (e.g. EnclaveOutcome::Error).
+                    // If we get here, there's no way to send a typed error response,
+                    // so log loudly. The caller will see a channel close / timeout.
+                    error!(
+                        "BUG: request {} returned Err from handle_command (should return error as Ok variant): {}",
+                        request_id, e
+                    );
                     return;
                 }
             };

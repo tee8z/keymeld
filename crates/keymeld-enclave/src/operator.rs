@@ -6,7 +6,8 @@ use keymeld_core::{
     managed_socket::ServerCommandHandler,
     protocol::{
         AggregatePublicKeyResponse, AttestationError, Command, ConfigureCommand,
-        ConfiguredResponse, EnclaveCommand, EnclaveError, EnclaveOutcome, FinalSignatureResponse,
+        ConfiguredResponse, EnclaveCommand, EnclaveError, EnclaveOutcome, ErrorResponse,
+        FinalSignatureResponse,
         InitKeygenSessionCommand, InitSigningSessionCommand, InternalError, KeygenCommand,
         KeygenInitializedResponse, KeygenOutcome, MusigCommand, MusigOutcome, NonceError,
         NoncesResponse, Outcome, PartialSignatureResponse, ParticipantsAddedBatchResponse,
@@ -65,10 +66,19 @@ impl ServerCommandHandler<Command, Outcome> for EnclaveCommandHandler {
         command: Command,
     ) -> Pin<Box<dyn Future<Output = Result<Outcome, anyhow::Error>> + Send + '_>> {
         Box::pin(async move {
-            self.operator
-                .handle_command(command)
-                .await
-                .map_err(|e| anyhow::anyhow!("Enclave operation failed: {}", e))
+            // Never return Err — the generic transport layer has no way to send
+            // a typed error response. Instead, catch all errors and wrap them as
+            // EnclaveOutcome::Error so the client always gets a response.
+            match self.operator.handle_command(command.clone()).await {
+                Ok(outcome) => Ok(outcome),
+                Err(e) => {
+                    error!("Enclave operation failed for command {}: {}", command.command, e);
+                    Ok(Outcome::new(
+                        command,
+                        EnclaveOutcome::Error(ErrorResponse { error: e }),
+                    ))
+                }
+            }
         })
     }
 }
