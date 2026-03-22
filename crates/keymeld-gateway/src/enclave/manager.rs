@@ -1676,7 +1676,7 @@ impl EnclaveManager {
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                 let skipped = user_keys.len() - stats.user_keys_restored as usize - stats.user_keys_failed as usize;
                 warn!(
-                    "Circuit breaker: {} consecutive failures restoring user keys to enclave {}, skipping {} remaining keys",
+                    "Circuit breaker: {} consecutive failures restoring user keys to enclave {}, skipping {} remaining keys (will retry next startup)",
                     consecutive_failures, enclave_id, skipped
                 );
                 stats.user_keys_failed += skipped as u32;
