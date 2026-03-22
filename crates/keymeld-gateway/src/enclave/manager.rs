@@ -1563,9 +1563,7 @@ impl EnclaveManager {
                         KEYGEN_RESTORE_TIMEOUT.as_secs()
                     );
 
-                    if let Err(db_err) = db
-                        .record_keygen_restoration_failure(&session_id, 2)
-                        .await
+                    if let Err(db_err) = db.record_keygen_restoration_failure(&session_id, 2).await
                     {
                         warn!(
                             "Failed to record restoration failure for session {}: {}",
@@ -1674,7 +1672,9 @@ impl EnclaveManager {
             }
 
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                let skipped = user_keys.len() - stats.user_keys_restored as usize - stats.user_keys_failed as usize;
+                let skipped = user_keys.len()
+                    - stats.user_keys_restored as usize
+                    - stats.user_keys_failed as usize;
                 warn!(
                     "Circuit breaker: {} consecutive failures restoring user keys to enclave {}, skipping {} remaining keys (will retry next startup)",
                     consecutive_failures, enclave_id, skipped

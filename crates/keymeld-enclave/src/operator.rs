@@ -7,12 +7,11 @@ use keymeld_core::{
     protocol::{
         AggregatePublicKeyResponse, AttestationError, Command, ConfigureCommand,
         ConfiguredResponse, EnclaveCommand, EnclaveError, EnclaveOutcome, ErrorResponse,
-        FinalSignatureResponse,
-        InitKeygenSessionCommand, InitSigningSessionCommand, InternalError, KeygenCommand,
-        KeygenInitializedResponse, KeygenOutcome, MusigCommand, MusigOutcome, NonceError,
-        NoncesResponse, Outcome, PartialSignatureResponse, ParticipantsAddedBatchResponse,
-        PublicInfoResponse, SessionError, SignatureData, SigningCommand, SigningOutcome,
-        SystemCommand, SystemOutcome,
+        FinalSignatureResponse, InitKeygenSessionCommand, InitSigningSessionCommand, InternalError,
+        KeygenCommand, KeygenInitializedResponse, KeygenOutcome, MusigCommand, MusigOutcome,
+        NonceError, NoncesResponse, Outcome, PartialSignatureResponse,
+        ParticipantsAddedBatchResponse, PublicInfoResponse, SessionError, SignatureData,
+        SigningCommand, SigningOutcome, SystemCommand, SystemOutcome,
     },
 };
 use uuid::Uuid;
@@ -72,7 +71,10 @@ impl ServerCommandHandler<Command, Outcome> for EnclaveCommandHandler {
             match self.operator.handle_command(command.clone()).await {
                 Ok(outcome) => Ok(outcome),
                 Err(e) => {
-                    error!("Enclave operation failed for command {}: {}", command.command, e);
+                    error!(
+                        "Enclave operation failed for command {}: {}",
+                        command.command, e
+                    );
                     Ok(Outcome::new(
                         command,
                         EnclaveOutcome::Error(ErrorResponse { error: e }),
