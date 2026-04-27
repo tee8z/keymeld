@@ -22,7 +22,7 @@ path = "src/session_restore_test_main.rs"
 
 [dependencies]
 keymeld-sdk = { path = "../crates/keymeld-sdk", features = ["dlctix"] }
-bdk_wallet = { version = "2.3.0", features = ["keys-bip39"] }
+bdk_wallet = { version = "3.0.0", features = ["keys-bip39"] }
 bdk_bitcoind_rpc = { version = "0.22.0" }
 bitcoin = { workspace = true, features = ["serde", "rand", "std"] }
 secp256k1 = { workspace = true }
