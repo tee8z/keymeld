@@ -10,7 +10,7 @@ license = "MIT"
 keymeld-core = { path = "../keymeld-core", features = ["gateway"] }
 keymeld-sdk = { path = "../keymeld-sdk", features = ["openapi"] }
 axum = { workspace = true, features = ["macros", "tokio", "http1"] }
-axum-extra = { version = "0.12.1", features = ["typed-header"] }
+axum-extra = { version = "0.12.6", features = ["typed-header"] }
 tower-http = { workspace = true, features = ["compression-gzip", "decompression-gzip", "fs"] }
 maud = { version = "0.27", features = ["axum"] }
 tokio = { workspace = true, features = ["full"] }
@@ -24,7 +24,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+aws-sdk-kms = "1.105.0"
 secp256k1 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
@@ -49,7 +49,7 @@ utoipa = { version = "5.4.0", features = [
 utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
 [dev-dependencies]
-tempfile = "3.15.0"
+tempfile = "3.27.0"
 
 [build-dependencies]
 minify-js = "0.6"
