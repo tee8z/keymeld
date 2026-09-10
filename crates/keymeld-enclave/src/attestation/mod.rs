@@ -116,47 +116,29 @@ impl AttestationManager {
         Ok(Some(attestation))
     }
 
-    pub fn verify_attestation(&self, attestation: &KeyMeldAttestation) -> Result<bool> {
-        if !self.config.enabled {
-            return Ok(true);
-        }
-
-        if !attestation.is_valid(self.config.max_age_seconds) {
-            warn!(
-                "Attestation for session {} is expired",
-                attestation.session_id()
-            );
-            return Ok(false);
-        }
-
-        if !self.config.required_pcrs.is_empty() {
-            let pcr_hex_values = attestation.pcr_hex_values();
-
-            for (pcr_name, expected_hex) in &self.config.required_pcrs {
-                match pcr_hex_values.get(pcr_name) {
-                    Some(actual_hex) if actual_hex == expected_hex => {}
-                    Some(actual_hex) => {
-                        warn!(
-                            "PCR {} verification failed. Expected: {}, Actual: {}",
-                            pcr_name, expected_hex, actual_hex
-                        );
-                        return Ok(false);
-                    }
-                    None => {
-                        warn!("Required PCR {} not found in attestation", pcr_name);
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-
-        if self.is_debug_mode && !self.config.allow_debug_mode {
-            warn!("Debug mode attestation not allowed by configuration");
-            return Ok(false);
-        }
-
-        // Attestation verification passed
-        Ok(true)
+    /// Verify remote evidence using the same AWS-root policy as the SDK.
+    pub fn verify_attestation(
+        &self,
+        attestation: &KeyMeldAttestation,
+        expected_public_key: &[u8],
+        nonce: &[u8],
+    ) -> Result<bool> {
+        let policy = keymeld_core::attestation::AttestationPolicy::from_hex_measurements(
+            &self.config.required_pcrs,
+        )
+        .map_err(|error| EnclaveError::Attestation(AttestationError::Other(error.to_string())))?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let now = u64::try_from(now).map_err(|_| {
+            EnclaveError::Attestation(AttestationError::Other("Invalid attestation clock".into()))
+        })?;
+        Ok(policy
+            .verify(
+                attestation.document_bytes(),
+                expected_public_key,
+                nonce,
+                now,
+            )
+            .is_ok())
     }
 
     pub fn get_random(&self, num_bytes: u16) -> Result<Vec<u8>> {
@@ -184,6 +166,14 @@ impl AttestationManager {
         &self,
         user_data: Option<&[u8]>,
     ) -> Result<Option<AttestationDocument>> {
+        self.get_identity_attestation_with_nonce(user_data.unwrap_or_default(), &[])
+    }
+
+    pub fn get_identity_attestation_with_nonce(
+        &self,
+        public_key: &[u8],
+        nonce: &[u8],
+    ) -> Result<Option<AttestationDocument>> {
         if !self.config.enabled {
             return Ok(None);
         }
@@ -193,10 +183,8 @@ impl AttestationManager {
             .as_ref()
             .ok_or(EnclaveError::Internal(InternalError::NsmNotInitialized))?;
 
-        let user_data_buf = user_data.map(|data| data.to_vec());
-
         let attestation =
-            nsm_client.get_attestation_document(None, user_data_buf.as_deref(), None)?;
+            nsm_client.get_attestation_document(None, Some(nonce), Some(public_key))?;
         Ok(Some(attestation))
     }
 

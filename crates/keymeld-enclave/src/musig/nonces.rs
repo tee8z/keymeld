@@ -47,7 +47,7 @@ impl MusigProcessor {
         }
 
         // Sort by compressed public key bytes (BIP327) - same order as KeyAggContext
-        subset_pubkeys_with_ids.sort_by(|a, b| a.1.serialize().cmp(&b.1.serialize()));
+        subset_pubkeys_with_ids.sort_by_key(|a| a.1.serialize());
 
         // Find user's position in sorted order
         subset_pubkeys_with_ids
@@ -104,11 +104,12 @@ impl MusigProcessor {
         }
 
         // Generate base nonce seed
-        let base_nonce_seed =
+        let base_nonce_seed = zeroize::Zeroizing::new(
             SecureCrypto::generate_secure_nonce(&session_id.to_string(), &user_id.to_string())
                 .map_err(|e| {
                     MusigError::Musig2Error(format!("Secure nonce generation failed: {e}").into())
-                })?;
+                })?,
+        );
 
         let mut batch_first_rounds: BTreeMap<Uuid, FirstRound> = BTreeMap::new();
         let mut batch_adaptor_first_rounds: BTreeMap<Uuid, BTreeMap<Uuid, FirstRound>> =
@@ -118,15 +119,11 @@ impl MusigProcessor {
         // Clone batch_items to avoid borrow issues
         let batch_items: Vec<_> = session_metadata.batch_items.iter().collect();
 
-        for (batch_idx, (batch_item_id, batch_item)) in batch_items.iter().enumerate() {
-            // Create unique nonce seed for this batch item by XORing with batch_item_id bytes
-            let mut batch_nonce_seed = base_nonce_seed;
-            let batch_id_bytes = batch_item_id.as_bytes();
-            for (i, byte) in batch_id_bytes.iter().enumerate() {
-                batch_nonce_seed[i % 32] ^= byte;
-            }
-            // Also incorporate batch index to ensure uniqueness even if UUIDs collide partially
-            batch_nonce_seed[0] = batch_nonce_seed[0].wrapping_add(batch_idx as u8 + 1);
+        for (batch_item_id, batch_item) in batch_items {
+            keymeld_core::validation::validate_decrypted_adaptor_configs(
+                &batch_item.adaptor_configs,
+            )
+            .map_err(|e| MusigError::InvalidAdaptorConfig(e.to_string()))?;
 
             let message = &batch_item.message;
 
@@ -160,6 +157,14 @@ impl MusigProcessor {
 
             if batch_item.adaptor_configs.is_empty() {
                 // Regular signing for this batch item
+                let batch_nonce_seed = SecureCrypto::derive_signing_nonce_seed(
+                    &base_nonce_seed,
+                    session_id,
+                    user_id,
+                    batch_item_id,
+                    None,
+                )
+                .map_err(|e| MusigError::Musig2Error(e.to_string().into()))?;
                 let first_round = FirstRound::new(
                     item_key_agg_ctx,
                     batch_nonce_seed,
@@ -171,8 +176,8 @@ impl MusigProcessor {
                 .map_err(|e| MusigError::Musig2Error(e.into()))?;
 
                 let pub_nonce = first_round.our_public_nonce();
-                batch_first_rounds.insert(**batch_item_id, first_round);
-                batch_nonces.insert(**batch_item_id, NonceData::Regular(pub_nonce));
+                batch_first_rounds.insert(*batch_item_id, first_round);
+                batch_nonces.insert(*batch_item_id, NonceData::Regular(pub_nonce));
 
                 debug!(
                     "Generated batch nonce for user {} batch_item {} (regular, signer_index={})",
@@ -183,11 +188,15 @@ impl MusigProcessor {
                 let mut adaptor_first_rounds_for_item: BTreeMap<Uuid, FirstRound> = BTreeMap::new();
                 let mut adaptor_nonces: Vec<(Uuid, PubNonce)> = Vec::new();
 
-                for (config_idx, adaptor_config) in batch_item.adaptor_configs.iter().enumerate() {
-                    // Create unique seed for each adaptor config within this batch item
-                    let mut adaptor_nonce_seed = batch_nonce_seed;
-                    adaptor_nonce_seed[1] =
-                        adaptor_nonce_seed[1].wrapping_add(config_idx as u8 + 1);
+                for adaptor_config in &batch_item.adaptor_configs {
+                    let adaptor_nonce_seed = SecureCrypto::derive_signing_nonce_seed(
+                        &base_nonce_seed,
+                        session_id,
+                        user_id,
+                        batch_item_id,
+                        Some(&adaptor_config.adaptor_id),
+                    )
+                    .map_err(|e| MusigError::Musig2Error(e.to_string().into()))?;
 
                     let first_round = FirstRound::new(
                         item_key_agg_ctx.clone(),
@@ -209,8 +218,8 @@ impl MusigProcessor {
                     );
                 }
 
-                batch_adaptor_first_rounds.insert(**batch_item_id, adaptor_first_rounds_for_item);
-                batch_nonces.insert(**batch_item_id, NonceData::Adaptor(adaptor_nonces));
+                batch_adaptor_first_rounds.insert(*batch_item_id, adaptor_first_rounds_for_item);
+                batch_nonces.insert(*batch_item_id, NonceData::Adaptor(adaptor_nonces));
             }
         }
 
@@ -459,5 +468,118 @@ impl MusigProcessor {
             info!("Session {} advanced to NonceAggregation phase", session_id);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nonce_security_tests {
+    use super::*;
+    use crate::musig::types::BatchItemData;
+    use keymeld_core::{
+        protocol::{AdaptorConfig, TaprootTweak},
+        SessionId,
+    };
+    use std::collections::BTreeSet;
+
+    fn processor() -> (MusigProcessor, UserId, KeyMaterial) {
+        let session_id = SessionId::new_v7();
+        let user_id = UserId::new_v7();
+        let secret = SecretKey::from_byte_array([21; 32]).unwrap();
+        let mut processor = MusigProcessor::new(
+            &session_id,
+            TaprootTweak::None,
+            Some(1),
+            vec![user_id.clone()],
+        );
+        processor
+            .add_participant(user_id.clone(), secret.public_key(secp256k1::SECP256K1))
+            .unwrap();
+        processor
+            .create_key_aggregation_context(&session_id)
+            .unwrap();
+        (
+            processor,
+            user_id,
+            KeyMaterial::new(secret.secret_bytes().to_vec()),
+        )
+    }
+
+    fn item(id: Uuid, configs: Vec<AdaptorConfig>) -> BatchItemData {
+        BatchItemData {
+            batch_item_id: id,
+            message: vec![22; 32],
+            adaptor_configs: configs,
+            adaptor_final_signatures: BTreeMap::new(),
+            taproot_tweak: TaprootTweak::None,
+            subset_id: None,
+        }
+    }
+
+    fn point() -> String {
+        hex::encode(
+            SecretKey::from_byte_array([23; 32])
+                .unwrap()
+                .public_key(secp256k1::SECP256K1)
+                .serialize(),
+        )
+    }
+
+    #[test]
+    fn more_than_256_adaptors_and_batch_items_have_distinct_public_nonces() {
+        let (mut processor, user, key) = processor();
+        let adaptor_item_id = Uuid::from_u128(1_000);
+        let configs = (0..257)
+            .map(|index| {
+                let mut config = AdaptorConfig::single(point());
+                config.adaptor_id = Uuid::from_u128(index);
+                config
+            })
+            .collect();
+        let mut items: BTreeMap<_, _> = (0..257)
+            .map(|index| {
+                let id = Uuid::from_u128(index);
+                (id, item(id, vec![]))
+            })
+            .collect();
+        items.insert(adaptor_item_id, item(adaptor_item_id, configs));
+        processor.set_batch_items(items).unwrap();
+        let nonces = processor.generate_batch_nonces(&user, 0, &key).unwrap();
+        let mut unique = BTreeSet::new();
+        for nonce in nonces.values() {
+            match nonce {
+                NonceData::Regular(nonce) => assert!(unique.insert(nonce.serialize())),
+                NonceData::Adaptor(nonces) => {
+                    assert_eq!(nonces.len(), 257);
+                    for (_, nonce) in nonces {
+                        assert!(
+                            unique.insert(nonce.serialize()),
+                            "reused adaptor public nonce"
+                        );
+                    }
+                }
+                NonceData::Batch(_) => panic!("unexpected nested batch"),
+            }
+        }
+        assert_eq!(unique.len(), 514);
+    }
+
+    #[test]
+    fn nonce_generation_rejects_unsupported_or_ambiguous_adaptor_configs() {
+        for configs in [
+            vec![AdaptorConfig::and(vec![point(), point()])],
+            vec![AdaptorConfig::or(vec![point(), point()])],
+            {
+                let config = AdaptorConfig::single(point());
+                vec![config.clone(), config]
+            },
+        ] {
+            let (mut processor, user, key) = processor();
+            let id = Uuid::now_v7();
+            processor
+                .set_batch_items(BTreeMap::from([(id, item(id, configs))]))
+                .unwrap();
+            assert!(processor.generate_batch_nonces(&user, 0, &key).is_err());
+            assert!(processor.user_sessions.is_empty());
+        }
     }
 }

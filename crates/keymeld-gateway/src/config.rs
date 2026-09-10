@@ -50,6 +50,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub enable_cors: bool,
     pub enable_compression: bool,
+    /// File containing a 32-byte hex bearer credential. Without it the admin UI is disabled.
+    #[serde(default)]
+    pub operator_token_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +418,9 @@ impl Config {
         if let Ok(cors) = std::env::var("KEYMELD_ENABLE_CORS") {
             self.server.enable_cors = cors.parse().unwrap_or(true);
         }
+        if let Ok(path) = std::env::var("KEYMELD_OPERATOR_TOKEN_FILE") {
+            self.server.operator_token_file = Some(path);
+        }
 
         if let Ok(db_path) = std::env::var("KEYMELD_DATABASE_PATH") {
             self.database.path = db_path;
@@ -647,6 +653,7 @@ impl Default for ServerConfig {
             port: 8090,
             enable_cors: true,
             enable_compression: true,
+            operator_token_file: None,
         }
     }
 }

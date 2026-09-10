@@ -35,7 +35,7 @@ pub async fn run_with_args(
         UserCredentials::from_private_key(&test.coordinator_derived_private_key.secret_bytes())?;
 
     let coordinator_client =
-        KeyMeldClient::builder(&config.gateway_url, test.coordinator_user_id.clone())
+        keymeld_examples::client_builder(&config.gateway_url, test.coordinator_user_id.clone())?
             .credentials(coordinator_credentials)
             .build()?;
 
@@ -43,7 +43,7 @@ pub async fn run_with_args(
     for participant in &test.participants {
         let credentials =
             UserCredentials::from_private_key(&participant.derived_private_key.secret_bytes())?;
-        let client = KeyMeldClient::builder(&config.gateway_url, UserId::new_v7())
+        let client = keymeld_examples::client_builder(&config.gateway_url, UserId::new_v7())?
             .credentials(credentials)
             .build()?;
         participant_clients.push(client);
@@ -69,6 +69,11 @@ pub async fn run_with_args(
 
     let session_id = keygen_session.session_id().clone();
     let session_secret = keygen_session.export_session_secret();
+    let authorization_manifest = keygen_session.authorization_manifest().clone();
+    let signing_authority = keygen_session
+        .authorization_credentials()
+        .ok_or_else(|| anyhow!("Missing signing authority"))?
+        .clone();
     info!("Created keygen session: {}", session_id);
 
     keygen_session
@@ -84,7 +89,9 @@ pub async fn run_with_args(
             .join_session(
                 session_id.clone(),
                 &session_secret,
-                JoinOptions::default().approval(requires_approval),
+                JoinOptions::default()
+                    .approval(requires_approval)
+                    .invitation(keygen_session.invitation(client.user_id())?),
             )
             .await?;
 
@@ -110,17 +117,20 @@ pub async fn run_with_args(
 
     let keygen_session = coordinator_client
         .keygen()
-        .restore_session(
+        .restore_session_with_authority(
             session_id.clone(),
             SessionCredentials::from_session_secret(&session_secret)?,
+            authorization_manifest.clone(),
+            signing_authority,
         )
         .await?;
 
+    let expected_batch = vec![BatchSigningItem::new(message_hash)];
     let mut signing_session = coordinator_client
         .signer()
-        .sign(
+        .sign_batch(
             &keygen_session,
-            message_hash,
+            expected_batch.clone(),
             SigningOptions::default().timeout(1800),
         )
         .await?;
@@ -137,7 +147,7 @@ pub async fn run_with_args(
         hex::encode(expected_message)
     );
 
-    signing_session.approve().await?;
+    signing_session.approve(&expected_batch).await?;
     info!("Coordinator approved");
 
     if !participant_clients.is_empty() {
@@ -148,6 +158,7 @@ pub async fn run_with_args(
             .restore_session(
                 session_id.clone(),
                 SessionCredentials::from_session_secret(&session_secret)?,
+                authorization_manifest.clone(),
             )
             .await?;
 
@@ -163,7 +174,7 @@ pub async fn run_with_args(
             hex::encode(expected_message)
         );
 
-        participant_signing.approve().await?;
+        participant_signing.approve(&expected_batch).await?;
         info!("Participant 0 approved");
     }
 

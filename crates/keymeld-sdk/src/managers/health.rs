@@ -52,15 +52,22 @@ impl<'a> HealthManager<'a> {
         &self,
         enclave_id: u32,
     ) -> Result<EnclavePublicKeyResponse, SdkError> {
-        self.client
+        let nonce = keymeld_core::crypto::SecureCrypto::generate_secure_seed()?;
+        let response = self
+            .client
             .http()
             .get(
-                &self
-                    .client
-                    .url(&format!("/api/v1/enclaves/{}/public-key", enclave_id)),
+                &self.client.url(&format!(
+                    "/api/v1/enclaves/{}/public-key?nonce={}",
+                    enclave_id,
+                    hex::encode(nonce)
+                )),
                 &[],
             )
-            .await
+            .await?;
+        self.client
+            .verify_enclave_key(&response, enclave_id, &nonce)?;
+        Ok(response)
     }
 
     pub async fn version(&self) -> Result<ApiVersionResponse, SdkError> {

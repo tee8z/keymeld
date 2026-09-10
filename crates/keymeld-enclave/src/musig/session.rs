@@ -29,7 +29,7 @@ impl SessionMetadata {
             .map(|(uid, pk)| (uid.clone(), *pk))
             .collect();
         // Sort by compressed public key bytes (BIP327) to match get_all_participants()
-        participants.sort_by(|a, b| a.1.serialize().cmp(&b.1.serialize()));
+        participants.sort_by_key(|a| a.1.serialize());
         participants.into_iter().map(|(uid, _)| uid).collect()
     }
 
@@ -55,6 +55,8 @@ impl SessionMetadata {
 
         Ok(SessionMetadata {
             session_id: new_session_id,
+            authorization_manifest: self.authorization_manifest.clone(),
+            registrations: self.registrations.clone(),
             expected_participants,
             participant_public_keys: self.participant_public_keys.clone(),
             expected_participant_count: self.expected_participant_count,
@@ -79,6 +81,8 @@ impl SessionMetadata {
         // sorts by compressed public key bytes (BIP327) after all participants register.
         SessionMetadata {
             session_id,
+            authorization_manifest: None,
+            registrations: BTreeMap::new(),
             expected_participants,
             participant_public_keys: BTreeMap::new(),
             expected_participant_count,
@@ -93,9 +97,9 @@ impl SessionMetadata {
 
     pub fn has_all_participants(&self) -> bool {
         if let Some(expected_count) = self.expected_participant_count {
-            self.participant_public_keys.len() >= expected_count
+            self.participant_public_keys.len() == expected_count
         } else {
-            self.participant_public_keys.len() >= self.expected_participants.len()
+            self.participant_public_keys.len() == self.expected_participants.len()
         }
     }
 
@@ -108,7 +112,9 @@ impl SessionMetadata {
         user_id: UserId,
         public_key: PublicKey,
     ) -> Result<(), UserId> {
-        if self.participant_public_keys.contains_key(&user_id) {
+        if !self.expected_participants.contains(&user_id)
+            || self.participant_public_keys.contains_key(&user_id)
+        {
             return Err(user_id);
         }
 

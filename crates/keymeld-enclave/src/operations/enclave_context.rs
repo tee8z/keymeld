@@ -61,6 +61,7 @@ impl EnclaveSharedContext {
 
                 let response = kms_client
                     .decrypt()
+                    .key_id(kms_key_id)
                     .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(enc_dek.clone()))
                     .set_encryption_context(Some(encryption_context))
                     .send()

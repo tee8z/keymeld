@@ -16,7 +16,6 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use keymeld_core::{
-    crypto::SecureCrypto,
     identifiers::{SessionId, UserId},
     protocol::{KeygenStatusKind, SigningStatusKind},
     AttestationDocument,
@@ -38,10 +37,8 @@ use keymeld_sdk::{
 use log::error;
 use moka::sync::Cache;
 use prometheus::Encoder;
-use secp256k1::PublicKey;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -56,11 +53,11 @@ pub struct AppState {
     pub nonce_cache: NonceCache,
 }
 
-/// TTL-based nonce cache for replay protection.
+/// A bounded cache accelerates replay rejection. SQLite remains authoritative
+/// when entries are evicted, multiple gateway processes run, or a process restarts.
 #[derive(Clone)]
 pub struct NonceCache {
     cache: Cache<String, ()>,
-    time_window: Duration,
 }
 
 impl Default for NonceCache {
@@ -71,45 +68,33 @@ impl Default for NonceCache {
 
 impl NonceCache {
     pub fn new() -> Self {
-        Self::with_config(Duration::from_secs(600), Duration::from_secs(300), 100_000)
+        Self {
+            cache: Cache::builder()
+                .time_to_live(Duration::from_secs(600))
+                .max_capacity(100_000)
+                .build(),
+        }
     }
 
-    pub fn with_config(ttl: Duration, time_window: Duration, max_capacity: u64) -> Self {
-        let cache = Cache::builder()
-            .time_to_live(ttl)
-            .max_capacity(max_capacity)
-            .build();
-        Self { cache, time_window }
-    }
-
-    pub fn check_and_insert_with_timestamp(
+    pub async fn claim_verified(
         &self,
-        nonce_key: &str,
-        timestamp_secs: u64,
-    ) -> Result<(), &'static str> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| "System time error")?
-            .as_secs();
-
-        if timestamp_secs.abs_diff(now) > self.time_window.as_secs() {
-            return Err("Timestamp outside acceptable window");
+        db: &Database,
+        nonce_key: String,
+        timestamp: u64,
+    ) -> Result<(), ApiError> {
+        keymeld_core::request_auth::validate_timestamp(
+            timestamp,
+            keymeld_core::request_auth::now_timestamp_secs()
+                .map_err(|e| ApiError::unauthorized(e.to_string()))?,
+        )
+        .map_err(|e| ApiError::unauthorized(e.to_string()))?;
+        if self.cache.contains_key(&nonce_key) {
+            return Err(ApiError::unauthorized("Authentication proof already used"));
         }
-
-        if self.cache.contains_key(nonce_key) {
-            return Err("Nonce already used");
-        }
-
-        self.cache.insert(nonce_key.to_string(), ());
+        db.claim_request_auth_nonce(nonce_key.clone(), timestamp)
+            .await?;
+        self.cache.insert(nonce_key, ());
         Ok(())
-    }
-
-    pub fn check_and_insert(&self, nonce_key: &str) -> bool {
-        if self.cache.contains_key(nonce_key) {
-            return false;
-        }
-        self.cache.insert(nonce_key.to_string(), ());
-        true
     }
 }
 
@@ -270,7 +255,7 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
     path = "/keygen/reserve",
     tag = "keygen",
     summary = "Reserve a new keygen session",
-    description = "Phase 1: Reserve a keygen session slot and get coordinator enclave assignment",
+    description = "Reserve a keygen session with a creator-signed manifest that pins participant invitation verifiers and signing authority. Returns the coordinator enclave assignment.",
     request_body = ReserveKeygenSessionRequest,
     responses(
         (status = 200, description = "Keygen session reserved successfully", body = ReserveKeygenSessionResponse),
@@ -356,6 +341,7 @@ pub async fn reserve_keygen_session(
         .as_secs();
 
     let response = ReserveKeygenSessionResponse {
+        user_enclave_assignments: session_assignment.user_enclave_assignments.clone(),
         keygen_session_id: request.keygen_session_id,
         coordinator_enclave_id,
         coordinator_public_key,
@@ -378,7 +364,7 @@ pub async fn reserve_keygen_session(
     path = "/keygen/{session_id}/initialize",
     tag = "keygen",
     summary = "Initialize a reserved keygen session",
-    description = "Phase 2: Initialize a reserved keygen session with encrypted data",
+    description = "Initialize encrypted session data. The request must carry an authorization signature from the creator key pinned during reservation.",
     request_body = InitializeKeygenSessionRequest,
     responses(
         (status = 200, description = "Keygen session initialized successfully", body = InitializeKeygenSessionResponse),
@@ -405,6 +391,32 @@ pub async fn initialize_keygen_session(
 
     let coordinator_enclave_id = match &session_status {
         crate::session::keygen::KeygenSessionStatus::Reserved(reserved) => {
+            request
+                .recipient_authorization
+                .verify(&reserved.authorization_manifest)
+                .map_err(|e| {
+                    ApiError::unauthorized(format!("Invalid enclave recipient authorization: {e}"))
+                })?;
+            let assignment = state
+                .enclave_manager
+                .get_session_assignment(&session_id)
+                .map_err(|e| ApiError::enclave_communication(e.to_string()))?
+                .ok_or_else(|| ApiError::bad_request("Missing participant enclave assignment"))?;
+            if request.recipient_authorization.user_enclave_assignments
+                != assignment.user_enclave_assignments
+            {
+                return Err(ApiError::bad_request(
+                    "Enclave recipients do not match reserved assignments",
+                ));
+            }
+            request
+                .verify_authorization(
+                    &session_id,
+                    &reserved.authorization_manifest.manifest.creator_pubkey,
+                )
+                .map_err(|e| {
+                    ApiError::unauthorized(format!("Invalid initialization authorization: {e}"))
+                })?;
             reserved.coordinator_enclave_id
         }
         _ => return Err(ApiError::bad_request(
@@ -461,7 +473,7 @@ pub async fn initialize_keygen_session(
     path = "/keygen/{keygen_session_id}/participants",
     tag = "keygen",
     summary = "Register participant in keygen session",
-    description = "Registers a participant in a keygen session for distributed key generation. Requires X-Session-Signature header containing ECDSA signature in format 'nonce:signature' using seed-derived private key.",
+    description = "Claim an expected participant slot with its invitation signature and an encrypted key proof verified by the enclave. Requires X-Session-Signature for session access. A claimed slot cannot be replaced; identical retries are accepted only while collecting participants.",
     params(
         ("keygen_session_id" = SessionId, Path, description = "Keygen session ID")
     ),
@@ -475,6 +487,7 @@ pub async fn initialize_keygen_session(
         (status = 401, description = "Missing or malformed X-Session-Signature header", body = ErrorResponse),
         (status = 403, description = "Invalid signature or user not permitted", body = ErrorResponse),
         (status = 404, description = "Session not found", body = ErrorResponse),
+        (status = 409, description = "Slot already claimed, session expired, or registration closed", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
@@ -492,13 +505,42 @@ pub async fn register_keygen_participant(
     validate_register_keygen_participant_request(&request, session_signature.value())
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {e}")))?;
 
-    validate_session_signature(&state.db, &keygen_session_id, session_signature.value()).await?;
+    validate_session_signature(&state, &keygen_session_id, session_signature.value()).await?;
 
     let session_status = state
         .db
         .get_keygen_session_by_id(&keygen_session_id)
         .await?
         .ok_or(ApiError::not_found("Keygen session not found"))?;
+
+    let collecting = match &session_status {
+        KeygenSessionStatus::CollectingParticipants(s) => s,
+        _ => {
+            return Err(ApiError::conflict(
+                "Keygen session is not collecting participants",
+            ))
+        }
+    };
+    if collecting.expires_at <= crate::database::DbUtils::current_timestamp() as u64 {
+        return Err(ApiError::conflict("Keygen session has expired"));
+    }
+    if request.keygen_session_id != keygen_session_id {
+        return Err(ApiError::bad_request(
+            "Session ID does not match request path",
+        ));
+    }
+    let signer_index = collecting
+        .expected_participants
+        .iter()
+        .position(|id| id == &request.user_id)
+        .ok_or_else(|| ApiError::unauthorized("Participant is not expected in this session"))?;
+    request
+        .registration_authorization
+        .verify(
+            &collecting.authorization_manifest,
+            &request.encrypted_private_key,
+        )
+        .map_err(|e| ApiError::unauthorized(format!("Invalid slot authorization: {e}")))?;
 
     // Get the session assignment to validate participant's assigned enclave
     let session_assignment = state
@@ -512,7 +554,7 @@ pub async fn register_keygen_participant(
     // Get the pre-assigned enclave for this participant
     let assigned_enclave = session_assignment
         .get_user_enclave(&request.user_id)
-        .unwrap_or(session_assignment.coordinator_enclave);
+        .ok_or_else(|| ApiError::unauthorized("Participant has no assigned enclave"))?;
 
     // CRITICAL: Get both public key AND epoch from the same source (database) to ensure consistency
     // If we mix sources (public key from DB, epoch from EnclaveManager), they can be out of sync
@@ -536,15 +578,15 @@ pub async fn register_keygen_participant(
             "Participant {} must use assigned enclave {} (public key: {}, epoch: {}), but provided public key: {}",
             request.user_id,
             assigned_enclave.as_u32(),
-            &expected_public_key[..16],
+            expected_public_key,
             enclave_key_epoch,
-            &request.enclave_public_key[..16]
+            request.enclave_public_key
         )));
     }
 
     // CRITICAL: Validate that the client's epoch matches the server's epoch
     // This prevents decryption failures when an enclave restarts between client fetch and server processing
-    if request.enclave_key_epoch != 0 && request.enclave_key_epoch != enclave_key_epoch {
+    if request.enclave_key_epoch != enclave_key_epoch {
         return Err(ApiError::bad_request(format!(
             "Participant {} encrypted data with enclave {} epoch {}, but current epoch is {}. The enclave may have restarted. Please fetch the latest enclave public key and retry.",
             request.user_id,
@@ -556,16 +598,68 @@ pub async fn register_keygen_participant(
 
     debug!(
         "Validated participant {} assignment to enclave {} (public key: {}, epoch: {})",
-        request.user_id,
-        assigned_enclave,
-        &request.enclave_public_key[..16],
-        enclave_key_epoch
+        request.user_id, assigned_enclave, request.enclave_public_key, enclave_key_epoch
     );
+
+    let context = &request.registration_authorization.context;
+    if context.keygen_session_id != keygen_session_id
+        || context.user_id != request.user_id
+        || context.enclave_id != assigned_enclave
+        || context.enclave_key_epoch != enclave_key_epoch
+        || context.public_key != request.public_key
+        || context.auth_pubkey != request.auth_pubkey
+        || context.require_signing_approval != request.require_signing_approval
+    {
+        return Err(ApiError::bad_request(
+            "Registration does not match its authorized context",
+        ));
+    }
+    // Decrypt and validate in the assigned enclave before a database slot is consumed.
+    let outcome = state
+        .enclave_manager
+        .send_command_to_enclave(
+            &assigned_enclave,
+            keymeld_core::protocol::Command::new(keymeld_core::protocol::EnclaveCommand::System(
+                keymeld_core::protocol::SystemCommand::ValidateRegistration(
+                    keymeld_core::protocol::ValidateRegistrationCommand {
+                        authorization_manifest: collecting.authorization_manifest.clone(),
+                        participant: keymeld_core::protocol::ParticipantRegistrationData {
+                            user_id: request.user_id.clone(),
+                            enclave_encrypted_data: request.encrypted_private_key.clone(),
+                            auth_pubkey: request.auth_pubkey.clone(),
+                            require_signing_approval: request.require_signing_approval,
+                            registration_authorization: request.registration_authorization.clone(),
+                        },
+                    },
+                ),
+            )),
+        )
+        .await
+        .map_err(|e| {
+            ApiError::enclave_communication(format!("Registration validation failed: {e}"))
+        })?;
+    match outcome.response {
+        keymeld_core::protocol::EnclaveOutcome::System(
+            keymeld_core::protocol::SystemOutcome::RegistrationValidated(validated),
+        ) if validated.public_key == request.public_key
+            && validated.auth_pubkey == request.auth_pubkey => {}
+        keymeld_core::protocol::EnclaveOutcome::Error(error) => {
+            return Err(ApiError::bad_request(format!(
+                "Enclave rejected registration: {}",
+                error.error
+            )));
+        }
+        _ => {
+            return Err(ApiError::enclave_communication(
+                "Invalid registration validation response",
+            ))
+        }
+    }
 
     let session_encrypted = request.encrypted_session_data.clone();
     let enclave_encrypted = request.encrypted_private_key.clone();
 
-    state
+    let participants_registered = state
         .db
         .register_keygen_participant_with_encrypted_data(
             &keygen_session_id,
@@ -577,19 +671,13 @@ pub async fn register_keygen_participant(
         )
         .await?;
 
-    let current_count = state
-        .db
-        .get_keygen_participant_count(&keygen_session_id)
-        .await?;
-    let new_count = current_count + 1;
-
     let response = RegisterKeygenParticipantResponse {
         keygen_session_id: request.keygen_session_id,
         user_id: request.user_id,
         status: session_status.kind(),
-        participants_registered: new_count,
+        participants_registered,
         expected_participants: session_status.expected_participants_count(),
-        signer_index: current_count,
+        signer_index,
         assigned_enclave_id: assigned_enclave,
         require_signing_approval: request.require_signing_approval,
     };
@@ -602,7 +690,7 @@ pub async fn register_keygen_participant(
     path = "/keygen/{keygen_session_id}/status",
     tag = "keygen",
     summary = "Get keygen session status",
-    description = "Retrieves the current status and details of a keygen session. Requires X-Session-Signature header containing ECDSA signature in format 'nonce:signature' using seed-derived private key.",
+    description = "Retrieves the current status and details of a keygen session. Requires X-Session-Signature header containing ECDSA signature in format 'v1:timestamp:nonce:signature' using seed-derived private key.",
     security(
         ("SessionSignature" = [])
     ),
@@ -646,12 +734,7 @@ pub async fn get_keygen_status(
         }
     };
 
-    debug!(
-        "Keygen status check - Signature value: '{}'",
-        session_signature.value()
-    );
-
-    validate_session_signature(&state.db, &keygen_session_id, session_signature.value()).await?;
+    validate_session_signature(&state, &keygen_session_id, session_signature.value()).await?;
 
     let participant_count = state
         .db
@@ -667,7 +750,27 @@ pub async fn get_keygen_status(
         _ => std::collections::BTreeMap::new(),
     };
 
+    let authorization_manifest = session_status
+        .authorization_manifest()
+        .ok_or_else(|| ApiError::conflict("Session does not support participant authorization"))?
+        .clone();
+    let encrypted_roster = match &session_status {
+        KeygenSessionStatus::Completed(s) => Some(s.encrypted_roster.clone()),
+        _ => None,
+    };
+
     let response = KeygenSessionStatusResponse {
+        recipient_authorization: match &session_status {
+            KeygenSessionStatus::CollectingParticipants(s) => (*s.recipient_authorization).clone(),
+            KeygenSessionStatus::Completed(s) => (*s.recipient_authorization).clone(),
+            _ => {
+                return Err(ApiError::conflict(
+                    "Session has no authorized enclave recipients",
+                ))
+            }
+        },
+        authorization_manifest,
+        encrypted_roster,
         keygen_session_id,
         status,
         expected_participants,
@@ -685,7 +788,7 @@ pub async fn get_keygen_status(
     path = "/signing",
     tag = "signing",
     summary = "Create a new signing session",
-    description = "Creates a new MuSig2 signing session for an existing completed keygen session. Requires X-Session-Signature header containing ECDSA signature in format 'nonce:signature' using seed-derived private key.",
+    description = "Create a signing session for a completed keygen session. Requires X-Session-Signature and a separate signing-authority signature over both session IDs, the timeout, and every batch item.",
     request_body = CreateSigningSessionRequest,
     security(
         ("SessionSignature" = [])
@@ -710,7 +813,7 @@ pub async fn create_signing_session(
         .map_err(|e| ApiError::bad_request(format!("Invalid request: {e}")))?;
 
     validate_session_signature(
-        &state.db,
+        &state,
         &request.keygen_session_id,
         session_signature.value(),
     )
@@ -768,6 +871,24 @@ pub async fn create_signing_session(
         ));
     }
 
+    let manifest = session_status
+        .authorization_manifest()
+        .ok_or_else(|| ApiError::conflict("Session does not support signing authorization"))?;
+    if request.signing_authorization.timeout_secs != request.timeout_secs {
+        return Err(ApiError::bad_request(
+            "Signing timeout differs from authorization",
+        ));
+    }
+    request
+        .signing_authorization
+        .verify(
+            &manifest.manifest.signing_pubkey,
+            &request.keygen_session_id,
+            &request.signing_session_id,
+            &request.enclave_batch_items(),
+        )
+        .map_err(|e| ApiError::unauthorized(format!("Invalid signing authorization: {e}")))?;
+
     state.db.create_signing_session(&request).await?;
 
     // Copy session assignment from keygen to signing immediately so approval requests don't fail
@@ -816,7 +937,8 @@ pub async fn create_signing_session(
     path = "/signing/{signing_session_id}/approve/{user_id}",
     tag = "signing",
     summary = "Approve a signing session as a participant",
-    description = "Approve a MuSig2 signing session as a participant. Requires X-User-Signature header containing ECDSA signature in format 'nonce:signature' using the user's private key.",
+    description = "Approve the complete signing batch after reviewing its messages and configuration. Requires X-User-Signature and a timestamped approval proof from the participant's session-derived auth key. The proof binds both session IDs and every batch item.",
+    request_body = keymeld_core::authorization::ParticipantApproval,
     params(
         ("signing_session_id" = SessionId, Path, description = "Signing session ID"),
         ("user_id" = UserId, Path, description = "User ID of the participant")
@@ -837,6 +959,7 @@ pub async fn approve_signing_session(
     State(state): State<AppState>,
     Path((signing_session_id, user_id)): Path<(SessionId, UserId)>,
     TypedHeader(user_signature): TypedHeader<UserSignature>,
+    Json(approval): Json<keymeld_core::authorization::ParticipantApproval>,
 ) -> ApiResult<StatusCode> {
     info!("Approving signing session: {}", signing_session_id);
 
@@ -874,7 +997,7 @@ pub async fn approve_signing_session(
 
     state
         .db
-        .approve_signing_session(&signing_session_id, &user_id)
+        .approve_signing_session(&signing_session_id, &user_id, &approval)
         .await?;
 
     info!(
@@ -887,21 +1010,23 @@ pub async fn approve_signing_session(
 
 /// Validate session signature using database-stored public key
 async fn validate_session_signature(
-    db: &Database,
+    state: &AppState,
     session_id: &SessionId,
     signature_header: &str,
 ) -> Result<(), ApiError> {
-    let public_key = match db.get_session_public_key(session_id).await? {
-        Some(key) => key,
-        None => return Err(ApiError::not_found("Session not found")),
-    };
-
-    keymeld_core::validation::validate_session_signature(
+    let public_key = state
+        .db
+        .get_session_public_key(session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    crate::auth::validate_session_signature_with_pubkey(
+        &state.db,
+        &state.nonce_cache,
+        &public_key,
         &session_id.as_string(),
         signature_header,
-        &public_key,
     )
-    .map_err(|e| ApiError::bad_request(format!("Session signature validation failed: {e}")))
+    .await
 }
 
 async fn validate_user_signature_with_session_auth(
@@ -915,41 +1040,15 @@ async fn validate_user_signature_with_session_auth(
         .db
         .get_participant_auth_pubkey(user_id, keygen_session_id)
         .await?;
-
-    let auth_pubkey = PublicKey::from_slice(&auth_pubkey_bytes)
-        .map_err(|e| ApiError::bad_request(format!("Invalid auth pubkey: {e}")))?;
-
-    // Parse the signature header (format: "nonce:signature")
-    let (nonce_hex, signature_hex) = signature_header
-        .split_once(':')
-        .ok_or(ApiError::bad_request("Invalid signature header format"))?;
-
-    let nonce = hex::decode(nonce_hex)
-        .map_err(|e| ApiError::bad_request(format!("Invalid nonce hex: {e}")))?;
-    let signature_bytes = hex::decode(signature_hex)
-        .map_err(|e| ApiError::bad_request(format!("Invalid signature hex: {e}")))?;
-
-    // Check nonce for replay protection (scoped to signing session)
-    let nonce_key = format!("{}:{}", signing_session_id, nonce_hex);
-    if !state.nonce_cache.check_and_insert(&nonce_key) {
-        return Err(ApiError::bad_request("Nonce already used"));
-    }
-
-    // Verify the signature using the session auth pubkey
-    let is_valid = SecureCrypto::verify_auth_signature_with_session_key(
-        &auth_pubkey,
+    crate::auth::validate_signature_with_pubkey(
+        &state.db,
+        &state.nonce_cache,
+        &auth_pubkey_bytes,
         &signing_session_id.as_string(),
         &user_id.as_string(),
-        &nonce,
-        &signature_bytes,
+        signature_header,
     )
-    .map_err(|e| ApiError::bad_request(format!("Signature verification failed: {e}")))?;
-
-    if !is_valid {
-        return Err(ApiError::bad_request("Invalid user signature"));
-    }
-
-    Ok(())
+    .await
 }
 
 #[utoipa::path(
@@ -957,7 +1056,7 @@ async fn validate_user_signature_with_session_auth(
     path = "/signing/{signing_session_id}/status/{user_id}",
     tag = "signing",
     summary = "Get signing session status",
-    description = "Retrieves the current status and details of a signing session, including approval information when in collecting_participants status. Requires X-User-Signature header containing ECDSA signature in format 'nonce:signature' using the user's private key.",
+    description = "Retrieves the current status and details of a signing session, including approval information when in collecting_participants status. Requires X-User-Signature header containing ECDSA signature in format 'v1:timestamp:nonce:signature' using the user's private key.",
     security(
         ("UserSignature" = [])
     ),
@@ -1021,6 +1120,10 @@ pub async fn get_signing_status(
         .unwrap_or_default();
 
     let response = SigningSessionStatusResponse {
+        batch_items: session_status
+            .get_batch_items()
+            .cloned()
+            .unwrap_or_default(),
         signing_session_id,
         keygen_session_id,
         status,
@@ -1035,6 +1138,11 @@ pub async fn get_signing_status(
     Ok(Json(response))
 }
 
+#[derive(Deserialize)]
+pub struct EnclaveAttestationQuery {
+    pub nonce: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/enclaves/{enclave_id}/public-key",
@@ -1042,7 +1150,8 @@ pub async fn get_signing_status(
     summary = "Get enclave public key",
     description = "Retrieves the public key for a specific enclave",
     params(
-        ("enclave_id" = u32, Path, description = "Enclave ID")
+        ("enclave_id" = u32, Path, description = "Enclave ID"),
+        ("nonce" = Option<String>, Query, description = "32-byte hex challenge for a fresh signed Nitro document")
     ),
     responses(
         (status = 200, description = "Public key retrieved successfully", body = EnclavePublicKeyResponse),
@@ -1053,6 +1162,7 @@ pub async fn get_signing_status(
 pub async fn get_enclave_public_key(
     State(state): State<AppState>,
     Path(enclave_id): Path<u32>,
+    Query(query): Query<EnclaveAttestationQuery>,
 ) -> ApiResult<Json<EnclavePublicKeyResponse>> {
     debug!("Getting public key for enclave: {}", enclave_id);
 
@@ -1065,21 +1175,44 @@ pub async fn get_enclave_public_key(
                 "Enclave {enclave_id} not found"
             )))?;
 
-    let (attestation_document, pcr_measurements) = if !health_info.attestation_document.is_empty() {
-        match serde_json::from_str::<AttestationDocument>(&health_info.attestation_document) {
-            Ok(attestation) => {
-                let pcrs = attestation
-                    .pcrs
-                    .iter()
-                    .map(|(k, v)| (k.clone(), hex::encode(v)))
-                    .collect();
-                (health_info.attestation_document.clone(), pcrs)
+    let nonce = query
+        .nonce
+        .as_ref()
+        .map(|nonce| {
+            let bytes = hex::decode(nonce)
+                .map_err(|_| ApiError::bad_request("Invalid attestation nonce"))?;
+            if bytes.len() != 32 {
+                return Err(ApiError::bad_request("Attestation nonce must be 32 bytes"));
             }
-            Err(_) => (health_info.attestation_document.clone(), HashMap::new()),
-        }
+            Ok(bytes)
+        })
+        .transpose()?;
+    let attestation = if health_info.attestation_document.is_empty() {
+        None
+    } else if let Some(nonce) = nonce {
+        Some(
+            state
+                .enclave_manager
+                .get_enclave_attestation(&EnclaveId::from(enclave_id), nonce)
+                .await
+                .map_err(|error| ApiError::enclave_communication(error.to_string()))?,
+        )
     } else {
-        (String::new(), HashMap::new())
+        Some(
+            serde_json::from_str::<AttestationDocument>(&health_info.attestation_document)
+                .map_err(|_| ApiError::enclave_communication("Invalid cached attestation"))?,
+        )
     };
+    let (attestation_document, pcr_measurements) = attestation
+        .map(|attestation| {
+            let pcrs = attestation
+                .pcrs
+                .iter()
+                .map(|(name, value)| (name.clone(), hex::encode(value)))
+                .collect();
+            (hex::encode(attestation.raw_document), pcrs)
+        })
+        .unwrap_or_default();
 
     let response = EnclavePublicKeyResponse {
         enclave_id,
@@ -1122,13 +1255,17 @@ pub async fn api_version() -> ApiResult<Json<ApiVersionResponse>> {
     get,
     path = "/keygen/{keygen_session_id}/slots",
     tag = "keygen",
-    summary = "Get available slots for keygen session",
-    description = "Returns available user slots for registration in a keygen session. Each slot has a deterministic signer index used for the signing process.",
+    summary = "Get participant slots for a keygen session",
+    description = "Returns every expected participant slot, its claimed flag, signer index, and enclave assignment. Requires X-Session-Signature. Available while collecting participants and after completion for client restoration.",
     params(
         ("keygen_session_id" = SessionId, Path, description = "Keygen session ID")
     ),
+    security(
+        ("SessionSignature" = [])
+    ),
     responses(
         (status = 200, description = "Available slots retrieved successfully", body = GetAvailableSlotsResponse),
+        (status = 401, description = "Invalid session signature", body = ErrorResponse),
         (status = 404, description = "Keygen session not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
@@ -1136,11 +1273,14 @@ pub async fn api_version() -> ApiResult<Json<ApiVersionResponse>> {
 pub async fn get_available_slots(
     State(state): State<AppState>,
     Path(keygen_session_id): Path<SessionId>,
+    TypedHeader(session_signature): TypedHeader<SessionSignature>,
 ) -> ApiResult<Json<GetAvailableSlotsResponse>> {
     debug!(
         "Getting available slots for keygen session: {}",
         keygen_session_id
     );
+
+    validate_session_signature(&state, &keygen_session_id, session_signature.value()).await?;
 
     let session_status = state
         .db
@@ -1148,7 +1288,14 @@ pub async fn get_available_slots(
         .await?
         .ok_or(ApiError::not_found("Keygen session not found"))?;
 
-    let (expected_participants, registered_participants) = match session_status {
+    let (
+        expected_participants,
+        registered_participants,
+        manifest,
+        recipients,
+        coordinator_enclave_id,
+        session_public_key,
+    ) = match session_status {
         KeygenSessionStatus::Reserved(_) => {
             return Err(ApiError::bad_request(
                 "Keygen session is reserved but not yet initialized",
@@ -1157,6 +1304,18 @@ pub async fn get_available_slots(
         KeygenSessionStatus::CollectingParticipants(ref status) => (
             &status.expected_participants,
             &status.registered_participants,
+            &status.authorization_manifest,
+            &status.recipient_authorization,
+            status.coordinator_enclave_id,
+            &status.session_public_key,
+        ),
+        KeygenSessionStatus::Completed(ref status) => (
+            &status.expected_participants,
+            &status.registered_participants,
+            &status.authorization_manifest,
+            &status.recipient_authorization,
+            status.coordinator_enclave_id,
+            &status.session_public_key,
         ),
         _ => {
             return Err(ApiError::bad_request(
@@ -1165,38 +1324,49 @@ pub async fn get_available_slots(
         }
     };
 
-    // Get the session assignment to determine which enclaves participants should use
-    let session_assignment = state
-        .enclave_manager
-        .get_session_assignment(&keygen_session_id)
-        .map_err(|e| ApiError::Internal(format!("Failed to get session assignment: {e}")))?
-        .ok_or(ApiError::Internal(
-            "Session assignment not found".to_string(),
-        ))?;
+    // Slot assignments are durable creator-authorized session data. They must
+    // remain readable before the gateway's enclave restoration task repopulates
+    // its process-local assignment cache.
+    recipients.verify(manifest).map_err(|e| {
+        ApiError::Internal(format!(
+            "Invalid stored enclave recipient authorization: {e}"
+        ))
+    })?;
+    let assignments = &recipients.user_enclave_assignments;
+    if manifest.manifest.keygen_session_id != keygen_session_id
+        || session_public_key != &manifest.manifest.session_public_key
+        || assignments.get(&manifest.manifest.coordinator_user_id) != Some(&coordinator_enclave_id)
+        || expected_participants.len() != assignments.len()
+        || expected_participants
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != assignments.len()
+        || expected_participants
+            .iter()
+            .any(|user_id| !assignments.contains_key(user_id))
+        || registered_participants
+            .iter()
+            .any(|(user_id, participant)| assignments.get(user_id) != Some(&participant.enclave_id))
+    {
+        return Err(ApiError::Internal(
+            "Stored participant roster does not match its creator authorization".to_string(),
+        ));
+    }
 
     let mut available_slots = Vec::new();
-    let mut signer_index = 0;
-
-    for expected_user_id in expected_participants {
-        // Skip if this participant is already registered
-        if registered_participants.contains_key(expected_user_id) {
-            signer_index += 1;
-            continue;
-        }
-
+    for (signer_index, expected_user_id) in expected_participants.iter().enumerate() {
         // Get the pre-assigned enclave for this participant
-        let assigned_enclave_id = session_assignment
-            .get_user_enclave(expected_user_id)
-            .unwrap_or(session_assignment.coordinator_enclave);
+        let assigned_enclave_id = assignments.get(expected_user_id).copied().ok_or_else(|| {
+            ApiError::enclave_communication("Expected participant has no enclave assignment")
+        })?;
 
         available_slots.push(AvailableUserSlot {
             user_id: expected_user_id.clone(),
             enclave_id: assigned_enclave_id,
             signer_index,
-            claimed: false,
+            claimed: registered_participants.contains_key(expected_user_id),
         });
-
-        signer_index += 1;
     }
 
     let response = GetAvailableSlotsResponse {
@@ -1222,17 +1392,35 @@ pub async fn get_available_slots(
     path = "/keys/reserve",
     tag = "user_keys",
     summary = "Reserve a key slot",
-    description = "Reserve a key slot and get assigned enclave info for key import",
+    description = "Reserve a client-selected key ID and pin its authentication key. X-User-Signature must bind the complete reservation request.",
     request_body = ReserveKeySlotRequest,
+    security(("UserSignature" = [])),
     responses(
         (status = 200, description = "Key slot reserved", body = ReserveKeySlotResponse),
+        (status = 401, description = "Invalid reservation authorization", body = ErrorResponse),
+        (status = 409, description = "Key ID already claimed", body = ErrorResponse),
         (status = 500, description = "Internal error", body = ErrorResponse),
     )
 )]
 pub async fn reserve_key_slot(
     State(state): State<AppState>,
+    TypedHeader(user_signature): TypedHeader<UserSignature>,
     Json(request): Json<ReserveKeySlotRequest>,
 ) -> ApiResult<Json<ReserveKeySlotResponse>> {
+    crate::auth::validate_signature_with_pubkey(
+        &state.db,
+        &state.nonce_cache,
+        &request.auth_pubkey,
+        &request
+            .auth_scope()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        &request.user_id.as_string(),
+        user_signature.value(),
+    )
+    .await?;
+    let auth_pubkey = secp256k1::PublicKey::from_slice(&request.auth_pubkey)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .serialize();
     info!("Reserving key slot for user: {}", request.user_id);
 
     // Get all healthy enclaves and pick one (round-robin or random)
@@ -1255,7 +1443,7 @@ pub async fn reserve_key_slot(
         })?;
 
     // Generate a new key_id
-    let key_id = KeyId::new_v7();
+    let key_id = request.key_id;
 
     // Calculate expiration (e.g., 10 minutes from now)
     let expires_at = std::time::SystemTime::now()
@@ -1273,6 +1461,7 @@ pub async fn reserve_key_slot(
             enclave_id,
             health_info.key_epoch as u64,
             expires_at,
+            &auth_pubkey,
         )
         .await?;
 
@@ -1325,12 +1514,16 @@ pub async fn import_user_key(
     // Validate that the signature was made with the private key corresponding to auth_pubkey
     // This proves the caller owns the key pair before we store the auth_pubkey
     crate::auth::validate_signature_with_pubkey(
+        &state.db,
         &state.nonce_cache,
         &request.auth_pubkey,
-        &request.key_id.as_string(),
+        &request
+            .auth_scope()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?,
         &request.user_id.as_string(),
         user_signature.value(),
-    )?;
+    )
+    .await?;
 
     // Validate the reserved key slot exists and matches
     let reserved_slot = state
@@ -1350,6 +1543,14 @@ pub async fn import_user_key(
             "Key slot {} was reserved for user {}, not {}",
             request.key_id, reserved_slot.user_id, request.user_id
         )));
+    }
+    let auth_pubkey = secp256k1::PublicKey::from_slice(&request.auth_pubkey)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .serialize();
+    if reserved_slot.auth_pubkey != auth_pubkey {
+        return Err(ApiError::unauthorized(
+            "Key import credential does not own the reservation",
+        ));
     }
 
     let enclave_id = reserved_slot.enclave_id;
@@ -1399,7 +1600,7 @@ pub async fn import_user_key(
         .move_reserved_to_pending_import(
             &request.key_id,
             &encrypted_private_key_bytes,
-            &request.auth_pubkey,
+            &auth_pubkey,
             expires_at,
         )
         .await?;
@@ -1431,7 +1632,7 @@ pub struct ListUserKeysQuery {
     path = "/keys/{user_id}",
     tag = "user_keys",
     summary = "List user keys",
-    description = "List all keys stored for a user. Requires X-User-Signature header signed with one of the user's keys (specified in key_id query param).",
+    description = "List keys for the user that share the authentication credential of key_id. Requires X-User-Signature signed by that credential.",
     params(
         ("user_id" = String, Path, description = "User ID"),
         ("key_id" = String, Query, description = "Key ID to authenticate with")
@@ -1469,7 +1670,18 @@ pub async fn list_user_keys(
 
     debug!("Listing keys for user: {}", user_id);
 
-    let key_rows = state.db.list_user_keys(&user_id).await?;
+    let owner = state
+        .db
+        .get_user_key_by_user_and_key(&user_id, &key_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Authentication key not found"))?;
+    let key_rows = state
+        .db
+        .list_user_keys(&user_id)
+        .await?
+        .into_iter()
+        .filter(|key| key.auth_pubkey == owner.auth_pubkey)
+        .collect::<Vec<_>>();
 
     let keys: Vec<keymeld_core::protocol::UserKeyInfo> = key_rows
         .into_iter()
@@ -1569,6 +1781,7 @@ pub async fn get_key_status(
         })?;
 
     let response = keymeld_sdk::KeyStatusResponse {
+        enclave_id: status.enclave_id,
         key_id: status.key_id,
         user_id: status.user_id,
         status: status.status,
@@ -1585,14 +1798,17 @@ pub async fn get_key_status(
     path = "/keys/{user_id}/keygen/{keygen_session_id}",
     tag = "user_keys",
     summary = "Store key from keygen",
-    description = "Persist a key from a completed keygen session. The store is processed asynchronously - poll /keys/{user_id}/{key_id}/status to check completion.",
+    description = "Persist a key from a completed keygen session. Requires the participant's X-User-Signature bound to the user, source session and destination key ID. Poll key status for completion.",
     params(
         ("user_id" = String, Path, description = "User ID"),
         ("keygen_session_id" = String, Path, description = "Keygen session ID")
     ),
     request_body = StoreKeyFromKeygenRequest,
+    security(("UserSignature" = [])),
     responses(
         (status = 200, description = "Key store started", body = StoreKeyFromKeygenResponse),
+        (status = 401, description = "Invalid participant authorization", body = ErrorResponse),
+        (status = 409, description = "Destination key ID already claimed", body = ErrorResponse),
         (status = 404, description = "Session not found", body = ErrorResponse),
         (status = 500, description = "Internal error", body = ErrorResponse),
     )
@@ -1600,6 +1816,7 @@ pub async fn get_key_status(
 pub async fn store_key_from_keygen(
     State(state): State<AppState>,
     Path((user_id, keygen_session_id)): Path<(String, String)>,
+    TypedHeader(user_signature): TypedHeader<UserSignature>,
     Json(request): Json<StoreKeyFromKeygenRequest>,
 ) -> ApiResult<Json<StoreKeyFromKeygenResponse>> {
     let user_id = UserId::parse(&user_id)
@@ -1638,6 +1855,18 @@ pub async fn store_key_from_keygen(
             ))
         })?;
 
+    crate::auth::validate_signature_with_pubkey(
+        &state.db,
+        &state.nonce_cache,
+        &participant.auth_pubkey,
+        &request
+            .auth_scope(&user_id, &keygen_session_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        &user_id.as_string(),
+        user_signature.value(),
+    )
+    .await?;
+
     // Get the enclave that has this user's key (their assigned enclave from keygen)
     let user_enclave_id = participant.enclave_id;
 
@@ -1670,6 +1899,7 @@ pub async fn store_key_from_keygen(
             &keygen_session_id,
             user_enclave_id,
             expires_at,
+            user_signature.value(),
         )
         .await?;
 
@@ -1714,16 +1944,6 @@ pub async fn sign_single(
     TypedHeader(user_signature): TypedHeader<UserSignature>,
     Json(request): Json<SignSingleRequest>,
 ) -> ApiResult<Json<SignSingleResponse>> {
-    // Validate signature first
-    validate_user_key_signature(
-        &state.db,
-        &state.nonce_cache,
-        &request.user_id,
-        &request.key_id,
-        user_signature.value(),
-    )
-    .await?;
-
     info!(
         "Creating single signing session for user {} with key {}",
         request.user_id, request.key_id
@@ -1740,6 +1960,18 @@ pub async fn sign_single(
                 request.key_id, request.user_id
             ))
         })?;
+
+    crate::auth::validate_signature_with_pubkey(
+        &state.db,
+        &state.nonce_cache,
+        &user_key.auth_pubkey,
+        &request
+            .auth_scope()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        &request.user_id.as_string(),
+        user_signature.value(),
+    )
+    .await?;
 
     // Verify the assigned enclave is healthy
     let _health_info = state
@@ -1917,6 +2149,10 @@ mod tests {
         };
 
         let request = CreateSigningSessionRequest {
+            signing_authorization: keymeld_core::authorization::SigningAuthorization {
+                timeout_secs: 3600,
+                signature: vec![],
+            },
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
             timeout_secs: 3600,
@@ -1943,6 +2179,10 @@ mod tests {
         };
 
         let request = CreateSigningSessionRequest {
+            signing_authorization: keymeld_core::authorization::SigningAuthorization {
+                timeout_secs: 3600,
+                signature: vec![],
+            },
             signing_session_id: SessionId::new_v7(),
             keygen_session_id: SessionId::new_v7(),
             timeout_secs: 3600,
@@ -1972,10 +2212,9 @@ mod tests {
             AdaptorConfig::single(
                 "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
             ),
-            AdaptorConfig::and(vec![
-                "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
-                "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
-            ]),
+            AdaptorConfig::single(
+                "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+            ),
         ];
 
         let encrypted = encrypt_adaptor_configs_for_client(&client_adaptor_configs, session_secret)
@@ -2013,7 +2252,7 @@ mod tests {
         ));
         assert!(matches!(
             enclave_decrypted[1].adaptor_type,
-            AdaptorType::And
+            AdaptorType::Single
         ));
 
         validate_decrypted_adaptor_configs(&enclave_decrypted)
@@ -2036,15 +2275,13 @@ mod tests {
             "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
         )];
 
-        let adaptor_config_2 = vec![AdaptorConfig::and(vec![
-            "03dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659".to_string(),
-            "023590a94e768f8e1815c2f24b4d80a8e3149316c3518ce7b7ad338368d038ca66".to_string(),
-        ])];
+        let adaptor_config_2 = vec![AdaptorConfig::single(
+            "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        )];
 
-        let adaptor_config_3 = vec![AdaptorConfig::or(vec![
-            "02abc123def456789012345678901234567890123456789012345678901234567890".to_string(),
-            "03def456789012345678901234567890123456789012345678901234567890123abc".to_string(),
-        ])
+        let adaptor_config_3 = vec![AdaptorConfig::single(
+            "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        )
         .with_hints(vec![
             AdaptorHint::Scalar(vec![1u8; 32]),
             AdaptorHint::Hash(vec![2u8; 32]),

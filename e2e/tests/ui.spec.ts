@@ -1,6 +1,17 @@
 import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 test.describe("KeyMeld UI", () => {
+  test.beforeEach(async ({ page, baseURL }) => {
+    const token = readFileSync(process.env.KEYMELD_OPERATOR_TOKEN_FILE!, "utf8").trim();
+    const gatewayOrigin = new URL(baseURL!).origin;
+    // Only send the operator credential to this gateway. UI styles/scripts
+    // can load from third-party origins that must never receive the token.
+    await page.route((url) => url.origin === gatewayOrigin, (route) =>
+      route.continue({ headers: { ...route.request().headers(), Authorization: `Bearer ${token}` } }),
+    );
+  });
+
   test.describe("Dashboard", () => {
     test("loads successfully", async ({ page }) => {
       await page.goto("/");

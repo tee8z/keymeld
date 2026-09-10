@@ -20,7 +20,7 @@ data:
       {{- else }}
       endpoint_url: null
       {{- end }}
-      key_id: {{ .Values.kms.keyId | quote }}
+      key_id: {{ required "kms.keyArn must match the enclave KMS policy" .Values.kms.keyArn | quote }}
       {{- end }}
     database:
       path: "{{ .Values.persistence.mountPath }}/keymeld.db"

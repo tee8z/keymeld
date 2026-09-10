@@ -130,8 +130,8 @@ impl AdaptorConfig {
         }
     }
 
-    /// Create an adaptor config requiring ALL adaptor points to be revealed.
-    /// The adaptor_id is automatically generated.
+    /// Construct the legacy And representation. Signing validation rejects this
+    /// unsupported mode; it must not be used to enforce multiple conditions.
     pub fn and(adaptor_points: Vec<String>) -> Self {
         Self {
             adaptor_id: Uuid::now_v7(),
@@ -141,8 +141,8 @@ impl AdaptorConfig {
         }
     }
 
-    /// Create an adaptor config requiring ANY ONE adaptor point to be revealed.
-    /// The adaptor_id is automatically generated.
+    /// Construct the legacy Or representation. Signing validation rejects this
+    /// unsupported mode; it must not be used to enforce alternative conditions.
     pub fn or(adaptor_points: Vec<String>) -> Self {
         Self {
             adaptor_id: Uuid::now_v7(),
@@ -186,6 +186,8 @@ pub enum EnclaveCommandKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SystemCommandKind {
+    CheckKeygenSession,
+    ValidateRegistration,
     Ping,
     Configure,
     GetPublicInfo,
@@ -235,6 +237,8 @@ pub enum EnclaveOutcomeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SystemOutcomeKind {
+    KeygenSessionPresent,
+    RegistrationValidated,
     Success,
     Pong,
     PublicInfo,
@@ -311,10 +315,18 @@ impl Command {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemCommand {
+    /// Read-only restoration probe; a live completed session must not be re-registered.
+    CheckKeygenSession {
+        keygen_session_id: SessionId,
+        recipient_authorization: Box<crate::authorization::EnclaveRecipientAuthorization>,
+    },
+    ValidateRegistration(ValidateRegistrationCommand),
     Ping,
     Configure(ConfigureCommand),
     GetPublicInfo,
-    GetAttestation,
+    GetAttestation {
+        nonce: Vec<u8>,
+    },
     ClearSession(ClearSessionCommand),
 }
 
@@ -394,10 +406,12 @@ impl From<&UserKeyCommand> for UserKeyCommandKind {
 impl From<&SystemCommand> for SystemCommandKind {
     fn from(command: &SystemCommand) -> Self {
         match command {
+            SystemCommand::CheckKeygenSession { .. } => SystemCommandKind::CheckKeygenSession,
+            SystemCommand::ValidateRegistration(_) => SystemCommandKind::ValidateRegistration,
             SystemCommand::Ping => SystemCommandKind::Ping,
             SystemCommand::Configure(_) => SystemCommandKind::Configure,
             SystemCommand::GetPublicInfo => SystemCommandKind::GetPublicInfo,
-            SystemCommand::GetAttestation => SystemCommandKind::GetAttestation,
+            SystemCommand::GetAttestation { .. } => SystemCommandKind::GetAttestation,
             SystemCommand::ClearSession(_) => SystemCommandKind::ClearSession,
         }
     }
@@ -456,10 +470,12 @@ impl fmt::Display for EnclaveCommand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             EnclaveCommand::System(system_cmd) => match system_cmd {
+                SystemCommand::CheckKeygenSession { .. } => write!(f, "check_keygen_session"),
+                SystemCommand::ValidateRegistration(_) => write!(f, "validate_registration"),
                 SystemCommand::Ping => write!(f, "ping"),
                 SystemCommand::Configure(_) => write!(f, "configure"),
                 SystemCommand::GetPublicInfo => write!(f, "get_public_info"),
-                SystemCommand::GetAttestation => write!(f, "get_attestation"),
+                SystemCommand::GetAttestation { .. } => write!(f, "get_attestation"),
                 SystemCommand::ClearSession(_) => write!(f, "clear_session"),
             },
             EnclaveCommand::Musig(musig_cmd) => match musig_cmd {
@@ -564,6 +580,8 @@ pub enum EnclaveOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemOutcome {
+    KeygenSessionPresent(bool),
+    RegistrationValidated(RegistrationValidatedResponse),
     Success,
     Pong,
     PublicInfo(PublicInfoResponse),
@@ -674,6 +692,8 @@ impl From<&UserKeyOutcome> for UserKeyOutcomeKind {
 impl From<&SystemOutcome> for SystemOutcomeKind {
     fn from(outcome: &SystemOutcome) -> Self {
         match outcome {
+            SystemOutcome::KeygenSessionPresent(_) => SystemOutcomeKind::KeygenSessionPresent,
+            SystemOutcome::RegistrationValidated(_) => SystemOutcomeKind::RegistrationValidated,
             SystemOutcome::Success => SystemOutcomeKind::Success,
             SystemOutcome::Pong => SystemOutcomeKind::Pong,
             SystemOutcome::PublicInfo(_) => SystemOutcomeKind::PublicInfo,
@@ -722,11 +742,13 @@ impl fmt::Display for EnclaveOutcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             EnclaveOutcome::System(system_outcome) => match system_outcome {
+                SystemOutcome::KeygenSessionPresent(_) => write!(f, "keygen_session_present"),
                 SystemOutcome::Success => write!(f, "success"),
                 SystemOutcome::Pong => write!(f, "pong"),
                 SystemOutcome::PublicInfo(_) => write!(f, "public_info"),
                 SystemOutcome::Attestation(_) => write!(f, "attestation"),
                 SystemOutcome::Configured(_) => write!(f, "configured"),
+                SystemOutcome::RegistrationValidated(_) => write!(f, "registration_validated"),
             },
             EnclaveOutcome::Musig(musig_outcome) => match musig_outcome {
                 MusigOutcome::Keygen(keygen_outcome) => match keygen_outcome {
@@ -783,7 +805,9 @@ pub struct ConfigureCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitKeygenSessionCommand {
+    pub recipient_authorization: Box<crate::authorization::EnclaveRecipientAuthorization>,
     pub keygen_session_id: SessionId,
+    pub authorization_manifest: Box<crate::authorization::SignedSessionManifest>,
     pub coordinator_encrypted_private_key: Option<String>,
     pub coordinator_user_id: Option<UserId>,
     pub encrypted_session_secret: Option<String>,
@@ -863,6 +887,7 @@ pub struct EnclaveBatchResult {
 pub struct InitSigningSessionCommand {
     pub keygen_session_id: SessionId,
     pub signing_session_id: SessionId,
+    pub signing_authorization: crate::authorization::SigningAuthorization,
     /// List of user IDs to initialize on this enclave
     pub user_ids: Vec<UserId>,
     /// Encrypted TaprootTweak as hex-encoded JSON
@@ -871,7 +896,7 @@ pub struct InitSigningSessionCommand {
     /// Approval signatures from users who require signing approval
     /// Enclave verifies these against stored auth_pubkey before proceeding
     #[serde(default)]
-    pub approval_signatures: Vec<SigningApproval>,
+    pub approval_signatures: Vec<crate::authorization::ParticipantApproval>,
     /// Batch items to sign (single message = batch of 1)
     pub batch_items: Vec<EnclaveBatchItem>,
 }
@@ -898,12 +923,25 @@ pub struct FinalizeSignatureCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantRegistrationData {
     pub user_id: UserId,
+    pub registration_authorization: crate::authorization::RegistrationAuthorization,
     /// ECIES-encrypted private key for this enclave
     pub enclave_encrypted_data: String,
     /// Auth public key for verifying signing approval signatures
     pub auth_pubkey: Vec<u8>,
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateRegistrationCommand {
+    pub authorization_manifest: Box<crate::authorization::SignedSessionManifest>,
+    pub participant: ParticipantRegistrationData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrationValidatedResponse {
+    pub public_key: Vec<u8>,
+    pub auth_pubkey: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1029,6 +1067,17 @@ pub struct StoreKeyFromKeygenCommand {
     pub user_id: UserId,
     pub key_id: KeyId,
     pub keygen_session_id: SessionId,
+    /// Participant-authorized, expiring proof bound to the source and destination.
+    pub authorization: String,
+}
+
+impl StoreKeyFromKeygenCommand {
+    pub fn auth_scope(&self) -> Result<String, crate::KeyMeldError> {
+        Ok(hex::encode(crate::authorization::authorization_digest(
+            "store-key-from-keygen",
+            &(&self.user_id, &self.keygen_session_id, &self.key_id),
+        )?))
+    }
 }
 
 /// Restore a user key from encrypted blob (for enclave restart)
@@ -1125,6 +1174,8 @@ pub enum FinalizedData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatePublicKeyResponse {
     pub keygen_session_id: SessionId,
+    /// Enclave-signed actual participant roster, encrypted with the session secret.
+    pub encrypted_roster: String,
     /// Encrypted aggregate public key as hex-encoded binary format (EncryptedData::to_hex)
     pub encrypted_aggregate_public_key: String,
     pub participant_count: usize,
@@ -1144,6 +1195,8 @@ pub struct AggregateKeyCompleteResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicInfoResponse {
+    /// Mandatory compatibility check before the gateway accepts enclave keys.
+    pub authorization_protocol_version: u32,
     pub public_key: String,
     pub attestation_document: Option<AttestationDocument>,
     pub active_sessions: u32,

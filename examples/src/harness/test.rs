@@ -18,27 +18,25 @@ use bdk_wallet::{
     KeychainKind, Wallet,
 };
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::secp256k1::Message;
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::Txid;
 
+use keymeld_sdk::{
+    AuthorizationCredentials, RegistrationAuthorization, RegistrationContext,
+    SignedSessionManifest, SigningAuthorization,
+};
 use keymeld_sdk::{
     CreateSigningSessionRequest, EnclaveId, EnclavePublicKeyResponse, EncryptedData,
     GetAvailableSlotsResponse, HealthCheckResponse, KeygenSessionStatusResponse, KeygenStatusKind,
     RegisterKeygenParticipantRequest, SecureCrypto, SessionId, SessionSecret,
     SigningSessionStatusResponse, SigningStatusKind, TaprootTweak, UserId,
 };
-use keymeld_sdk::{
-    InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, ReserveKeygenSessionRequest,
-    ReserveKeygenSessionResponse,
-};
 // SDK client imports for new SDK-based implementation
 use keymeld_sdk::prelude::{
-    JoinOptions, KeyMeldClient, KeygenOptions, RegisterOptions, SigningOptions, UserCredentials,
+    BatchSigningItem, KeyMeldClient, KeygenOptions, SigningOptions, UserCredentials,
 };
 use rand::RngCore;
 use reqwest::Client;
-use secp256k1::PublicKey as Secp256k1PublicKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -286,6 +284,10 @@ pub struct KeyMeldE2ETest {
     pub destination: String,
     pub session_secrets: HashMap<SessionId, String>,
     pub session_private_keys: HashMap<SessionId, secp256k1::SecretKey>,
+    pub authorization_manifests: HashMap<SessionId, SignedSessionManifest>,
+    pub signing_authorities: HashMap<SessionId, AuthorizationCredentials>,
+    pub registration_authorities: HashMap<SessionId, BTreeMap<UserId, AuthorizationCredentials>>,
+    pub expected_signing_batches: HashMap<SessionId, Vec<BatchSigningItem>>,
     pub coordinator_enclave_ids: HashMap<SessionId, EnclaveId>,
     pub participants_requiring_approval: Vec<usize>, // Indices of participants requiring approval (0 = first participant, not coordinator)
     pub rpc_batcher: Option<rpc_batcher::RpcBatcher>, // Queue-based RPC for high concurrency
@@ -359,7 +361,7 @@ impl KeyMeldE2ETest {
             UserCredentials::from_private_key(&coordinator.derived_private_key.secret_bytes())
                 .map_err(|e| anyhow!("Failed to create coordinator credentials: {e}"))?;
         let sdk_coordinator_client =
-            KeyMeldClient::builder(&config.gateway_url, coordinator_user_id.clone())
+            crate::client_builder(&config.gateway_url, coordinator_user_id.clone())?
                 .credentials(sdk_coordinator_credentials)
                 .build()
                 .map_err(|e| anyhow!("Failed to create SDK coordinator client: {e}"))?;
@@ -379,6 +381,10 @@ impl KeyMeldE2ETest {
             destination,
             session_secrets: HashMap::new(),
             session_private_keys: HashMap::new(),
+            authorization_manifests: HashMap::new(),
+            signing_authorities: HashMap::new(),
+            registration_authorities: HashMap::new(),
+            expected_signing_batches: HashMap::new(),
             coordinator_enclave_ids: HashMap::new(),
             participants_requiring_approval: vec![0], // By default, only first participant (index 0) requires approval
             rpc_batcher,
@@ -473,7 +479,7 @@ impl KeyMeldE2ETest {
             let sdk_credentials =
                 UserCredentials::from_private_key(&participant.derived_private_key.secret_bytes())
                     .map_err(|e| anyhow!("Failed to create participant {} credentials: {e}", i))?;
-            let sdk_client = KeyMeldClient::builder(&self.config.gateway_url, user_id.clone())
+            let sdk_client = crate::client_builder(&self.config.gateway_url, user_id.clone())?
                 .credentials(sdk_credentials)
                 .build()
                 .map_err(|e| anyhow!("Failed to create SDK participant {} client: {e}", i))?;
@@ -914,356 +920,60 @@ impl KeyMeldE2ETest {
     }
 
     pub async fn create_keygen_session(&mut self) -> Result<SessionId> {
-        info!("🔑 Creating keygen session using two-phase approach...");
-
-        let keygen_session_id: SessionId = Uuid::now_v7().into();
-
-        let seed = SecureCrypto::generate_session_seed()
-            .map_err(|e| anyhow!("Failed to generate session seed: {e}"))?;
-
-        let session_private_key = SecureCrypto::derive_private_key_from_seed(&seed)
-            .map_err(|e| anyhow!("Failed to derive private key from seed: {e}"))?;
-        let session_public_key = SecureCrypto::derive_public_key_from_seed(&seed)
-            .map_err(|e| anyhow!("Failed to derive public key from seed: {e}"))?;
-
-        let session_secret = hex::encode(&seed);
-
-        self.session_secrets
-            .insert(keygen_session_id.clone(), session_secret.clone());
-        self.session_private_keys
-            .insert(keygen_session_id.clone(), session_private_key);
-
-        let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
-
-        let mut expected_participants = vec![self.coordinator_user_id.clone()];
-        for user_id in &self.participant_user_ids {
-            expected_participants.push(user_id.clone());
-        }
-        // Sort in descending order to match the ordering in session.rs (newest UUIDv7 first)
-        expected_participants.sort_by(|a, b| b.cmp(a));
-
-        // Encrypt the TaprootTweak with session secret
-        let encrypted_taproot_tweak =
-            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
-                &self.taproot_tweak,
-                &session_secret,
-                "taproot_tweak",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt taproot tweak: {e}"))?;
-
-        // Phase 1: Reserve the keygen session
-        info!("📋 Phase 1: Reserving keygen session slot...");
-        let reserve_request = ReserveKeygenSessionRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            coordinator_user_id: self.coordinator_user_id.clone(),
-            expected_participants: expected_participants.clone(),
-            timeout_secs: 3600,
-            max_signing_sessions: Some(10),
-            encrypted_taproot_tweak,
-            subset_definitions: vec![], // No subset definitions for basic test
-        };
-
-        let reserve_response = self
-            .client
-            .post(format!("{}/api/v1/keygen/reserve", self.config.gateway_url))
-            .json(&reserve_request)
-            .send()
-            .await?;
-
-        if !reserve_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to reserve keygen session: {}",
-                reserve_response.text().await?
-            ));
-        }
-
-        let reserve_data: ReserveKeygenSessionResponse = reserve_response.json().await?;
-
-        info!(
-            "✅ Phase 1 complete: Session {} reserved with coordinator enclave {}",
-            reserve_data.keygen_session_id,
-            reserve_data.coordinator_enclave_id.as_u32()
-        );
-
-        // Phase 2: Initialize the session with encrypted data
-        info!(
-            "🔐 Phase 2: Encrypting data for coordinator enclave {} and initializing session...",
-            reserve_data.coordinator_enclave_id.as_u32()
-        );
-
-        // Now we know which enclave to encrypt for - use the coordinator's public key
-        let enclave_public_key_bytes =
-            hex::decode(&reserve_data.coordinator_public_key).map_err(|e| {
-                anyhow!(
-                    "Failed to decode coordinator enclave public key '{}': {}",
-                    reserve_data.coordinator_public_key,
-                    e
-                )
-            })?;
-        let enclave_public_key = Secp256k1PublicKey::from_slice(&enclave_public_key_bytes)
-            .map_err(|e| anyhow!("Invalid coordinator enclave public key: {e}"))?;
-
-        tracing::debug!(
-            "Client encrypting session secret with coordinator enclave {} public key: {}",
-            reserve_data.coordinator_enclave_id.as_u32(),
-            reserve_data.coordinator_public_key
-        );
-
-        // Encrypt the seed (not the hex-encoded session_secret) for the enclaves
-        let encrypted_session_secret_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &seed)
-                .map_err(|e| anyhow!("Failed to encrypt session seed: {e}"))?;
-        let encrypted_session_secret = hex::encode(&encrypted_session_secret_bytes);
-
-        // Encrypt the coordinator private key with the coordinator enclave public key
-        let encrypted_coordinator_key_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &coordinator_private_key_bytes)
-                .map_err(|e| anyhow!("Failed to encrypt coordinator private key: {e}"))?;
-        let encrypted_key = hex::encode(&encrypted_coordinator_key_bytes);
-
-        // Create and encrypt session data using typed struct
-        let session_data = KeygenSessionData::new(self.coordinator_public_key.serialize().to_vec());
-        let encrypted_session_data =
-            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
-                &session_data,
-                &session_secret,
-                "keygen_session",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
-
-        // Create and encrypt enclave data using typed struct
-        let enclave_data = KeygenEnclaveData::new(encrypted_key.clone(), session_secret.clone());
-        let encrypted_enclave_data =
-            keymeld_sdk::validation::encrypt_structured_data_with_enclave_key(
-                &enclave_data,
-                &reserve_data.coordinator_public_key,
-            )
-            .map_err(|e| anyhow!("Failed to encrypt enclave data: {e}"))?;
-
-        let initialize_request = InitializeKeygenSessionRequest {
-            coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
-            coordinator_encrypted_private_key: encrypted_key,
-            session_public_key: session_public_key.serialize().to_vec(),
-            encrypted_session_secret,
-            encrypted_session_data,
-            encrypted_enclave_data,
-            enclave_key_epoch: reserve_data.coordinator_key_epoch,
-        };
-
-        let initialize_response = self
-            .client
-            .post(format!(
-                "{}/api/v1/keygen/{}/initialize",
-                self.config.gateway_url, keygen_session_id
-            ))
-            .json(&initialize_request)
-            .send()
-            .await?;
-
-        if !initialize_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to initialize keygen session: {}",
-                initialize_response.text().await?
-            ));
-        }
-
-        let initialize_data: InitializeKeygenSessionResponse = initialize_response.json().await?;
-
-        info!(
-            "✅ Phase 2 complete: Session {} initialized and moved to CollectingParticipants",
-            initialize_data.keygen_session_id
-        );
-
-        // Store the coordinator enclave ID for later use during participant registration
-        self.coordinator_enclave_ids.insert(
-            keygen_session_id.clone(),
-            reserve_data.coordinator_enclave_id,
-        );
-
-        // Poll for session status to ensure initialization is complete
-        info!("⏳ Waiting for session initialization to complete...");
-        self.wait_for_session_initialization(&keygen_session_id)
-            .await?;
-        info!("✅ Session initialization complete, proceeding with participant registration");
-
-        Ok(keygen_session_id)
+        self.create_keygen_session_with_subsets(vec![]).await
     }
 
-    /// Create a keygen session with subset definitions for computing additional aggregate keys.
-    /// Each subset defines a group of participants that will have their own aggregate key.
+    /// Create a session and retain its independent registration and signing authorities.
     pub async fn create_keygen_session_with_subsets(
         &mut self,
         subset_definitions: Vec<keymeld_sdk::SubsetDefinition>,
     ) -> Result<SessionId> {
-        info!(
-            "🔑 Creating keygen session with {} subset definitions...",
-            subset_definitions.len()
-        );
-
-        let keygen_session_id: SessionId = Uuid::now_v7().into();
-
-        let seed = SecureCrypto::generate_session_seed()
-            .map_err(|e| anyhow!("Failed to generate session seed: {e}"))?;
-
-        let session_private_key = SecureCrypto::derive_private_key_from_seed(&seed)
-            .map_err(|e| anyhow!("Failed to derive private key from seed: {e}"))?;
-        let session_public_key = SecureCrypto::derive_public_key_from_seed(&seed)
-            .map_err(|e| anyhow!("Failed to derive public key from seed: {e}"))?;
-
-        let session_secret = hex::encode(&seed);
-
+        let coordinator = self.sdk_coordinator()?;
+        let participants = std::iter::once(self.coordinator_user_id.clone())
+            .chain(self.participant_user_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        let session = coordinator
+            .keygen()
+            .create_session_with_subsets(
+                participants.clone(),
+                subset_definitions,
+                KeygenOptions::default()
+                    .timeout(3600)
+                    .max_signings(10)
+                    .tweak(self.taproot_tweak.clone())
+                    .require_approval(),
+            )
+            .await?;
+        let session_id = session.session_id().clone();
+        let seed = session.export_session_secret();
+        let manifest = session.authorization_manifest().clone();
+        let owner = session
+            .authorization_credentials()
+            .ok_or_else(|| anyhow!("Missing session signing authority"))?
+            .clone();
+        let registration_credentials = participants
+            .iter()
+            .map(|user_id| {
+                let credential = session
+                    .registration_credentials(user_id)
+                    .ok_or_else(|| anyhow!("Missing registration authority for {}", user_id))?;
+                Ok((user_id.clone(), credential.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        drop(session);
         self.session_secrets
-            .insert(keygen_session_id.clone(), session_secret.clone());
-        self.session_private_keys
-            .insert(keygen_session_id.clone(), session_private_key);
-
-        let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
-
-        let mut expected_participants = vec![self.coordinator_user_id.clone()];
-        for user_id in &self.participant_user_ids {
-            expected_participants.push(user_id.clone());
-        }
-        expected_participants.sort_by(|a, b| b.cmp(a));
-
-        let encrypted_taproot_tweak =
-            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
-                &self.taproot_tweak,
-                &session_secret,
-                "taproot_tweak",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt taproot tweak: {e}"))?;
-
-        // Phase 1: Reserve with subset definitions
-        info!("📋 Phase 1: Reserving keygen session with subsets...");
-        let reserve_request = ReserveKeygenSessionRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            coordinator_user_id: self.coordinator_user_id.clone(),
-            expected_participants: expected_participants.clone(),
-            timeout_secs: 3600,
-            max_signing_sessions: Some(10),
-            encrypted_taproot_tweak,
-            subset_definitions,
-        };
-
-        let reserve_response = self
-            .client
-            .post(format!("{}/api/v1/keygen/reserve", self.config.gateway_url))
-            .json(&reserve_request)
-            .send()
-            .await?;
-
-        if !reserve_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to reserve keygen session: {}",
-                reserve_response.text().await?
-            ));
-        }
-
-        let reserve_data: ReserveKeygenSessionResponse = reserve_response.json().await?;
-
-        info!(
-            "✅ Phase 1 complete: Session {} reserved with coordinator enclave {}",
-            reserve_data.keygen_session_id,
-            reserve_data.coordinator_enclave_id.as_u32()
+            .insert(session_id.clone(), hex::encode(seed));
+        self.session_private_keys.insert(
+            session_id.clone(),
+            SecureCrypto::derive_private_key_from_seed(&seed)?,
         );
-
-        // Phase 2: Initialize the session with encrypted data
-        info!(
-            "🔐 Phase 2: Encrypting data for coordinator enclave {} and initializing session...",
-            reserve_data.coordinator_enclave_id.as_u32()
-        );
-
-        // Now we know which enclave to encrypt for - use the coordinator's public key
-        let enclave_public_key_bytes =
-            hex::decode(&reserve_data.coordinator_public_key).map_err(|e| {
-                anyhow!(
-                    "Failed to decode coordinator enclave public key '{}': {}",
-                    reserve_data.coordinator_public_key,
-                    e
-                )
-            })?;
-        let enclave_public_key = Secp256k1PublicKey::from_slice(&enclave_public_key_bytes)
-            .map_err(|e| anyhow!("Invalid coordinator enclave public key: {e}"))?;
-
-        // Encrypt the seed (not the hex-encoded session_secret) for the enclaves
-        let encrypted_session_secret_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &seed)
-                .map_err(|e| anyhow!("Failed to encrypt session seed: {e}"))?;
-        let encrypted_session_secret = hex::encode(&encrypted_session_secret_bytes);
-
-        // Encrypt the coordinator private key with the coordinator enclave public key
-        let encrypted_coordinator_key_bytes =
-            SecureCrypto::ecies_encrypt(&enclave_public_key, &coordinator_private_key_bytes)
-                .map_err(|e| anyhow!("Failed to encrypt coordinator private key: {e}"))?;
-        let encrypted_key = hex::encode(&encrypted_coordinator_key_bytes);
-
-        // Create and encrypt session data using typed struct
-        let session_data = KeygenSessionData::new(self.coordinator_public_key.serialize().to_vec());
-        let encrypted_session_data =
-            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
-                &session_data,
-                &session_secret,
-                "keygen_session",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
-
-        // Create and encrypt enclave data using typed struct
-        let enclave_data = KeygenEnclaveData::new(encrypted_key.clone(), session_secret.clone());
-        let encrypted_enclave_data =
-            keymeld_sdk::validation::encrypt_structured_data_with_enclave_key(
-                &enclave_data,
-                &reserve_data.coordinator_public_key,
-            )
-            .map_err(|e| anyhow!("Failed to encrypt enclave data: {e}"))?;
-
-        let initialize_request = InitializeKeygenSessionRequest {
-            coordinator_pubkey: self.coordinator_public_key.serialize().to_vec(),
-            coordinator_encrypted_private_key: encrypted_key,
-            session_public_key: session_public_key.serialize().to_vec(),
-            encrypted_session_secret,
-            encrypted_session_data,
-            encrypted_enclave_data,
-            enclave_key_epoch: reserve_data.coordinator_key_epoch,
-        };
-
-        let initialize_response = self
-            .client
-            .post(format!(
-                "{}/api/v1/keygen/{}/initialize",
-                self.config.gateway_url, keygen_session_id
-            ))
-            .json(&initialize_request)
-            .send()
-            .await?;
-
-        if !initialize_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to initialize keygen session: {}",
-                initialize_response.text().await?
-            ));
-        }
-
-        let initialize_data: InitializeKeygenSessionResponse = initialize_response.json().await?;
-
-        info!(
-            "✅ Phase 2 complete: Session {} initialized and moved to CollectingParticipants",
-            initialize_data.keygen_session_id
-        );
-
-        // Store the coordinator enclave ID for later use during participant registration
-        self.coordinator_enclave_ids.insert(
-            keygen_session_id.clone(),
-            reserve_data.coordinator_enclave_id,
-        );
-
-        self.share_session_secret_out_of_band(&session_secret);
-
-        info!("⏳ Waiting for session initialization to complete...");
-        self.wait_for_session_initialization(&keygen_session_id)
-            .await?;
-        info!("✅ Session initialization complete");
-
-        Ok(keygen_session_id)
+        self.authorization_manifests
+            .insert(session_id.clone(), manifest);
+        self.signing_authorities.insert(session_id.clone(), owner);
+        self.registration_authorities
+            .insert(session_id.clone(), registration_credentials);
+        self.wait_for_session_initialization(&session_id).await?;
+        Ok(session_id)
     }
 
     /// Poll keygen session status until it's properly initialized (moved to CollectingParticipants)
@@ -1346,12 +1056,6 @@ impl KeyMeldE2ETest {
         ))
     }
 
-    /// Share session secret out of band between coordinator and other participants
-    fn share_session_secret_out_of_band(&self, session_secret: &str) {
-        info!("🔐 Session secret shared out-of-band with participants");
-        info!("🔗 Secret: {}", &session_secret[..8]);
-    }
-
     pub async fn register_keygen_participants(
         &mut self,
         keygen_session_id: &SessionId,
@@ -1376,6 +1080,10 @@ impl KeyMeldE2ETest {
                         "{}/api/v1/keygen/{}/slots",
                         self.config.gateway_url, keygen_session_id
                     ))
+                    .header(
+                        "X-Session-Signature",
+                        self.generate_session_signature(keygen_session_id)?,
+                    )
                     .send()
                     .await?;
 
@@ -1571,113 +1279,14 @@ impl KeyMeldE2ETest {
         keygen_session_id: &SessionId,
         slots: &GetAvailableSlotsResponse,
     ) -> Result<()> {
-        info!("👤 Registering coordinator...");
-
-        // Find the slot for the coordinator by matching user_id
-        let coordinator_slot = slots
-            .available_slots
-            .iter()
-            .find(|slot| slot.user_id == self.coordinator_user_id)
-            .ok_or(anyhow!(
-                "No available slot for coordinator {}",
-                self.coordinator_user_id
-            ))?;
-
-        let session_secret = self
-            .session_secrets
-            .get(keygen_session_id)
-            .ok_or(anyhow!(
-                "Session secret not found for keygen session: {keygen_session_id}"
-            ))?
-            .clone();
-
-        self.share_session_secret_out_of_band(&session_secret);
-
-        // Get the coordinator's assigned enclave public key
-        let enclave_public_key_response: EnclavePublicKeyResponse = self
-            .client
-            .get(format!(
-                "{}/api/v1/enclaves/{}/public-key",
-                self.config.gateway_url,
-                coordinator_slot.enclave_id.as_u32()
-            ))
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        // Encrypt the coordinator private key with ECIES using assigned enclave public key
-        let encrypted_private_key = {
-            let private_key_bytes = &self.coordinator_derived_private_key.as_ref()[..32];
-
-            let encrypted_data = SecureCrypto::ecies_encrypt_from_hex(
-                &enclave_public_key_response.public_key,
-                private_key_bytes,
-            )?;
-            hex::encode(encrypted_data)
-        };
-
-        // Create session data with public key and encrypt it using typed struct
-        let session_data = KeygenParticipantSessionData::new_with_public_key(
-            self.coordinator_user_id.clone(),
-            self.coordinator_public_key.serialize().to_vec(),
-        );
-        let encrypted_session_data =
-            keymeld_sdk::validation::encrypt_structured_data_with_session_key(
-                &session_data,
-                &session_secret,
-                "keygen_participant_session",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
-
-        // Derive session-specific auth pubkey for authorization
-        let coordinator_private_key_bytes = self.coordinator_derived_private_key.secret_bytes();
-        let (_, auth_pubkey) = SecureCrypto::derive_session_auth_keypair(
-            &coordinator_private_key_bytes,
-            &keygen_session_id.to_string(),
+        self.submit_delegated_registration(
+            keygen_session_id,
+            &self.coordinator_user_id,
+            &self.coordinator_derived_private_key.secret_bytes(),
+            true,
+            slots,
         )
-        .map_err(|e| anyhow!("Failed to derive session auth keypair: {e}"))?;
-
-        let request = RegisterKeygenParticipantRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            user_id: self.coordinator_user_id.clone(),
-            encrypted_private_key,
-            public_key: self.coordinator_public_key.serialize().to_vec(),
-            encrypted_session_data,
-            enclave_public_key: enclave_public_key_response.public_key.clone(),
-            enclave_key_epoch: enclave_public_key_response.key_epoch,
-            require_signing_approval: true,
-            auth_pubkey: auth_pubkey.serialize().to_vec(),
-        };
-
-        let session_signature = self.generate_session_signature(keygen_session_id)?;
-
-        let response = self
-            .client
-            .post(format!(
-                "{}/api/v1/keygen/{}/participants",
-                self.config.gateway_url, keygen_session_id
-            ))
-            .header("X-Session-Signature", session_signature)
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-            return Err(anyhow!(
-                "Failed to register coordinator (HTTP {}): {}",
-                status,
-                error_text
-            ));
-        }
-
-        info!("✅ Coordinator registered successfully");
-        Ok(())
+        .await
     }
 
     async fn register_keygen_participant_with_retry(
@@ -1723,119 +1332,112 @@ impl KeyMeldE2ETest {
         participant_index: usize,
         slots: &GetAvailableSlotsResponse,
     ) -> Result<()> {
-        let participant = &self.participants[participant_index];
+        self.submit_delegated_registration(
+            keygen_session_id,
+            &self.participant_user_ids[participant_index],
+            &self.participants[participant_index]
+                .derived_private_key
+                .secret_bytes(),
+            self.participants_requiring_approval
+                .contains(&participant_index),
+            slots,
+        )
+        .await
+    }
 
-        let session_secret = self
-            .session_secrets
-            .get(keygen_session_id)
-            .ok_or(anyhow!(
-                "Session secret not found for keygen session: {keygen_session_id}"
-            ))?
-            .clone();
-
-        // Get participant's assigned slot by matching user_id
-        let participant_user_id = &self.participant_user_ids[participant_index];
-        let participant_slot = slots
+    async fn submit_delegated_registration(
+        &self,
+        session_id: &SessionId,
+        user_id: &UserId,
+        private_key: &[u8; 32],
+        require_signing_approval: bool,
+        slots: &GetAvailableSlotsResponse,
+    ) -> Result<()> {
+        let user_slot = slots
             .available_slots
             .iter()
-            .find(|slot| &slot.user_id == participant_user_id)
-            .ok_or(anyhow!(
-                "No available slot for participant {participant_user_id}"
-            ))?;
-
-        // Get the assigned enclave's public key
-        let enclave_public_key_response: EnclavePublicKeyResponse = self
-            .client
-            .get(format!(
-                "{}/api/v1/enclaves/{}/public-key",
-                self.config.gateway_url,
-                participant_slot.enclave_id.as_u32()
-            ))
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        // Encrypt the participant private key with ECIES using assigned enclave public key
-        let encrypted_private_key = {
-            let private_key_bytes = &participant.derived_private_key.as_ref()[..32];
-
-            let encrypted_data = SecureCrypto::ecies_encrypt_from_hex(
-                &enclave_public_key_response.public_key,
-                private_key_bytes,
-            )?;
-            hex::encode(encrypted_data)
+            .find(|slot| &slot.user_id == user_id)
+            .ok_or_else(|| anyhow!("Missing slot for {}", user_id))?;
+        let enclave: EnclavePublicKeyResponse =
+            crate::client_builder(&self.config.gateway_url, user_id.clone())?
+                .build()?
+                .health()
+                .get_enclave_key(user_slot.enclave_id.as_u32())
+                .await?;
+        let credentials = UserCredentials::from_private_key(private_key)?;
+        let manifest = self
+            .authorization_manifests
+            .get(session_id)
+            .ok_or_else(|| anyhow!("Missing pinned session manifest"))?;
+        let context = RegistrationContext {
+            keygen_session_id: session_id.clone(),
+            manifest_hash: manifest.digest()?,
+            user_id: user_id.clone(),
+            enclave_id: user_slot.enclave_id,
+            enclave_key_epoch: enclave.key_epoch,
+            public_key: credentials.public_key_bytes(),
+            auth_pubkey: credentials.derive_session_auth_pubkey(&session_id.to_string())?,
+            require_signing_approval,
         };
-
-        // Create session data with public key and encrypt it using typed struct
+        let encrypted_private_key =
+            credentials.prepare_registration(context.clone(), &enclave.public_key)?;
+        let slot_authority = self
+            .registration_authorities
+            .get(session_id)
+            .and_then(|authorities| authorities.get(user_id))
+            .ok_or_else(|| anyhow!("Missing registration authority for {}", user_id))?;
+        let registration_authorization = RegistrationAuthorization::sign(
+            &slot_authority.export_secret(),
+            context.clone(),
+            &encrypted_private_key,
+        )?;
+        let session_secret = self
+            .session_secrets
+            .get(session_id)
+            .ok_or_else(|| anyhow!("Missing session secret"))?;
         let session_data = KeygenParticipantSessionData::new_with_public_key(
-            self.participant_user_ids[participant_index].clone(),
-            participant.public_key.serialize().to_vec(),
+            user_id.clone(),
+            context.public_key.clone(),
         );
         let encrypted_session_data =
             keymeld_sdk::validation::encrypt_structured_data_with_session_key(
                 &session_data,
-                &session_secret,
+                session_secret,
                 "keygen_participant_session",
-            )
-            .map_err(|e| anyhow!("Failed to encrypt session data: {e}"))?;
-
-        // Derive session-specific auth pubkey for authorization
-        let participant_private_key_bytes = participant.derived_private_key.secret_bytes();
-        let (_, auth_pubkey) = SecureCrypto::derive_session_auth_keypair(
-            &participant_private_key_bytes,
-            &keygen_session_id.to_string(),
-        )
-        .map_err(|e| anyhow!("Failed to derive session auth keypair: {e}"))?;
-
-        // Check if this participant requires approval
-        let require_signing_approval = self
-            .participants_requiring_approval
-            .contains(&participant_index);
-
+            )?;
         let request = RegisterKeygenParticipantRequest {
-            keygen_session_id: keygen_session_id.clone(),
-            user_id: participant_user_id.clone(),
+            registration_authorization,
+            keygen_session_id: session_id.clone(),
+            user_id: user_id.clone(),
             encrypted_private_key,
-            public_key: participant.public_key.serialize().to_vec(),
+            public_key: context.public_key,
             encrypted_session_data,
-            enclave_public_key: enclave_public_key_response.public_key.clone(),
-            enclave_key_epoch: enclave_public_key_response.key_epoch,
+            enclave_public_key: enclave.public_key,
+            enclave_key_epoch: enclave.key_epoch,
             require_signing_approval,
-            auth_pubkey: auth_pubkey.serialize().to_vec(),
+            auth_pubkey: context.auth_pubkey,
         };
-
-        let session_signature = self.generate_session_signature(keygen_session_id)?;
-
         let response = self
             .client
             .post(format!(
                 "{}/api/v1/keygen/{}/participants",
-                self.config.gateway_url, keygen_session_id
+                self.config.gateway_url, session_id
             ))
-            .header("X-Session-Signature", session_signature)
+            .header(
+                "X-Session-Signature",
+                self.generate_session_signature(session_id)?,
+            )
             .json(&request)
             .send()
             .await?;
-
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
             return Err(anyhow!(
-                "Failed to register participant {} (HTTP {}): {}",
-                self.participant_user_ids[participant_index],
-                status,
-                error_text
+                "Participant {} registration failed ({}): {}",
+                user_id,
+                response.status(),
+                response.text().await?
             ));
         }
-
-        info!(
-            "✅ Participant {} registered",
-            self.participant_user_ids[participant_index]
-        );
         Ok(())
     }
 
@@ -1973,7 +1575,23 @@ impl KeyMeldE2ETest {
             subset_id: None, // Use full n-of-n aggregate key
         };
 
+        let owner = self
+            .signing_authorities
+            .get(keygen_session_id)
+            .ok_or_else(|| anyhow!("Missing signing authority"))?;
+        let signing_authorization = SigningAuthorization::sign(
+            &owner.export_secret(),
+            keygen_session_id,
+            &signing_session_id,
+            1800,
+            &[batch_item.to_enclave_batch_item()],
+        )?;
+        self.expected_signing_batches.insert(
+            signing_session_id.clone(),
+            vec![BatchSigningItem::new(sighash).with_id(batch_item.batch_item_id)],
+        );
         let request = CreateSigningSessionRequest {
+            signing_authorization,
             signing_session_id: signing_session_id.clone(),
             keygen_session_id: keygen_session_id.clone(),
             timeout_secs: 1800,
@@ -2170,28 +1788,18 @@ impl KeyMeldE2ETest {
             "Session private key not found for session: {session_id}"
         ))?;
 
-        // Generate a random nonce
-        let mut nonce_bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut nonce_bytes);
-        let nonce = hex::encode(nonce_bytes);
-
-        // Create the message to sign: session_id:nonce
-        let message = format!("{session_id}:{nonce}");
-        let message_hash = sha256::Hash::hash(message.as_bytes());
-        let message_secp = Message::from_digest(message_hash.to_byte_array());
-
-        // Convert secp256k1::SecretKey to bitcoin::secp256k1::SecretKey using raw bytes
-        let private_key_bytes = &private_key.as_ref()[..32];
-        let bitcoin_private_key = bitcoin::secp256k1::SecretKey::from_slice(private_key_bytes)
-            .map_err(|e| anyhow!("Failed to convert private key: {e}"))?;
-
-        // Sign the message with the session private key
-        let secp = Secp256k1::new();
-        let signature = secp.sign_ecdsa(&message_secp, &bitcoin_private_key);
-        let signature_hex = hex::encode(signature.serialize_compact());
-
-        // Return in format "nonce:signature"
-        Ok(format!("{nonce}:{signature_hex}"))
+        let mut nonce = [0u8; 16];
+        rand::rng().fill_bytes(&mut nonce);
+        let private_key = secp256k1::SecretKey::from_byte_array(private_key.secret_bytes())?;
+        Ok(keymeld_sdk::request_auth::RequestAuth::sign(
+            keymeld_sdk::request_auth::AuthKind::Session,
+            &session_id.to_string(),
+            "",
+            &private_key,
+            keymeld_sdk::request_auth::now_timestamp_secs()?,
+            nonce,
+        )
+        .to_header())
     }
 
     pub async fn approve_signing_session(
@@ -2201,72 +1809,41 @@ impl KeyMeldE2ETest {
         private_key: &SecretKey,
         keygen_session_id: &SessionId,
     ) -> Result<()> {
-        info!(
-            "📝 Starting approval process for signing session {} and user: {}",
-            signing_session_id, user_id
-        );
-
-        const MAX_RETRIES: u32 = 10;
-        const INITIAL_DELAY_MS: u64 = 500;
-
-        let user_signature = self.generate_user_signature(
-            signing_session_id,
-            user_id,
-            private_key,
-            keygen_session_id,
-        )?;
-
-        let mut retry_count = 0;
-        loop {
-            let response = self
-                .client
-                .post(format!(
-                    "{}/api/v1/signing/{}/approve/{}",
-                    self.config.gateway_url, signing_session_id, user_id
-                ))
-                .header("X-User-Signature", user_signature.clone())
-                .send()
-                .await?;
-
-            if response.status().is_success() {
-                info!(
-                    "✅ Signing session {} successfully approved for user: {}",
-                    signing_session_id, user_id
-                );
-                return Ok(());
-            }
-
-            // Handle 404 - signing session not ready yet
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                if retry_count >= MAX_RETRIES {
-                    return Err(anyhow!(
-                        "Signing session {} still not ready after {} retries",
-                        signing_session_id,
-                        MAX_RETRIES
-                    ));
-                }
-
-                let delay_ms = INITIAL_DELAY_MS * (2_u64.pow((retry_count).min(4))); // Cap at 2^4 = 16x multiplier
-                info!(
-                    "⏳ Signing session {} not ready for approval - session initialization still in progress (attempt {}/{}), retrying in {}ms",
-                    signing_session_id,
-                    retry_count + 1,
-                    MAX_RETRIES,
-                    delay_ms
-                );
-
-                retry_count += 1;
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                continue;
-            }
-
-            // Other errors - fail immediately
-            return Err(anyhow!(
-                "Failed to approve signing session for {}: {}",
-                user_id,
-                response.text().await?
-            ));
-        }
+        let client = crate::client_builder(&self.config.gateway_url, user_id.clone())?
+            .credentials(UserCredentials::from_private_key(
+                &private_key.secret_bytes(),
+            )?)
+            .build()?;
+        let secret: [u8; 32] = hex::decode(
+            self.session_secrets
+                .get(keygen_session_id)
+                .ok_or_else(|| anyhow!("Missing session secret"))?,
+        )?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid session secret length"))?;
+        let manifest = self
+            .authorization_manifests
+            .get(keygen_session_id)
+            .ok_or_else(|| anyhow!("Missing pinned authorization manifest"))?
+            .clone();
+        let keygen = client
+            .keygen()
+            .restore_session(
+                keygen_session_id.clone(),
+                keymeld_sdk::SessionCredentials::from_session_secret(&secret)?,
+                manifest,
+            )
+            .await?;
+        let mut signing = client
+            .signer()
+            .restore_session(signing_session_id.clone(), &keygen)
+            .await?;
+        let expected = self
+            .expected_signing_batches
+            .get(signing_session_id)
+            .ok_or_else(|| anyhow!("Missing independently prepared signing batch"))?;
+        signing.approve(expected).await?;
+        Ok(())
     }
 
     /// Derive a shared private key from the session secret for authentication
@@ -2316,27 +1893,13 @@ impl KeyMeldE2ETest {
         private_key: &SecretKey,
         keygen_session_id: &SessionId,
     ) -> Result<String> {
-        // Generate a random nonce
-        let mut nonce_bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut nonce_bytes);
-
-        // Use session auth key for signing
-        let private_key_bytes = private_key.secret_bytes();
-        let signature = SecureCrypto::sign_auth_message_with_session_key(
-            &private_key_bytes,
-            &keygen_session_id.to_string(),
-            &signing_session_id.to_string(),
-            &user_id.to_string(),
-            &nonce_bytes,
+        Ok(
+            UserCredentials::from_private_key(&private_key.secret_bytes())?.sign_for_session(
+                &signing_session_id.to_string(),
+                &user_id.to_string(),
+                &keygen_session_id.to_string(),
+            )?,
         )
-        .map_err(|e| anyhow!("Failed to sign auth message: {e}"))?;
-
-        // Return in format "nonce:signature"
-        Ok(format!(
-            "{}:{}",
-            hex::encode(nonce_bytes),
-            hex::encode(signature)
-        ))
     }
 
     // =========================================================================
@@ -2362,41 +1925,7 @@ impl KeyMeldE2ETest {
     /// Returns the session ID. The keygen session must be obtained separately via
     /// `get_keygen_session_sdk` to work around borrow checker limitations.
     pub async fn create_keygen_session_sdk(&mut self) -> Result<SessionId> {
-        info!("🔑 Creating keygen session using SDK...");
-
-        // Build participant list before borrowing
-        let all_participants = {
-            let mut participants = vec![self.coordinator_user_id.clone()];
-            participants.extend(self.participant_user_ids.clone());
-            participants
-        };
-
-        let options = KeygenOptions::default()
-            .timeout(3600)
-            .max_signings(10)
-            .tweak(self.taproot_tweak.clone())
-            .require_approval();
-
-        let coordinator_client = self
-            .sdk_coordinator_client
-            .as_ref()
-            .ok_or_else(|| anyhow!("SDK coordinator client not initialized"))?;
-
-        let session = coordinator_client
-            .keygen()
-            .create_session(all_participants, options)
-            .await
-            .map_err(|e| anyhow!("Failed to create keygen session: {e}"))?;
-
-        let session_id = session.session_id().clone();
-        info!("✅ Keygen session created: {}", session_id);
-
-        // Store session secret for compatibility with existing code
-        let seed = session.export_session_secret();
-        self.session_secrets
-            .insert(session_id.clone(), hex::encode(seed));
-
-        Ok(session_id)
+        self.create_keygen_session().await
     }
 
     /// Run a complete keygen flow using the SDK
@@ -2409,89 +1938,24 @@ impl KeyMeldE2ETest {
     ///
     /// Returns the session ID and the decrypted aggregate public key (hex).
     pub async fn run_keygen_sdk(&mut self) -> Result<(SessionId, String)> {
-        info!("🔑 Running complete keygen flow using SDK...");
-
-        // Build participant list
-        let all_participants = {
-            let mut participants = vec![self.coordinator_user_id.clone()];
-            participants.extend(self.participant_user_ids.clone());
-            participants
-        };
-
-        let options = KeygenOptions::default()
-            .timeout(3600)
-            .max_signings(10)
-            .tweak(self.taproot_tweak.clone())
-            .require_approval();
-
-        // Wait for all enclaves to be healthy
         self.wait_for_all_enclaves_healthy().await?;
-
-        let coordinator_client = self
-            .sdk_coordinator_client
-            .as_ref()
-            .ok_or_else(|| anyhow!("SDK coordinator client not initialized"))?;
-
-        // Create session
-        let mut keygen_session = coordinator_client
+        let session_id = self.create_keygen_session().await?;
+        self.register_keygen_participants(&session_id).await?;
+        let secret: [u8; 32] = hex::decode(&self.session_secrets[&session_id])?
+            .try_into()
+            .map_err(|_| anyhow!("Invalid session secret"))?;
+        let mut session = self
+            .sdk_coordinator()?
             .keygen()
-            .create_session(all_participants, options)
-            .await
-            .map_err(|e| anyhow!("Failed to create keygen session: {e}"))?;
-
-        let session_id = keygen_session.session_id().clone();
-        info!("✅ Keygen session created: {}", session_id);
-
-        // Store session secret
-        let seed = keygen_session.export_session_secret();
-        self.session_secrets
-            .insert(session_id.clone(), hex::encode(seed));
-
-        // Register coordinator
-        info!("👤 Registering coordinator...");
-        keygen_session
-            .register_self(RegisterOptions::default().require_approval())
-            .await
-            .map_err(|e| anyhow!("Failed to register coordinator: {e}"))?;
-        info!("✅ Coordinator registered");
-
-        // Register participants
-        for (idx, client) in self.sdk_participant_clients.iter().enumerate() {
-            info!("👤 Registering participant {}...", idx);
-
-            let requires_approval = self.participants_requiring_approval.contains(&idx);
-
-            let join_opts = if requires_approval {
-                JoinOptions::default().require_approval()
-            } else {
-                JoinOptions::default()
-            };
-
-            let _participant_session = client
-                .keygen()
-                .join_session(session_id.clone(), &seed, join_opts)
-                .await
-                .map_err(|e| anyhow!("Failed to register participant {}: {e}", idx))?;
-
-            info!("✅ Participant {} registered", idx);
-        }
-
-        // Wait for completion
-        info!("⏳ Waiting for keygen completion...");
-        let _aggregate_key = keygen_session
-            .wait_for_completion()
-            .await
-            .map_err(|e| anyhow!("Keygen failed: {e}"))?;
-
-        // Decrypt aggregate key
-        let aggregate_key_bytes = keygen_session
-            .decrypt_aggregate_key()
-            .map_err(|e| anyhow!("Failed to decrypt aggregate key: {e}"))?;
-
-        let aggregate_key_hex = hex::encode(&aggregate_key_bytes);
-        info!("✅ Keygen complete, aggregate key: {}", aggregate_key_hex);
-
-        Ok((session_id, aggregate_key_hex))
+            .restore_session_with_authority(
+                session_id.clone(),
+                keymeld_sdk::SessionCredentials::from_session_secret(&secret)?,
+                self.authorization_manifests[&session_id].clone(),
+                self.signing_authorities[&session_id].clone(),
+            )
+            .await?;
+        session.wait_for_completion().await?;
+        Ok((session_id, hex::encode(session.decrypt_aggregate_key()?)))
     }
 
     /// Run a complete signing flow using the SDK
@@ -2535,16 +1999,23 @@ impl KeyMeldE2ETest {
             .map_err(|e| anyhow!("Failed to restore session credentials: {e}"))?;
         let keygen_session = coordinator_client
             .keygen()
-            .restore_session(keygen_session_id.clone(), keygen_credentials)
+            .restore_session_with_authority(
+                keygen_session_id.clone(),
+                keygen_credentials,
+                self.authorization_manifests[keygen_session_id].clone(),
+                self.signing_authorities[keygen_session_id].clone(),
+            )
             .await
             .map_err(|e| anyhow!("Failed to restore keygen session: {e}"))?;
 
+        // Build the reviewed batch from the locally computed transaction sighash.
+        let expected_batch = vec![BatchSigningItem::new(message_hash)];
         // Create signing session
         let mut signing_session = coordinator_client
             .signer()
-            .sign(
+            .sign_batch(
                 &keygen_session,
-                message_hash,
+                expected_batch.clone(),
                 SigningOptions::default().timeout(1800),
             )
             .await
@@ -2556,7 +2027,7 @@ impl KeyMeldE2ETest {
         // Coordinator approves
         info!("👤 Coordinator approving...");
         signing_session
-            .approve()
+            .approve(&expected_batch)
             .await
             .map_err(|e| anyhow!("Coordinator approval failed: {e}"))?;
         info!("✅ Coordinator approved");
@@ -2574,7 +2045,11 @@ impl KeyMeldE2ETest {
                         .map_err(|e| anyhow!("Failed to restore session credentials: {e}"))?;
                 let participant_keygen = client
                     .keygen()
-                    .restore_session(keygen_session_id.clone(), participant_keygen_credentials)
+                    .restore_session(
+                        keygen_session_id.clone(),
+                        participant_keygen_credentials,
+                        self.authorization_manifests[keygen_session_id].clone(),
+                    )
                     .await
                     .map_err(|e| {
                         anyhow!(
@@ -2596,7 +2071,7 @@ impl KeyMeldE2ETest {
                     })?;
 
                 participant_signing
-                    .approve()
+                    .approve(&expected_batch)
                     .await
                     .map_err(|e| anyhow!("Participant {} approval failed: {e}", idx))?;
 

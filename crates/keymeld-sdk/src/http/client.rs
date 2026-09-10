@@ -105,6 +105,20 @@ impl HttpClient {
         self.handle_response(response).await
     }
 
+    pub async fn post_json_no_response<Req: Serialize>(
+        &self,
+        url: &str,
+        body: &Req,
+        headers: &[(&str, &str)],
+    ) -> Result<(), SdkError> {
+        let mut request = self.client.post(url).json(body);
+        for (key, value) in headers {
+            request = request.header(*key, *value);
+        }
+        let response = request.send().await?;
+        self.handle_empty_response(response).await
+    }
+
     pub async fn post_no_response(
         &self,
         url: &str,
@@ -118,6 +132,10 @@ impl HttpClient {
         }
 
         let response = request.send().await?;
+        self.handle_empty_response(response).await
+    }
+
+    async fn handle_empty_response(&self, response: reqwest::Response) -> Result<(), SdkError> {
         let status = response.status();
 
         if status.is_success() {

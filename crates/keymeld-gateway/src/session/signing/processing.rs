@@ -162,6 +162,8 @@ impl Advanceable<SigningSessionStatus> for SigningInitializingSession {
 
         // Step 1: Initialize signing session and collect nonces
         let init_params = SigningSessionInitParams {
+            signing_authorization: self.signing_authorization.clone(),
+            approval_signatures: self.approval_signatures.clone(),
             keygen_session_id: self.keygen_session_id.clone(),
             signing_session_id: self.signing_session_id.clone(),
             batch_items: self.batch_items.clone(),

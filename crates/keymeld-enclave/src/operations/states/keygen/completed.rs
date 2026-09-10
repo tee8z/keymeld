@@ -116,7 +116,15 @@ impl TryFrom<Completed> for Initialized {
         for user_id in users_in_session {
             if let Some(user_session) = completed.musig_processor.get_user_session_data(&user_id) {
                 if let Some(private_key) = user_session.private_key {
-                    user_private_keys.insert(user_id, private_key);
+                    user_private_keys.insert(
+                        user_id,
+                        (
+                            private_key,
+                            user_session.coordinator,
+                            user_session.auth_pubkey,
+                            user_session.require_signing_approval,
+                        ),
+                    );
                 }
             }
         }
@@ -140,7 +148,9 @@ impl TryFrom<Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (user_id, private_key) in user_private_keys {
+        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval)) in
+            user_private_keys
+        {
             let signer_index = session_metadata
                 .expected_participants
                 .iter()
@@ -148,7 +158,14 @@ impl TryFrom<Completed> for Initialized {
                 .unwrap_or(0);
 
             musig_processor
-                .store_user_private_key(&user_id, private_key, signer_index, false, None, false)
+                .store_user_private_key(
+                    &user_id,
+                    private_key,
+                    signer_index,
+                    coordinator,
+                    auth_pubkey,
+                    require_signing_approval,
+                )
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
                         "Failed to store user private key: {}",
@@ -193,7 +210,15 @@ impl TryFrom<&Completed> for Initialized {
         for user_id in users_in_session {
             if let Some(user_session) = completed.musig_processor.get_user_session_data(&user_id) {
                 if let Some(private_key) = user_session.private_key {
-                    user_private_keys.insert(user_id, private_key);
+                    user_private_keys.insert(
+                        user_id,
+                        (
+                            private_key,
+                            user_session.coordinator,
+                            user_session.auth_pubkey,
+                            user_session.require_signing_approval,
+                        ),
+                    );
                 }
             }
         }
@@ -217,7 +242,9 @@ impl TryFrom<&Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (user_id, private_key) in user_private_keys {
+        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval)) in
+            user_private_keys
+        {
             let signer_index = session_metadata
                 .expected_participants
                 .iter()
@@ -225,7 +252,14 @@ impl TryFrom<&Completed> for Initialized {
                 .unwrap_or(0);
 
             musig_processor
-                .store_user_private_key(&user_id, private_key, signer_index, false, None, false)
+                .store_user_private_key(
+                    &user_id,
+                    private_key,
+                    signer_index,
+                    coordinator,
+                    auth_pubkey,
+                    require_signing_approval,
+                )
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
                         "Failed to store user private key: {}",

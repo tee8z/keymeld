@@ -14,12 +14,16 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // Encrypted aggregate public key as hex-encoded binary format
 pub type AggregatePublicKey = String;
 
+pub mod attestation;
+pub mod authorization;
 pub mod crypto;
+pub mod enclave_channel;
 pub mod identifiers;
 pub mod logging;
 #[cfg(feature = "networking")]
 pub mod managed_socket;
 pub mod protocol;
+pub mod request_auth;
 pub mod validation;
 
 #[derive(Error, Debug)]
@@ -58,6 +62,8 @@ pub enum KeyMeldError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationDocument {
+    /// Original NSM COSE_Sign1 bytes. Parsed fields are display data, not evidence.
+    pub raw_document: Vec<u8>,
     pub pcrs: BTreeMap<String, Vec<u8>>,
     pub timestamp: u64,
     pub certificate: Vec<u8>,
@@ -68,7 +74,8 @@ pub struct AttestationDocument {
 
 impl Zeroize for AttestationDocument {
     fn zeroize(&mut self) {
-        for (_, pcr_value) in self.pcrs.iter_mut() {
+        self.raw_document.zeroize();
+        for pcr_value in self.pcrs.values_mut() {
             pcr_value.zeroize();
         }
         self.pcrs.clear();
