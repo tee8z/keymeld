@@ -192,6 +192,10 @@ keymeld/
 - [musig2 crate](https://github.com/conduition/musig2)
 - [AWS Nitro Enclaves](https://aws.amazon.com/ec2/nitro/nitro-enclaves/)
 
+## Security
+
+For vulnerability reports, see our [security policy](SECURITY.md).
+
 ## License
 
 MIT
