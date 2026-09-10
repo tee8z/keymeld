@@ -3,402 +3,233 @@ name: Release
 on:
   pull_request:
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run (build only, no release)"
-        required: false
-        default: true
-        type: boolean
   push:
     tags:
       - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # Extract version from tag
   prepare-release:
-    name: Prepare Release
+    name: Validate Release Source
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
-      version_name: ${{ steps.get_version.outputs.version_name }}
-      dry_run: ${{ steps.get_version.outputs.dry_run }}
-    steps:
-      - name: Get version from tag
-        id: get_version
-        run: |
-          # Determine if this is a dry run
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            DRY_RUN=true
-            VERSION="0.0.0-pr${{ github.event.pull_request.number }}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            DRY_RUN=${{ inputs.dry_run }}
-            VERSION="0.0.0-dev"
-          else
-            DRY_RUN=false
-            # Extract version from tag (v1.2.3 -> 1.2.3)
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "version_name=v$VERSION" >> $GITHUB_OUTPUT
-          echo "dry_run=$DRY_RUN" >> $GITHUB_OUTPUT
-          echo "Release version: $VERSION (dry_run: $DRY_RUN)"
-
-  # Update version in Cargo.toml files
-  update-versions:
-    name: Update Crate Versions
-    runs-on: ubuntu-latest
-    needs: prepare-release
-    if: needs.prepare-release.outputs.dry_run == 'false'
+      version: ${{ steps.source.outputs.version }}
+      tag: ${{ steps.source.outputs.tag }}
+      sha: ${{ steps.source.outputs.sha }}
+      dry_run: ${{ steps.source.outputs.dry_run }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-edit
-        run: cargo install cargo-edit --locked
-
-      - name: Update versions
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate committed versions and tag
+        id: source
+        shell: bash
         run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          echo "Updating all crates to version $VERSION"
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 --locked | jq -er '
+            . as $metadata |
+            [.packages[] | select(.id as $id | $metadata.workspace_members | index($id)) | .version] |
+            unique | if length == 1 then .[0] else error("Workspace package versions differ") end
+          ')
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          test -s "docs/releases/$VERSION.md"
+          PRERELEASE=false
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE=true; fi
+          SOURCE_SHA=$(git rev-parse HEAD)
+          DRY_RUN=true
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$VERSION" ]]
+            [[ "$(git rev-parse "$GITHUB_REF^{commit}")" == "$SOURCE_SHA" ]]
+            DRY_RUN=false
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "sha=$SOURCE_SHA"
+            echo "dry_run=$DRY_RUN"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "Source commit: $SOURCE_SHA"
+            echo "Workspace version: $VERSION"
+            echo "Dry run: $DRY_RUN"
+            echo "Prerelease: $PRERELEASE"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Update workspace Cargo.toml
-          cargo set-version --workspace $VERSION
-
-          # Verify the changes
-          echo "Updated versions:"
-          grep "^version" Cargo.toml
-          grep "^version" crates/*/Cargo.toml
-
-      - name: Commit version updates
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
-          git commit -m "chore: bump version to ${{ needs.prepare-release.outputs.version }}" || echo "No changes to commit"
-          git push origin HEAD:master || echo "No changes to push"
-
-  # Build release binaries
-  build-release:
-    name: Build Release
+  test:
+    name: Test Release Commit
+    needs: prepare-release
     runs-on: ubuntu-latest
-    needs: [prepare-release, update-versions]
-    if: always() && needs.prepare-release.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+
+  authorization-e2e:
+    name: Test Authorization End to End
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-gha-cache: false
+          use-flakehub: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-authorization
+      - name: Run real gateway and enclave authorization regressions
+        run: nix develop -c bash examples/run-authorization-e2e.sh
+      - name: Retain authorization failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authorization-e2e-logs
+          path: /tmp/keymeld-authorization-e2e.*/
+          retention-days: 7
+
+  build-release:
+    name: Build Binaries (${{ matrix.target }})
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            cross: false
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            cross: true
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: master
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation tools
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libssl-dev
-
-      - name: Install OpenSSL for cross-compilation
-        if: matrix.cross
-        run: |
-          # Download and build OpenSSL for aarch64
-          OPENSSL_VERSION="3.0.16"
-          curl -LO "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
-          tar xzf "openssl-${OPENSSL_VERSION}.tar.gz"
-          cd "openssl-${OPENSSL_VERSION}"
-
-          # Configure for aarch64 cross-compilation
-          ./Configure linux-aarch64 \
-            --prefix=/usr/local/openssl-aarch64 \
-            --cross-compile-prefix=aarch64-linux-gnu- \
-            no-shared \
-            no-async
-
-          make -j$(nproc)
-          sudo make install_sw
-
-      - name: Configure cross-compilation
-        if: matrix.cross
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << EOF
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
-          # Set environment variables for OpenSSL cross-compilation
-          echo "OPENSSL_DIR=/usr/local/openssl-aarch64" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target/
-          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-${{ matrix.target }}-
-
+          key: release-${{ matrix.target }}
       - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --workspace --target "$TARGET"
+      - name: Package binaries and source identity
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          SOURCE_SHA: ${{ needs.prepare-release.outputs.sha }}
+          TARGET: ${{ matrix.target }}
         run: |
-          cargo build --release --locked --workspace --target ${{ matrix.target }}
-
-      - name: Package binaries
-        run: |
-          mkdir -p release
-          cd target/${{ matrix.target }}/release
-
-          # Package gateway
-          if [ -f keymeld-gateway ]; then
-            tar czf ../../../release/keymeld-gateway-${{ needs.prepare-release.outputs.version }}-${{ matrix.target }}.tar.gz keymeld-gateway
-          fi
-
-          # Package enclave
-          if [ -f keymeld-enclave ]; then
-            tar czf ../../../release/keymeld-enclave-${{ needs.prepare-release.outputs.version }}-${{ matrix.target }}.tar.gz keymeld-enclave
-          fi
-
-          cd ../../..
-          ls -lh release/
-
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          mkdir release
+          for BINARY in keymeld-gateway keymeld-enclave; do
+            tar czf "release/$BINARY-$VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" "$BINARY"
+          done
+          printf '%s\n' "$SOURCE_SHA" > "release/SOURCE-$TARGET.txt"
+      - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.target }}
-          path: release/*.tar.gz
+          name: binaries-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
           retention-days: 7
 
-  # Create GitHub release
-  create-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: [prepare-release, build-release]
-    if: needs.prepare-release.outputs.dry_run == 'false'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          name: Release ${{ needs.prepare-release.outputs.version_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            artifacts/**/*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Publish to crates.io (optional - uncomment when ready)
-  # publish-crates:
-  #   name: Publish to crates.io
-  #   runs-on: ubuntu-latest
-  #   needs: [prepare-release, build-release]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         ref: master
-  #
-  #     - name: Install Rust
-  #       uses: dtolnay/rust-toolchain@stable
-  #
-  #     - name: Publish crates
-  #       run: |
-  #         # Publish in dependency order
-  #         cargo publish -p keymeld-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-  #         sleep 10  # Wait for crates.io to update
-  #         cargo publish -p keymeld-sdk --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-  #         sleep 10
-  #         cargo publish -p keymeld-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-  #         sleep 10
-  #         cargo publish -p keymeld-gateway --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  # Verify WASM SDK builds
-  # Note: keymeld-sdk is a library crate, so cargo build produces .rlib files, not .wasm binaries.
-  # This job verifies WASM compilation works. For distributable WASM bindings, the crate would
-  # need to be configured as a cdylib with wasm-bindgen exports.
   build-wasm-sdk:
     name: Build WASM SDK
+    needs: prepare-release
     runs-on: ubuntu-latest
-    needs: [prepare-release, update-versions]
-    if: always() && needs.prepare-release.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: master
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          target: wasm32-unknown-unknown
-          cache: true
-
-      - name: Build WASM SDK (release)
-        run: |
-          cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client --locked
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-wasm
+      - name: Verify WASM library compilation
+        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client --locked
         env:
-          # Workaround for secp256k1-sys WASM build with clang 16+
-          # The wasm-sysroot in secp256k1-sys is missing memmove declaration in string.h
-          # Newer clang versions treat implicit function declarations as errors
           CFLAGS_wasm32_unknown_unknown: "-Wno-error=implicit-function-declaration"
 
-  # Build and push Docker images to GHCR (amd64)
-  build-docker-amd64:
-    name: Build Docker Image (amd64)
-    runs-on: ubuntu-latest
-    needs: [prepare-release, update-versions]
-    if: always() && needs.prepare-release.result == 'success'
-    permissions:
-      contents: read
-      packages: write
+  build-docker:
+    name: Build Image (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
+        image: [gateway, enclave]
         include:
-          - image: gateway
-            nix_output: docker-gateway
-          - image: enclave
-            nix_output: docker-enclave
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free up disk space
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - name: Free build space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
           use-gha-cache: false
           use-flakehub: false
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push x86_64 image
+      - name: Build image archive without registry credentials
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          nix build .#${{ matrix.nix_output }} --print-build-logs
-          docker load < result
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-amd64
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-amd64
-
-          # Push amd64 images
-          if [ "${{ needs.prepare-release.outputs.dry_run }}" != "true" ]; then
-            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-amd64
-            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-amd64
-          fi
-
-  # Build and push Docker images to GHCR (arm64)
-  build-docker-arm64:
-    name: Build Docker Image (arm64)
-    runs-on: ubuntu-24.04-arm
-    needs: [prepare-release, update-versions]
-    if: always() && needs.prepare-release.result == 'success'
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      matrix:
-        include:
-          - image: gateway
-            nix_output: docker-gateway
-          - image: enclave
-            nix_output: docker-enclave
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+          set -euo pipefail
+          nix build ".#docker-$IMAGE" --print-build-logs --no-update-lock-file
+          cp --dereference result "$RUNNER_TEMP/$IMAGE-$ARCH.tar.gz"
+      - uses: actions/upload-artifact@v4
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          name: docker-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/${{ matrix.image }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push ARM64 image
-        run: |
-          nix build .#${{ matrix.nix_output }} --print-build-logs
-          docker load < result
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-arm64
-          docker tag keymeld-${{ matrix.image }}:latest ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-arm64
-
-          # Push arm64 images
-          if [ "${{ needs.prepare-release.outputs.dry_run }}" != "true" ]; then
-            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:${{ needs.prepare-release.outputs.version }}-arm64
-            docker push ghcr.io/${REPO_LOWER}/${{ matrix.image }}:latest-arm64
-          fi
-
-  # Create and push multi-arch Docker manifests
-  create-docker-manifest:
-    name: Create Docker Manifest
+  publish-images:
+    name: Publish Image (${{ matrix.image }})
+    needs: [prepare-release, test, authorization-e2e, build-release, build-wasm-sdk, build-docker]
+    if: needs.prepare-release.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
-    needs: [prepare-release, build-docker-amd64, build-docker-arm64]
-    if: needs.prepare-release.outputs.dry_run != 'true'
     permissions:
       contents: read
       packages: write
@@ -406,29 +237,88 @@ jobs:
       matrix:
         image: [gateway, enclave]
     steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: docker-${{ matrix.image }}-*
+          path: images
+          merge-multiple: true
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create and push multi-arch manifest
+      - uses: docker/setup-buildx-action@v3
+      - name: Publish versioned image and manifest
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          IMAGE_NAME: ${{ matrix.image }}
         run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${REPO_LOWER}/${{ matrix.image }}"
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_NAME"
+          for ARCH in amd64 arm64; do
+            docker load < "images/$IMAGE_NAME-$ARCH.tar.gz"
+            docker tag "keymeld-$IMAGE_NAME:latest" "$IMAGE:$VERSION-$ARCH"
+            docker push "$IMAGE:$VERSION-$ARCH"
+          done
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
 
-          # Create and push versioned manifest
-          docker manifest create ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
-          docker manifest push ${IMAGE}:${VERSION}
+  create-release:
+    name: Publish GitHub Release
+    needs: [prepare-release, test, authorization-e2e, build-release, build-wasm-sdk, build-docker, publish-images]
+    if: needs.prepare-release.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: release
+          merge-multiple: true
+      - name: Record checksums
+        working-directory: release
+        run: sha256sum ./*.tar.gz > SHA256SUMS
+      - name: Create release for the existing tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+          SOURCE_SHA: ${{ needs.prepare-release.outputs.sha }}
+          PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          FLAGS=(--latest)
+          if [[ "$PRERELEASE" == true ]]; then FLAGS=(--prerelease --latest=false); fi
+          gh release create "$RELEASE_TAG" release/* --verify-tag \
+            --target "$SOURCE_SHA" --title "KeyMeld $RELEASE_TAG" \
+            --notes-file "docs/releases/$VERSION.md" "${FLAGS[@]}"
 
-          # Create and push latest manifest
-          docker manifest create ${IMAGE}:latest \
-            ${IMAGE}:latest-amd64 \
-            ${IMAGE}:latest-arm64
-          docker manifest push ${IMAGE}:latest
-
-          echo "Pushed multi-arch image: ${IMAGE}:${VERSION}"
+  publish-latest:
+    name: Update Latest Image (${{ matrix.image }})
+    needs: [prepare-release, publish-images, create-release]
+    if: needs.prepare-release.outputs.dry_run == 'false' && needs.prepare-release.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        image: [gateway, enclave]
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Point latest at the published version
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_NAME"
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE:$VERSION"

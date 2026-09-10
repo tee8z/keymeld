@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use keymeld_sdk::types::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
+use keymeld_sdk::types::{AdaptorConfig, AdaptorSignatureResult, AdaptorType};
 use musig2::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use musig2::{AdaptorSignature, BinaryEncoding, LiftedSignature};
 use serde::{Deserialize, Serialize};
@@ -45,8 +45,8 @@ impl Default for AdaptorTestConfig {
     fn default() -> Self {
         Self {
             test_single: true,
-            test_and: true,
-            test_or: true,
+            test_and: false,
+            test_or: false,
             skip_regular_signing: false, // Now we can do real adaptation
         }
     }
@@ -55,6 +55,9 @@ impl Default for AdaptorTestConfig {
 pub fn create_test_adaptor_configs(
     config: &AdaptorTestConfig,
 ) -> Result<(Vec<AdaptorConfig>, Vec<AdaptorSecret>)> {
+    if config.test_and || config.test_or {
+        return Err(anyhow!("And and Or adaptor modes are unsupported"));
+    }
     let mut adaptor_configs = Vec::new();
     let mut adaptor_secrets = Vec::new();
 
@@ -65,44 +68,6 @@ pub fn create_test_adaptor_configs(
 
         adaptor_configs.push(AdaptorConfig::single(point_hex));
         adaptor_secrets.push(secret);
-    }
-
-    if config.test_and {
-        info!("🔑 Generating secrets for AND adaptor signature");
-        let secret1 = AdaptorSecret::new();
-        let secret2 = AdaptorSecret::new();
-
-        adaptor_configs.push(AdaptorConfig::and(vec![
-            hex::encode(secret1.point.serialize()),
-            hex::encode(secret2.point.serialize()),
-        ]));
-
-        adaptor_secrets.push(secret1);
-        adaptor_secrets.push(secret2);
-    }
-
-    if config.test_or {
-        info!("🔑 Generating secrets for OR adaptor signature");
-        let secret1 = AdaptorSecret::new();
-        let secret2 = AdaptorSecret::new();
-
-        // Generate hint for OR logic - difference between secrets
-        let hint_scalar = secret1.secret.secret_bytes().to_vec();
-        let hint_point = secret2.point.serialize().to_vec();
-
-        adaptor_configs.push(
-            AdaptorConfig::or(vec![
-                hex::encode(secret1.point.serialize()),
-                hex::encode(secret2.point.serialize()),
-            ])
-            .with_hints(vec![
-                AdaptorHint::Scalar(hint_scalar),
-                AdaptorHint::Point(hint_point),
-            ]),
-        );
-
-        adaptor_secrets.push(secret1);
-        adaptor_secrets.push(secret2);
     }
 
     if adaptor_configs.is_empty() {
@@ -153,21 +118,8 @@ pub fn adapt_signatures_and_get_valid_signature(
                     return Err(anyhow!("No secret available for single adaptor"));
                 }
             }
-            AdaptorType::And => {
-                // For AND, use the first secret for simplicity in this demo
-                if i * 2 < secrets.len() {
-                    secrets[i * 2].secret
-                } else {
-                    return Err(anyhow!("Insufficient secrets for AND adaptor"));
-                }
-            }
-            AdaptorType::Or => {
-                // For OR, use the first available secret
-                if i * 2 < secrets.len() {
-                    secrets[i * 2].secret
-                } else {
-                    return Err(anyhow!("No secret available for OR adaptor"));
-                }
+            AdaptorType::And | AdaptorType::Or => {
+                return Err(anyhow!("And and Or adaptor modes are unsupported"));
             }
         };
 
@@ -197,6 +149,7 @@ pub fn validate_adaptor_signatures(
     configs: &[AdaptorConfig],
     signatures: &BTreeMap<Uuid, AdaptorSignatureResult>,
 ) -> Result<()> {
+    keymeld_sdk::validation::validate_decrypted_adaptor_configs(configs)?;
     info!("Validating adaptor signatures...");
 
     if configs.len() != signatures.len() {
@@ -256,31 +209,6 @@ pub fn validate_adaptor_signatures(
                 "Adaptor points mismatch for ID {}",
                 config.adaptor_id
             ));
-        }
-
-        // Validate hints for Or type
-        if matches!(config.adaptor_type, AdaptorType::Or) {
-            match (&config.hints, &signature.hints) {
-                (Some(config_hints), Some(sig_hints)) => {
-                    if config_hints.len() != sig_hints.len() {
-                        return Err(anyhow!(
-                            "Hints length mismatch for Or adaptor ID {}: config has {}, signature has {}",
-                            config.adaptor_id,
-                            config_hints.len(),
-                            sig_hints.len()
-                        ));
-                    }
-                }
-                (None, Some(_)) | (Some(_), None) => {
-                    return Err(anyhow!(
-                        "Hints presence mismatch for Or adaptor ID {}",
-                        config.adaptor_id
-                    ));
-                }
-                (None, None) => {
-                    // Both None is fine for Or type (though unusual)
-                }
-            }
         }
 
         info!(

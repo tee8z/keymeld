@@ -48,6 +48,15 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
             expected_count
         );
 
+        if self
+            .registered_participants
+            .keys()
+            .any(|id| !self.expected_participants.contains(id))
+        {
+            return Err(KeyMeldError::ValidationError(
+                "Unexpected participant in keygen roster".to_string(),
+            ));
+        }
         if registered_count < expected_count {
             info!(
                 "Keygen session {} still collecting participants: {}/{} - No delay (simplified for debugging)",
@@ -69,13 +78,7 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
 
         let user_ids: Vec<_> = self.expected_participants.to_vec();
 
-        // Find the coordinator user_id from registered participants
-        // The coordinator is the one assigned to coordinator_enclave_id
-        let coordinator_user_id = self.registered_participants.keys().next().ok_or_else(|| {
-            KeyMeldError::EnclaveError(
-                "No registered participants found to determine coordinator".to_string(),
-            )
-        })?;
+        let coordinator_user_id = &self.authorization_manifest.manifest.coordinator_user_id;
 
         enclave_manager
             .create_session_assignment_with_coordinator(
@@ -97,6 +100,8 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
         let keygen_result = enclave_manager
             .orchestrate_keygen_session_initialization(
                 &self.keygen_session_id,
+                &self.authorization_manifest,
+                &self.recipient_authorization,
                 &self.coordinator_enclave_id,
                 &self.coordinator_encrypted_private_key,
                 &self.encrypted_session_secret,
@@ -127,6 +132,7 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
                 keygen_result.participant_encrypted_public_keys,
                 keygen_result.enclave_encrypted_session_secrets,
                 keygen_result.encrypted_subset_aggregates,
+                keygen_result.encrypted_roster,
             ),
         ))
     }

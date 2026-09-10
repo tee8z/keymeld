@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod distribution;
 pub mod manager;
 

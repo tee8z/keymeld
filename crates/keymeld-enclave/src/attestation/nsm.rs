@@ -180,6 +180,7 @@ impl NsmClient {
         let public_key = self.extract_public_key(&attestation_data);
 
         Ok(AttestationDocument {
+            raw_document: document.to_vec(),
             pcrs,
             timestamp,
             certificate,
@@ -394,14 +395,7 @@ impl KeyMeldAttestation {
             enclave_public_key,
         )?;
 
-        let raw_document = nsm_client.get_attestation_document(
-            Some(user_data),
-            Some(&nonce),
-            enclave_public_key,
-        )?;
-
-        let raw_bytes = serde_cbor::to_vec(&raw_document)
-            .map_err(|e| NsmError::SerializationFailed(e.to_string()))?;
+        let raw_bytes = document.raw_document.clone();
 
         Ok(Self {
             document: raw_bytes,
@@ -411,9 +405,12 @@ impl KeyMeldAttestation {
         })
     }
 
-    pub fn is_valid(&self, max_age_seconds: u64) -> bool {
+    /// Local cache freshness only. This does not verify the signed document.
+    pub fn is_recent(&self, max_age_seconds: u64) -> bool {
         let current_time = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        (current_time - self.generated_at) <= max_age_seconds
+        current_time
+            .checked_sub(self.generated_at)
+            .is_some_and(|age| age <= max_age_seconds)
     }
 
     pub fn session_id(&self) -> &str {
@@ -461,6 +458,7 @@ mod tests {
         pcrs.insert("PCR1".to_string(), vec![0x02; 48]);
 
         let doc = AttestationDocument {
+            raw_document: vec![],
             pcrs,
             timestamp: 1234567890,
             certificate: vec![0x03; 64],
@@ -480,6 +478,7 @@ mod tests {
         pcrs.insert("PCR0".to_string(), vec![0x01; 48]);
 
         let doc = AttestationDocument {
+            raw_document: vec![],
             pcrs,
             timestamp: 1234567890,
             certificate: vec![0x03; 64],
@@ -495,7 +494,7 @@ mod tests {
             generated_at: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         };
 
-        assert!(attestation.is_valid(3600)); // Valid for 1 hour
+        assert!(attestation.is_recent(3600));
         assert_eq!(attestation.session_id(), "test-session");
     }
 }

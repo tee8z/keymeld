@@ -100,6 +100,21 @@ pub struct SingleSignerE2ETest {
 }
 
 impl SingleSignerE2ETest {
+    async fn verified_enclave_public_key(&self) -> Result<String> {
+        let enclave_id = self
+            .enclave_id
+            .ok_or_else(|| anyhow!("No assigned enclave"))?;
+        let response = crate::client_builder(&self.config.gateway_url, self.user_id.clone())?
+            .build()?
+            .health()
+            .get_enclave_key(enclave_id)
+            .await?;
+        if self.enclave_public_key.as_ref() != Some(&response.public_key) {
+            return Err(anyhow!("Assigned enclave key changed"));
+        }
+        Ok(response.public_key)
+    }
+
     pub async fn new(config: ExampleConfig) -> Result<Self> {
         info!("Initializing Single-Signer E2E Test");
         info!("Gateway: {}", config.gateway_url);
@@ -212,12 +227,16 @@ impl SingleSignerE2ETest {
         info!("Step 1: Reserving key slot...");
 
         let request = ReserveKeySlotRequest {
+            key_id: KeyId::new_v7(),
             user_id: self.user_id.clone(),
+            auth_pubkey: self.auth_public_key_bytes.clone(),
         };
+        let auth_signature = self.generate_auth_signature(&request.auth_scope()?)?;
 
         let response = self
             .client
             .post(format!("{}/api/v1/keys/reserve", self.config.gateway_url))
+            .header("X-User-Signature", auth_signature)
             .json(&request)
             .send()
             .await?;
@@ -258,14 +277,12 @@ impl SingleSignerE2ETest {
             .key_id
             .clone()
             .ok_or(anyhow!("No key_id - call reserve_key_slot first"))?;
-        let enclave_public_key = self.enclave_public_key.as_ref().ok_or(anyhow!(
-            "No enclave_public_key - call reserve_key_slot first"
-        ))?;
+        let enclave_public_key = self.verified_enclave_public_key().await?;
 
         // Encrypt the private key to the enclave's public key
         let private_key_bytes = self.private_key.secret_bytes();
         let encrypted_private_key =
-            SecureCrypto::ecies_encrypt_from_hex(enclave_public_key, &private_key_bytes)
+            SecureCrypto::ecies_encrypt_from_hex(&enclave_public_key, &private_key_bytes)
                 .map_err(|e| anyhow!("Failed to encrypt private key: {}", e))?;
 
         let request = ImportUserKeyRequest {
@@ -277,7 +294,7 @@ impl SingleSignerE2ETest {
         };
 
         // Generate signature proving ownership of the auth keypair
-        let auth_signature = self.generate_auth_signature(&key_id.to_string())?;
+        let auth_signature = self.generate_auth_signature(&request.auth_scope()?)?;
 
         let response = self
             .client
@@ -596,10 +613,7 @@ impl SingleSignerE2ETest {
             .key_id
             .clone()
             .ok_or(anyhow!("No key_id - import key first"))?;
-        let enclave_public_key = self
-            .enclave_public_key
-            .as_ref()
-            .ok_or(anyhow!("No enclave_public_key"))?;
+        let enclave_public_key = self.verified_enclave_public_key().await?;
 
         // Generate a session secret for this signing request
         let session_seed = SecureCrypto::generate_session_seed()
@@ -622,7 +636,7 @@ impl SingleSignerE2ETest {
 
         // Encrypt the session secret to the enclave's public key
         let encrypted_session_secret =
-            SecureCrypto::ecies_encrypt_from_hex(enclave_public_key, &session_seed)
+            SecureCrypto::ecies_encrypt_from_hex(&enclave_public_key, &session_seed)
                 .map_err(|e| anyhow!("Failed to encrypt session secret: {}", e))?;
 
         // Generate approval signature: Sign(auth_privkey, SHA256(encrypted_message || key_id || timestamp))
@@ -655,7 +669,7 @@ impl SingleSignerE2ETest {
         };
 
         // Add approval signature header
-        let auth_signature = self.generate_auth_signature(&key_id.to_string())?;
+        let auth_signature = self.generate_auth_signature(&request.auth_scope()?)?;
 
         let response = self
             .client
@@ -1073,7 +1087,9 @@ impl SingleSignerE2ETest {
             .clone()
             .ok_or(anyhow!("No key_id - import key first"))?;
 
-        let auth_signature = self.generate_auth_signature(&key_id.to_string())?;
+        let auth_signature = self.generate_auth_signature(
+            &keymeld_sdk::request_auth::delete_key_scope(&key_id.to_string()),
+        )?;
 
         let response = self
             .client
@@ -1102,38 +1118,20 @@ impl SingleSignerE2ETest {
         Ok(delete_response)
     }
 
-    /// Generate auth signature for a request
-    /// Format: nonce_hex:signature_hex
-    /// Message: SHA256(scope_id || user_id || nonce)
+    /// Generate a versioned, expiring authentication proof for an operation scope.
     fn generate_auth_signature(&self, scope_id: &str) -> Result<String> {
-        // Generate random nonce
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
-
-        // Sign: SHA256(scope_id || user_id || nonce)
-        let mut hasher = Sha256::new();
-        hasher.update(scope_id.as_bytes());
-        hasher.update(self.user_id.to_string().as_bytes());
-        hasher.update(nonce);
-        let hash = hasher.finalize();
-
-        let hash_array: [u8; 32] = hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow!("Hash is not 32 bytes"))?;
-
-        let secp = Secp256k1::signing_only();
-        let message = Message::from_digest(hash_array);
-        let auth_secret_key = SecretKey::from_slice(&self.auth_private_key_bytes)
-            .map_err(|e| anyhow!("Failed to parse auth private key: {}", e))?;
-        let signature = secp.sign_ecdsa(&message, &auth_secret_key);
-
-        // Return: nonce_hex:signature_hex
-        Ok(format!(
-            "{}:{}",
-            hex::encode(nonce),
-            hex::encode(signature.serialize_compact())
-        ))
+        let private_key = secp256k1::SecretKey::from_byte_array(self.auth_private_key_bytes)?;
+        Ok(keymeld_sdk::request_auth::RequestAuth::sign(
+            keymeld_sdk::request_auth::AuthKind::User,
+            scope_id,
+            &self.user_id.to_string(),
+            &private_key,
+            keymeld_sdk::request_auth::now_timestamp_secs()?,
+            nonce,
+        )
+        .to_header())
     }
 }
 

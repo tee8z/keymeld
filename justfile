@@ -211,7 +211,7 @@ start: build-dev
 
     echo "✅ Services started! Logs available in logs/ directory"
     echo "🌐 Gateway: http://localhost:8090"
-    echo "📊 Health: http://localhost:8090/health"
+    echo "📊 Health: http://localhost:8090/api/v1/health"
     echo "🔗 VSock Proxies: localhost:9000-9002 → Enclaves 0-2"
 
 # Stop all services
@@ -290,9 +290,9 @@ status:
         echo "❌ KeyMeld Enclaves: None running"
     fi
     echo ""
-    if command -v curl >/dev/null && curl -s http://localhost:8090/health >/dev/null 2>&1; then
+    if command -v curl >/dev/null && curl --max-time 2 -fsS http://localhost:8090/api/v1/health >/dev/null 2>&1; then
         echo "🌐 Gateway Health Check: ✅ Healthy"
-        curl -s http://localhost:8090/health | head -5
+        curl --max-time 2 -fsS http://localhost:8090/api/v1/health | head -5
     else
         echo "🌐 Gateway Health Check: ❌ Unhealthy or not running"
     fi
@@ -546,6 +546,12 @@ test-ui-e2e:
     # Clean first
     ./scripts/clean.sh
 
+    # The admin UI is disabled until an operator credential is configured.
+    test_operator_token_file=$(mktemp)
+    trap 'rm -f "$test_operator_token_file"' EXIT
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$test_operator_token_file"
+    export KEYMELD_OPERATOR_TOKEN_FILE="$test_operator_token_file"
+
     # Run everything in a single nix develop session
     if [ -n "${IN_NIX_SHELL:-}" ]; then
         if [ -z "${SKIP_BUILD:-}" ] || [ ! -f target/debug/keymeld-gateway ] || [ ! -f target/debug/keymeld-enclave ]; then
@@ -559,7 +565,7 @@ test-ui-e2e:
         ./scripts/start-services.sh
         echo "⏳ Waiting for gateway to be ready..."
         for i in {1..30}; do
-            if curl -s http://localhost:8090/api/v1/health > /dev/null 2>&1; then
+            if curl --max-time 2 -fsS http://localhost:8090/api/v1/health > /dev/null 2>&1; then
                 echo "✅ Gateway ready"
                 break
             fi
@@ -586,7 +592,7 @@ test-ui-e2e:
             ./scripts/start-services.sh
             echo "⏳ Waiting for gateway to be ready..."
             for i in {1..30}; do
-                if curl -s http://localhost:8090/api/v1/health > /dev/null 2>&1; then
+                if curl --max-time 2 -fsS http://localhost:8090/api/v1/health > /dev/null 2>&1; then
                     echo "✅ Gateway ready"
                     break
                 fi
@@ -639,7 +645,7 @@ run:
     echo ""
     echo "🎉 KeyMeld is running in the background!"
     echo "   Gateway: http://localhost:8090"
-    echo "   Health:  http://localhost:8090/health"
+    echo "   Health:  http://localhost:8090/api/v1/health"
     echo "   Logs:    logs/"
     echo ""
     echo "Run 'just down' to stop all services."

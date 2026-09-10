@@ -4,6 +4,7 @@ use crate::{
     session::types::ParticipantData,
     AggregatePublicKey, KeyMeldError,
 };
+use keymeld_core::authorization::{ParticipantApproval, SigningAuthorization};
 use keymeld_core::protocol::SigningStatusKind;
 use keymeld_sdk::{BatchItemResult, SigningBatchItem};
 use serde::{Deserialize, Serialize};
@@ -14,9 +15,20 @@ use utoipa::ToSchema;
 
 pub mod processing;
 
+pub fn enclave_batch_items(
+    items: &[SigningBatchItem],
+) -> Vec<keymeld_core::protocol::EnclaveBatchItem> {
+    items
+        .iter()
+        .map(SigningBatchItem::to_enclave_batch_item)
+        .collect()
+}
+
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningCollectingParticipants {
+    pub signing_authorization: SigningAuthorization,
+    pub approval_signatures: Vec<ParticipantApproval>,
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     /// Batch items to sign (single message = batch of 1)
@@ -37,6 +49,8 @@ pub struct SigningCollectingParticipants {
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SigningInitializingSession {
+    pub signing_authorization: SigningAuthorization,
+    pub approval_signatures: Vec<ParticipantApproval>,
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     /// Batch items to sign (single message = batch of 1)
@@ -56,6 +70,8 @@ pub struct SigningInitializingSession {
 impl From<SigningCollectingParticipants> for SigningInitializingSession {
     fn from(collecting: SigningCollectingParticipants) -> Self {
         Self {
+            signing_authorization: collecting.signing_authorization,
+            approval_signatures: collecting.approval_signatures,
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
             batch_items: collecting.batch_items,
@@ -78,6 +94,8 @@ impl SigningInitializingSession {
         aggregate_public_key: AggregatePublicKey,
     ) -> Self {
         Self {
+            signing_authorization: collecting.signing_authorization,
+            approval_signatures: collecting.approval_signatures,
             signing_session_id: collecting.signing_session_id,
             keygen_session_id: collecting.keygen_session_id,
             batch_items: collecting.batch_items,
@@ -186,6 +204,8 @@ impl SigningFinalizingSignature {
 pub struct SigningCompleted {
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
+    /// Preserve the authorized request so clients can verify completed responses.
+    pub batch_items: Vec<SigningBatchItem>,
     pub expected_participants: Vec<UserId>,
     pub registered_participants: BTreeMap<UserId, ParticipantData>,
     pub aggregate_public_key: Option<AggregatePublicKey>,
@@ -205,6 +225,7 @@ impl SigningCompleted {
         Self {
             signing_session_id: finalizing.signing_session_id,
             keygen_session_id: finalizing.keygen_session_id,
+            batch_items: finalizing.batch_items,
             expected_participants: finalizing.expected_participants,
             registered_participants: finalizing.registered_participants,
             aggregate_public_key: finalizing.aggregate_public_key,
@@ -258,7 +279,8 @@ impl SigningSessionStatus {
             SigningSessionStatus::InitializingSession(ref status) => Some(&status.batch_items),
             SigningSessionStatus::DistributingNonces(ref status) => Some(&status.batch_items),
             SigningSessionStatus::FinalizingSignature(ref status) => Some(&status.batch_items),
-            SigningSessionStatus::Completed(_) | SigningSessionStatus::Failed(_) => None,
+            SigningSessionStatus::Completed(ref status) => Some(&status.batch_items),
+            SigningSessionStatus::Failed(_) => None,
         }
     }
 

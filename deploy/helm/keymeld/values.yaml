@@ -11,7 +11,7 @@ blueGreen:
   activeSlot: blue    # Which slot the Service routes traffic to
 
 image:
-  repository: ghcr.io/tee8z/keymeld
+  repository: ghcr.io/tee8z/keymeld/gateway
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -47,12 +47,12 @@ podSecurityContext: {}
 securityContext: {}
 
 healthCheck:
-  path: /health
+  path: /api/v1/health
   port: 8080
 
 livenessProbe:
   httpGet:
-    path: /health
+    path: /api/v1/health
     port: http
   initialDelaySeconds: 30
   periodSeconds: 30
@@ -61,7 +61,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /api/v1/health
     port: http
   initialDelaySeconds: 10
   periodSeconds: 10
@@ -101,7 +101,7 @@ enclave:
   enabled: false
   simulation: false
   image:
-    repository: ghcr.io/tee8z/keymeld-enclave
+    repository: ghcr.io/tee8z/keymeld/enclave
     tag: ""
     pullPolicy: IfNotPresent
   resources:
@@ -163,6 +163,15 @@ config:
     allowInsecureConnections: false
     requireTls: false
   development: null
+
+# Generate a unique gateway channel credential outside Helm. Store only its secret
+# hex in the named Kubernetes Secret under gateway-signing-key. Never commit it.
+channel:
+  existingSecret: ""
+  gatewayPublicKey: ""
+  pcr0: ""
+  pcr8: ""
+  dangerousTrustUnattestedEnclaves: false
 
 env: {}
 envFrom: []

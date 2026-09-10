@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                        kp.user_id as \"user_id!: UserId\",\n                        kp.user_key_id as \"user_key_id!\",\n                        uk.enclave_id as \"enclave_id!: EnclaveId\",\n                        uk.enclave_key_epoch as \"enclave_key_epoch!: u64\",\n                        kp.require_signing_approval as \"require_signing_approval!: bool\",\n                        uk.auth_pubkey as \"auth_pubkey!\",\n                        kp.session_encrypted_data,\n                        hex(uk.encrypted_private_key) as \"enclave_encrypted_data!: String\"\n                     FROM keygen_participants kp\n                     JOIN user_keys uk ON kp.user_key_id = uk.id\n                     WHERE kp.keygen_session_id = $1\n                     ORDER BY kp.registered_at ASC",
+  "query": "SELECT\n                kp.user_id as \"user_id!: UserId\",\n                kp.user_key_id as \"user_key_id!\",\n                uk.enclave_id as \"enclave_id!: EnclaveId\",\n                uk.enclave_key_epoch as \"enclave_key_epoch!: u64\",\n                kp.require_signing_approval as \"require_signing_approval!: bool\",\n                uk.auth_pubkey as \"auth_pubkey!\",\n                kp.session_encrypted_data,\n                kp.registration_authorization as \"registration_authorization!\",\n                hex(uk.encrypted_private_key) as \"enclave_encrypted_data!: String\"\n             FROM keygen_participants kp\n             JOIN user_keys uk ON kp.user_key_id = uk.id\n             WHERE kp.keygen_session_id = $1\n             ORDER BY kp.registered_at ASC",
   "describe": {
     "columns": [
       {
@@ -39,8 +39,13 @@
         "type_info": "Text"
       },
       {
-        "name": "enclave_encrypted_data!: String",
+        "name": "registration_authorization!",
         "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "enclave_encrypted_data!: String",
+        "ordinal": 8,
         "type_info": "Null"
       }
     ],
@@ -55,8 +60,9 @@
       false,
       false,
       true,
+      false,
       null
     ]
   },
-  "hash": "1f484410b89c50f401242cacebfdd10ad2f899cb9bc1a191bf03a1017fa653e7"
+  "hash": "ce06e92cabe84ef98fac65bf1e0d69d8baf3e4dc7cb25fcdaf98e67caf94f280"
 }

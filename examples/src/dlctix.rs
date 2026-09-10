@@ -282,7 +282,12 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         .map_err(|e| anyhow!("Failed to restore session credentials: {e}"))?;
     let keygen_session = coordinator_client
         .keygen()
-        .restore_session(keygen_session_id.clone(), keygen_credentials)
+        .restore_session_with_authority(
+            keygen_session_id.clone(),
+            keygen_credentials,
+            test.authorization_manifests[&keygen_session_id].clone(),
+            test.signing_authorities[&keygen_session_id].clone(),
+        )
         .await
         .map_err(|e| anyhow!("Failed to restore keygen session: {e}"))?;
 
@@ -316,7 +321,7 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     // Coordinator approves using SDK
     info!("Submitting signing approvals via SDK...");
     signing_session
-        .approve()
+        .approve(&dlc_batch.items)
         .await
         .map_err(|e| anyhow!("Coordinator approval failed: {e}"))?;
     info!("  Coordinator approved");
@@ -333,7 +338,11 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
                 .map_err(|e| anyhow!("Failed to restore session credentials: {e}"))?;
             let participant_keygen = participant_client
                 .keygen()
-                .restore_session(keygen_session_id.clone(), participant_keygen_credentials)
+                .restore_session(
+                    keygen_session_id.clone(),
+                    participant_keygen_credentials,
+                    test.authorization_manifests[&keygen_session_id].clone(),
+                )
                 .await
                 .map_err(|e| {
                     anyhow!(
@@ -355,7 +364,7 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
                 })?;
 
             participant_signing
-                .approve()
+                .approve(&dlc_batch.items)
                 .await
                 .map_err(|e| anyhow!("Participant {} approval failed: {e}", idx))?;
 

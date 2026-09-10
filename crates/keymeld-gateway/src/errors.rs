@@ -16,6 +16,8 @@ pub enum ApiError {
     Database(#[from] sqlx::Error),
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
     #[error("Not found: {0}")]
@@ -39,6 +41,10 @@ impl ApiError {
         Self::BadRequest(msg.into())
     }
 
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
     }
@@ -58,6 +64,7 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::KeyMeld(e) => match e {
@@ -77,6 +84,7 @@ impl ApiError {
             ApiError::KeyMeld(_) => "keymeld_error",
             ApiError::Database(_) => "database_error",
             ApiError::BadRequest(_) => "bad_request",
+            ApiError::Conflict(_) => "conflict",
             ApiError::Unauthorized(_) => "unauthorized",
             ApiError::NotFound(_) => "not_found",
             ApiError::Configuration(_) => "configuration_error",
@@ -99,6 +107,7 @@ impl ApiError {
     pub fn client_message(&self) -> String {
         match self {
             ApiError::BadRequest(msg) => msg.clone(),
+            ApiError::Conflict(msg) => msg.clone(),
             ApiError::Unauthorized(msg) => msg.clone(),
             ApiError::NotFound(msg) => msg.clone(),
 

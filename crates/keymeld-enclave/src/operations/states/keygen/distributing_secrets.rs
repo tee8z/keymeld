@@ -1,8 +1,12 @@
 use crate::musig::MusigProcessor;
 use keymeld_core::{
+    authorization::RegistrationAuthorization,
     crypto::SecureCrypto,
     identifiers::{SessionId, UserId},
-    protocol::{CryptoError, EnclaveError, EncryptedParticipantPublicKey, SessionError},
+    protocol::{
+        CryptoError, EnclaveError, EncryptedParticipantPublicKey, ParticipantRegistrationData,
+        SessionError, ValidationError,
+    },
     KeyMaterial, SessionSecret,
 };
 use musig2::secp256k1::{PublicKey, SecretKey};
@@ -145,18 +149,12 @@ impl DistributingSecrets {
             );
 
             let encrypted_public_keys = updated_state.add_participant_and_generate_keys_for_user(
-                &participant.user_id,
-                &participant.enclave_encrypted_data,
+                participant,
                 keygen_ctx,
                 enclave_ctx,
-                Some(participant.auth_pubkey.clone()),
-                participant.require_signing_approval,
             )?;
 
-            if !encrypted_public_keys.is_empty() {
-                all_encrypted_public_keys
-                    .push((participant.user_id.clone(), encrypted_public_keys));
-            }
+            all_encrypted_public_keys.push((participant.user_id.clone(), encrypted_public_keys));
             processed_user_ids.push(participant.user_id.clone());
 
             // Check coordinator data
@@ -208,7 +206,7 @@ impl DistributingSecrets {
     pub fn distribute_keys(
         mut self,
         distribute_batch_cmd: &keymeld_core::protocol::DistributeParticipantPublicKeysBatchCommand,
-        _keygen_ctx: &mut KeygenSessionContext,
+        keygen_ctx: &mut KeygenSessionContext,
         enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
     ) -> Result<KeygenStatus, EnclaveError> {
         info!(
@@ -224,40 +222,54 @@ impl DistributingSecrets {
                 user_id, self.session_id
             );
 
-            let decrypted_public_key_bytes = {
+            let decrypted = {
                 let enclave = enclave_ctx.read().unwrap();
-                enclave.decrypt_with_ecies(encrypted_public_key, "participant public key")?
+                enclave
+                    .decrypt_with_ecies(encrypted_public_key, "participant registration receipt")?
             };
-
-            let public_key = PublicKey::from_slice(&decrypted_public_key_bytes).map_err(|e| {
-                EnclaveError::Crypto(CryptoError::Other(format!("Invalid public key: {e}")))
-            })?;
-
-            // Check if participant already exists (idempotency for retries)
-            let session_meta = self.musig_processor.get_session_metadata_public();
-            let participant_already_exists =
-                session_meta.participant_public_keys.contains_key(user_id);
-
-            if !participant_already_exists {
-                self.musig_processor
-                    .add_participant(user_id.clone(), public_key)
-                    .map_err(|e| {
-                        EnclaveError::Session(SessionError::MusigInitialization(format!(
-                            "Failed to add participant {}: {e}",
-                            user_id
-                        )))
-                    })?;
-
-                info!(
-                    "Added participant {} public key to musig processor in session {}",
-                    user_id, self.session_id
-                );
-            } else {
-                info!(
-                            "Participant {} already exists in session {}, skipping addition (idempotent retry)",
-                            user_id, self.session_id
-                        );
+            let registration: RegistrationAuthorization = serde_json::from_slice(&decrypted)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            let metadata = self.musig_processor.get_session_metadata_public();
+            let manifest = metadata
+                .authorization_manifest
+                .as_ref()
+                .ok_or_else(|| invalid_registration("Missing session authorization manifest"))?;
+            registration
+                .verify_commitment(manifest)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            if registration.context.user_id != *user_id
+                || registration.context.keygen_session_id != self.session_id
+                || !metadata.expected_participants.contains(user_id)
+                || keygen_ctx
+                    .recipient_authorization
+                    .as_ref()
+                    .and_then(|authorization| authorization.user_enclave_assignments.get(user_id))
+                    != Some(&registration.context.enclave_id)
+            {
+                return Err(invalid_registration(
+                    "Distributed registration does not match participant slot",
+                ));
             }
+            if let Some(existing) = metadata.registrations.get(user_id) {
+                if serde_json::to_vec(existing).map_err(|e| invalid_registration(e.to_string()))?
+                    != serde_json::to_vec(&registration)
+                        .map_err(|e| invalid_registration(e.to_string()))?
+                {
+                    return Err(invalid_registration(
+                        "Conflicting participant registration receipt",
+                    ));
+                }
+                continue;
+            }
+            let public_key = PublicKey::from_slice(&registration.context.public_key)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            self.musig_processor
+                .add_participant(user_id.clone(), public_key)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            self.musig_processor
+                .session_metadata
+                .registrations
+                .insert(user_id.clone(), registration);
         }
 
         info!(
@@ -300,7 +312,7 @@ impl DistributingSecrets {
         let participant_count = session_meta.participant_public_keys.len();
 
         let expected_count = self.get_expected_participant_count().unwrap_or(0);
-        participant_count >= expected_count
+        participant_count == expected_count && session_meta.registrations.len() == expected_count
     }
 
     pub fn create_key_aggregation_context(&mut self) -> Result<(), EnclaveError> {
@@ -331,242 +343,235 @@ impl DistributingSecrets {
         Ok(())
     }
 
-    /// Helper method to process a single participant's data
+    /// Import one participant only after verifying its invitation and key proof.
     pub fn add_participant_and_generate_keys_for_user(
         &mut self,
-        user_id: &UserId,
-        enclave_encrypted_data: &str,
-        keygen_ctx: &KeygenSessionContext,
+        participant: &ParticipantRegistrationData,
+        keygen_ctx: &mut KeygenSessionContext,
         enclave_ctx: &Arc<RwLock<EnclaveSharedContext>>,
-        auth_pubkey: Option<Vec<u8>>,
-        require_signing_approval: bool,
     ) -> Result<Vec<EncryptedParticipantPublicKey>, EnclaveError> {
-        debug!(
-            "Processing AddParticipant for user {} - enclave_encrypted_data length: {}",
-            user_id,
-            enclave_encrypted_data.len()
-        );
-
-        // Process enclave_encrypted_data if present (contains private key for this enclave)
-        let public_key = if !enclave_encrypted_data.is_empty() {
-            debug!(
-                "Processing enclave_encrypted_data path for user {}",
-                user_id
-            );
-            // Participant with enclave-specific encrypted data - decrypt with enclave private key
-            // The enclave_encrypted_data contains the raw private key bytes directly
-            let private_key_bytes = {
-                let enclave = enclave_ctx.read().unwrap();
-                enclave.decrypt_with_ecies(enclave_encrypted_data, "participant private key")
-            }
-            .map_err(|e| {
-                error!(
-                    "Failed to decrypt enclave_encrypted_data for user {}: {}",
-                    user_id, e
-                );
-                e
-            })?;
-
-            debug!(
-                "Decrypted private key for user {} (length: {} bytes)",
-                user_id,
-                private_key_bytes.len()
-            );
-
-            if private_key_bytes.len() != 32 {
-                return Err(EnclaveError::Crypto(CryptoError::Other(format!(
-                    "Invalid private key length: expected 32 bytes, got {}",
-                    private_key_bytes.len()
-                ))));
-            }
-
-            // Derive public key directly from the decrypted private key bytes
-            debug!(
-                "Deriving public key from decrypted private key for user {}",
-                user_id
-            );
-
-            let secret_key =
-                SecretKey::from_byte_array(private_key_bytes[..32].try_into().map_err(|_| {
-                    EnclaveError::Crypto(CryptoError::Other(
-                        "Failed to convert private key to array".to_string(),
-                    ))
-                })?)
-                .map_err(|e| {
-                    EnclaveError::Crypto(CryptoError::Other(format!("Invalid secret key: {e}")))
-                })?;
-
-            let public_key = secret_key.public_key(&musig2::secp256k1::Secp256k1::new());
-            let public_key_bytes = public_key.serialize().to_vec();
-            let public_key =
-                musig2::secp256k1::PublicKey::from_slice(&public_key_bytes).map_err(|e| {
-                    EnclaveError::Crypto(CryptoError::Other(format!("Invalid public key: {e}")))
-                })?;
-
-            debug!(
-                "Derived public key from private key for participant {} in session {}",
-                user_id, self.session_id
-            );
-
-            // Store the private key in MusigProcessor for later use in signing sessions
-            // Calculate signer index based on where this user will be in the EXPECTED participants list
-            // Use expected_participants which contains ALL participants (sorted in descending order)
-            // NOT get_all_participant_ids() which only returns participants added to THIS enclave
-            let session_meta = self.musig_processor.get_session_metadata_public();
-            let signer_index = session_meta
-                .expected_participants
-                .iter()
-                .position(|id| id == user_id)
-                .unwrap_or(0);
-
-            let private_key = KeyMaterial::new(private_key_bytes.clone());
-
-            // Check if this user is the coordinator
-            let is_coordinator = self
-                .coordinator_data
-                .as_ref()
-                .map(|cd| cd.user_id == *user_id)
-                .unwrap_or(false);
-
-            self.musig_processor
-                .store_user_private_key(
-                    user_id,
-                    private_key,
-                    signer_index,
-                    is_coordinator,
-                    auth_pubkey.clone(),
-                    require_signing_approval,
-                )
-                .map_err(|e| {
-                    EnclaveError::Crypto(CryptoError::Other(format!(
-                        "Failed to store private key: {e}"
-                    )))
-                })?;
-
-            debug!(
-                "Stored private key for user {} in MusigProcessor for session {} with signer_index {}, require_approval={}",
-                user_id, self.session_id, signer_index, require_signing_approval
-            );
-
-            public_key
-        } else {
-            // No enclave_encrypted_data means this enclave cannot decrypt this participant's private key
-            // This is normal - only the enclave assigned to this participant can decrypt their private key
-            debug!(
-                "No enclave_encrypted_data for user {} - this enclave is not responsible for this participant",
-                user_id
-            );
-            return Ok(Vec::new());
-        };
-
-        // Extract public key bytes for encryption
-        let public_key_bytes = public_key.serialize().to_vec();
-
-        // Check if participant already exists before adding
-        let session_meta = self.musig_processor.get_session_metadata_public();
-        let participant_already_exists = session_meta.participant_public_keys.contains_key(user_id);
-
-        if !participant_already_exists {
-            self.musig_processor
-                .add_participant(user_id.clone(), public_key)
-                .map_err(|e| {
-                    EnclaveError::Session(SessionError::MusigInitialization(format!(
-                        "Failed to add participant: {e}"
-                    )))
-                })?;
-        } else {
-            info!(
-                "Participant {} already exists in session {}, skipping addition",
-                user_id, self.session_id
-            );
+        let user_id = &participant.user_id;
+        let registration = &participant.registration_authorization;
+        let metadata = self.musig_processor.get_session_metadata_public();
+        let manifest = metadata
+            .authorization_manifest
+            .as_ref()
+            .ok_or_else(|| invalid_registration("Missing session authorization manifest"))?;
+        if !metadata.expected_participants.contains(user_id)
+            || metadata.registrations.contains_key(user_id)
+            || self.musig_processor.get_private_key(user_id).is_some()
+        {
+            return Err(invalid_registration(
+                "Participant slot is unknown or already registered",
+            ));
         }
-
-        info!(
-            "Added participant {} to musig processor for keygen session {}",
-            user_id, self.session_id
+        let enclave = enclave_ctx.read().unwrap();
+        if keygen_ctx
+            .recipient_authorization
+            .as_ref()
+            .and_then(|authorization| authorization.user_enclave_assignments.get(user_id))
+            != Some(&enclave.enclave_id)
+        {
+            return Err(invalid_registration(
+                "Participant is not authorized for this enclave",
+            ));
+        }
+        let envelope = crate::operations::registration::validate_registration(
+            manifest,
+            participant,
+            &enclave,
+            None,
+        )?;
+        let private_bytes = zeroize::Zeroizing::new(
+            <[u8; 32]>::try_from(envelope.private_key.as_slice())
+                .map_err(|_| invalid_registration("Invalid private key length"))?,
         );
-
+        let (_, derived_auth) =
+            SecureCrypto::derive_session_auth_keypair(&private_bytes, &self.session_id.to_string())
+                .map_err(|e| invalid_registration(e.to_string()))?;
+        if derived_auth.serialize().to_vec() != registration.context.auth_pubkey {
+            return Err(invalid_registration(
+                "Auth public key does not match decrypted participant key",
+            ));
+        }
+        let private_key = SecretKey::from_byte_array(*private_bytes)
+            .map_err(|e| invalid_registration(e.to_string()))?;
+        let public_key = private_key.public_key(&musig2::secp256k1::Secp256k1::new());
+        if public_key.serialize().to_vec() != registration.context.public_key {
+            return Err(invalid_registration(
+                "Public key does not match decrypted participant key",
+            ));
+        }
+        let signer_index = metadata
+            .expected_participants
+            .iter()
+            .position(|id| id == user_id)
+            .ok_or_else(|| invalid_registration("Participant is not expected"))?;
+        let is_coordinator = keygen_ctx.coordinator_user_id.as_ref() == Some(user_id);
+        if is_coordinator != (manifest.manifest.coordinator_user_id == *user_id) {
+            return Err(invalid_registration(
+                "Coordinator registration does not match this enclave's authorized role",
+            ));
+        }
         let mut encrypted_public_keys = Vec::new();
-        debug!(
-            "Starting public key encryption for participant {} - session enclave keys: {}",
-            user_id,
-            keygen_ctx.session_enclave_public_keys.len()
-        );
-
+        let receipt =
+            serde_json::to_vec(registration).map_err(|e| invalid_registration(e.to_string()))?;
         for (target_enclave_id, target_public_key_hex) in &keygen_ctx.session_enclave_public_keys {
-            debug!(
-                "Checking enclave {} for participant {} public key distribution",
-                target_enclave_id, user_id
-            );
-
-            // Get enclave ID from context
-            let enclave_id = {
-                let enclave = enclave_ctx.read().unwrap();
-                enclave.enclave_id
-            };
-
-            // Skip encrypting to our own enclave
-            if *target_enclave_id == enclave_id {
-                debug!(
-                    "Skipping our own enclave {} for participant {} public key distribution",
-                    *target_enclave_id, user_id
-                );
+            if *target_enclave_id == enclave.enclave_id {
                 continue;
             }
-
-            debug!(
-                "Will encrypt participant {} public key for target enclave {}",
-                user_id, target_enclave_id
-            );
-
-            let target_public_key_bytes = match hex::decode(target_public_key_hex) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    warn!(
-                        "Failed to decode public key for enclave {}: {}",
-                        target_enclave_id, e
-                    );
-                    continue;
-                }
-            };
-
-            let target_public_key = match PublicKey::from_slice(&target_public_key_bytes) {
-                Ok(pk) => pk,
-                Err(e) => {
-                    warn!(
-                        "Failed to parse public key for enclave {}: {}",
-                        target_enclave_id, e
-                    );
-                    continue;
-                }
-            };
-
-            match SecureCrypto::ecies_encrypt(&target_public_key, &public_key_bytes) {
-                Ok(encrypted_bytes) => {
-                    encrypted_public_keys.push(EncryptedParticipantPublicKey {
-                        target_enclave_id: *target_enclave_id,
-                        encrypted_public_key: hex::encode(encrypted_bytes),
-                    });
-                    info!(
-                        "Encrypted participant {} public key for enclave {}",
-                        user_id, target_enclave_id
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to encrypt participant {} public key for enclave {}: {}",
-                        user_id, target_enclave_id, e
-                    );
-                }
-            }
+            let target_bytes = hex::decode(target_public_key_hex)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            let target_key = PublicKey::from_slice(&target_bytes)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            let encrypted = SecureCrypto::ecies_encrypt(&target_key, &receipt)
+                .map_err(|e| invalid_registration(e.to_string()))?;
+            encrypted_public_keys.push(EncryptedParticipantPublicKey {
+                target_enclave_id: *target_enclave_id,
+                encrypted_public_key: hex::encode(encrypted),
+            });
         }
-
-        info!(
-            "Generated {} encrypted public keys for participant {} distribution",
-            encrypted_public_keys.len(),
-            user_id
-        );
-
+        self.musig_processor
+            .store_user_private_key(
+                user_id,
+                KeyMaterial::new(envelope.private_key.clone()),
+                signer_index,
+                is_coordinator,
+                Some(derived_auth.serialize().to_vec()),
+                participant.require_signing_approval,
+            )
+            .map_err(|e| invalid_registration(e.to_string()))?;
+        self.musig_processor
+            .add_participant(user_id.clone(), public_key)
+            .map_err(|e| invalid_registration(e.to_string()))?;
+        self.musig_processor
+            .session_metadata
+            .registrations
+            .insert(user_id.clone(), registration.clone());
+        if is_coordinator {
+            let coordinator_data = CoordinatorData {
+                user_id: user_id.clone(),
+                private_key: KeyMaterial::new(envelope.private_key.clone()),
+            };
+            self.coordinator_data = Some(coordinator_data.clone());
+            keygen_ctx.coordinator_data = Some(coordinator_data);
+        }
         Ok(encrypted_public_keys)
+    }
+}
+
+fn invalid_registration(message: impl Into<String>) -> EnclaveError {
+    EnclaveError::Validation(ValidationError::Other(message.into()))
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::operations::{registration::tests::fixture, session_context::SessionContext};
+    use keymeld_core::protocol::{AddParticipantsBatchCommand, InitKeygenSessionCommand};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn validated_slot_cannot_be_registered_twice_or_after_completion() {
+        let f = fixture();
+        let session_id = f.manifest.manifest.keygen_session_id.clone();
+        let user_id = f.participant.user_id.clone();
+        let encrypted_secret = hex::encode(
+            SecureCrypto::ecies_encrypt(
+                &PublicKey::from_slice(&f.enclave.public_key).unwrap(),
+                f.session_secret.as_bytes(),
+            )
+            .unwrap(),
+        );
+        let enclave = Arc::new(RwLock::new(f.enclave));
+        let mut context = match SessionContext::new_keygen(session_id.clone()) {
+            SessionContext::Keygen(context) => context,
+            _ => unreachable!(),
+        };
+        let initialized = super::super::Initialized::new(session_id.clone());
+        let recipient_key = enclave.read().unwrap().public_key.clone();
+        let enclave_id = enclave.read().unwrap().enclave_id;
+        let recipient_authorization =
+            keymeld_core::authorization::EnclaveRecipientAuthorization::sign(
+                &f.manifest,
+                BTreeMap::from([(user_id.clone(), enclave_id)]),
+                BTreeMap::from([(enclave_id, recipient_key.clone())]),
+                &[11; 32],
+            )
+            .unwrap();
+        let command = InitKeygenSessionCommand {
+            recipient_authorization: Box::new(recipient_authorization),
+            keygen_session_id: session_id.clone(),
+            authorization_manifest: Box::new(f.manifest.clone()),
+            coordinator_encrypted_private_key: None,
+            coordinator_user_id: Some(user_id.clone()),
+            encrypted_session_secret: Some(encrypted_secret),
+            timeout_secs: 300,
+            expected_participant_count: 1,
+            expected_participants: vec![user_id.clone()],
+            enclave_public_keys: vec![keymeld_core::protocol::EnclavePublicKeyInfo {
+                enclave_id,
+                public_key: hex::encode(recipient_key),
+            }],
+            encrypted_taproot_tweak: f.manifest.manifest.encrypted_taproot_tweak.clone(),
+            subset_definitions: Vec::new(),
+        };
+        let mut substituted = command.clone();
+        substituted.enclave_public_keys[0].public_key = hex::encode(
+            SecureCrypto::generate_enclave_keypair()
+                .unwrap()
+                .1
+                .serialize(),
+        );
+        assert!(super::super::Initialized::new(session_id.clone())
+            .init_session(&substituted, &mut context, &enclave)
+            .is_err());
+        assert!(context.session_secret.is_none());
+        assert!(context.session_enclave_public_keys.is_empty());
+        let mut state = match initialized
+            .init_session(&command, &mut context, &enclave)
+            .unwrap()
+        {
+            KeygenStatus::Distributing(state) => state,
+            _ => panic!("expected distributing state"),
+        };
+        let p = &f.participant;
+        assert!(state.coordinator_data().is_none());
+        assert!(context.coordinator_data.is_none());
+        let coordinator_user_id = context.coordinator_user_id.take();
+        assert!(state
+            .add_participant_and_generate_keys_for_user(p, &mut context, &enclave)
+            .is_err());
+        context.coordinator_user_id = coordinator_user_id;
+        state
+            .add_participant_and_generate_keys_for_user(p, &mut context, &enclave)
+            .unwrap();
+        assert_eq!(state.coordinator_data().as_ref().unwrap().user_id, user_id);
+        assert_eq!(context.coordinator_data.as_ref().unwrap().user_id, user_id);
+        assert!(state
+            .add_participant_and_generate_keys_for_user(p, &mut context, &enclave)
+            .is_err());
+        state.create_key_aggregation_context().unwrap();
+        let completed: Completed = state.into();
+        let mut session = crate::operations::ContextAwareSession::new(
+            crate::operations::OperatorStatus::Keygen(KeygenStatus::Completed(completed)),
+            SessionContext::Keygen(context),
+            enclave,
+        );
+        let registration = keymeld_core::protocol::EnclaveCommand::Musig(
+            keymeld_core::protocol::MusigCommand::Keygen(
+                keymeld_core::protocol::KeygenCommand::AddParticipantsBatch(
+                    AddParticipantsBatchCommand {
+                        keygen_session_id: session_id,
+                        participants: vec![f.participant],
+                    },
+                ),
+            ),
+        );
+        assert!(session.process(&registration).is_err());
+        assert!(matches!(
+            session.status,
+            crate::operations::OperatorStatus::Keygen(KeygenStatus::Completed(_))
+        ));
     }
 }

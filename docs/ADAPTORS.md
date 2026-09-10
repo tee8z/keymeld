@@ -1,6 +1,8 @@
 # Adaptor Signatures
 
-KeyMeld supports adaptor signatures for atomic swaps, conditional payments, DLCs, and smart contract patterns.
+The proposed `0.4.0` protocol supports single-point adaptor signatures for conditional payments and Discreet Log Contracts (DLCs).
+`And` and `Or` configurations are unsupported and rejected.
+These changes are unreleased. KeyMeld remains experimental and must not be used with real funds.
 
 ## Overview
 
@@ -17,7 +19,10 @@ Use cases:
 ## Adaptor Types
 
 ### Single
-One secret point required.
+
+Each configuration requires exactly one valid compressed secp256k1 point.
+Each configuration's `adaptor_id` must be unique within its batch item.
+An adaptor batch item must contain at least one configuration.
 
 ```json
 {
@@ -26,38 +31,26 @@ One secret point required.
 }
 ```
 
-### And
-Multiple secrets required (all must be known).
+### Unsupported configurations
 
-```json
-{
-  "adaptor_type": "And",
-  "adaptor_points": [
-    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
-    "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34"
-  ]
-}
-```
+The `And` and `Or` enum values remain decodable so unsupported requests can receive explicit errors.
+Validation rejects both types before nonce generation or signing.
+The SDK also rejects them before encrypting a signing request.
 
-### Or
-Alternative secrets (any one works).
+Earlier builds used only the first point while advertising multiple-secret conditions.
+Do not rely on signatures from those builds to enforce an `And` or `Or` policy.
+Changing a configuration's label to `Single` does not preserve its intended multiple-secret condition.
 
-```json
-{
-  "adaptor_type": "Or",
-  "adaptor_points": [
-    "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
-    "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34"
-  ],
-  "hints": ["hint1", "hint2"]
-}
-```
+Optional `Single` hints remain metadata and receive format validation.
+Hints do not add conditions to signature adaptation.
 
 ## API Usage
 
 ### Create Signing Session with Adaptors
 
 Adaptor configurations are specified per batch item, allowing mixed regular and adaptor signatures in a single session.
+The request below illustrates the batch payload.
+Use the SDK to attach the required signing authorization and transport signature described in [authorization](AUTHORIZATION.md).
 
 ```json
 POST /api/v1/signing
@@ -111,8 +104,10 @@ GET /api/v1/signing/{id}/status/{user_id}
 ```
 
 Decrypt adaptor signatures client-side using session secret. Each adaptor result contains:
+
 - `signature_scalar`: The 65-byte serialized adaptor signature
-- `was_negated`: Whether the signature was negated during aggregation
+- `adaptor_points`: The single configured point
+- `aggregate_adaptor_point`: The same point used by signature construction
 
 ## Privacy
 
@@ -123,7 +118,7 @@ Decrypt adaptor signatures client-side using session secret. Each adaptor result
 ## Demo Commands
 
 ```bash
-just demo-adaptors       # Adaptor signatures demo (all types)
+just demo-adaptors       # Single-point adaptor signatures demo
 just test-dlctix-batch   # DLC batch signing with adaptor + subset signing
 ```
 
@@ -135,6 +130,9 @@ The `dlctix_batch` example demonstrates a complete DLC workflow:
 2. **Batch signing**: Sign outcome txs (n-of-n with adaptors) and split txs (2-of-2 subsets) in one session
 3. **Oracle attestation**: Oracle reveals the secret, unlocking the adaptor signature
 4. **Payout**: Broadcast outcome tx, then split tx for winner
+
+`DlcBatchBuilder` converts each oracle outcome's adaptor point into `AdaptorConfig::single()`.
+The coordinator uses this builder, so rejecting `And` and `Or` does not change its current DLC construction.
 
 ```rust
 // Outcome transactions use adaptor signatures locked to oracle attestation

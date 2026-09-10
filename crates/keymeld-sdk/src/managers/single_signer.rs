@@ -12,6 +12,7 @@ use keymeld_core::crypto::SecureCrypto;
 
 #[derive(Debug, Clone)]
 pub struct KeySlotReservation {
+    pub enclave_id: crate::types::EnclaveId,
     pub key_id: KeyId,
     pub enclave_public_key: String,
     pub enclave_key_epoch: u64,
@@ -20,6 +21,7 @@ pub struct KeySlotReservation {
 impl From<ReserveKeySlotResponse> for KeySlotReservation {
     fn from(response: ReserveKeySlotResponse) -> Self {
         Self {
+            enclave_id: response.enclave_id,
             key_id: response.key_id,
             enclave_public_key: response.enclave_public_key,
             enclave_key_epoch: response.enclave_key_epoch,
@@ -90,14 +92,31 @@ pub trait SingleSignerOps {
 
 impl SingleSignerOps for KeyMeldClient {
     async fn reserve_key_slot(&self) -> Result<KeySlotReservation, SdkError> {
+        let credentials = self.credentials().ok_or_else(|| {
+            SdkError::InvalidInput("User credentials required to reserve a key".to_string())
+        })?;
         let request = ReserveKeySlotRequest {
+            key_id: KeyId::new_v7(),
             user_id: self.user_id().clone(),
+            auth_pubkey: credentials.auth_public_key_bytes(),
         };
+        let signature =
+            credentials.sign_user_request(&request.auth_scope()?, &request.user_id.to_string())?;
 
         let response: ReserveKeySlotResponse = self
             .http()
-            .post(&self.url("/api/v1/keys/reserve"), &request, &[])
+            .post(
+                &self.url("/api/v1/keys/reserve"),
+                &request,
+                &[("X-User-Signature", &signature)],
+            )
             .await?;
+
+        if response.key_id != request.key_id || response.user_id != request.user_id {
+            return Err(SdkError::InvalidInput(
+                "Key reservation identity mismatch".to_string(),
+            ));
+        }
 
         Ok(response.into())
     }
@@ -122,15 +141,28 @@ impl SingleSignerOps for KeyMeldClient {
                     .to_string(),
             )
         })?;
+        if private_key != credentials.private_key_bytes() {
+            return Err(SdkError::InvalidInput(
+                "Imported private key must match the credentials that reserved the slot"
+                    .to_string(),
+            ));
+        }
 
         // Encrypt the private key to the enclave's public key
+        let enclave = self
+            .health()
+            .get_enclave_key(reservation.enclave_id.as_u32())
+            .await?;
+        if enclave.public_key != reservation.enclave_public_key
+            || enclave.key_epoch != reservation.enclave_key_epoch
+        {
+            return Err(SdkError::InvalidInput(
+                "Reserved enclave key or epoch changed".into(),
+            ));
+        }
         let encrypted_private_key =
             SecureCrypto::ecies_encrypt_from_hex(&reservation.enclave_public_key, private_key)
                 .map_err(|e| SdkError::Crypto(CryptoError::EncryptionFailed(e.to_string())))?;
-
-        // Generate auth signature
-        let auth_signature = credentials
-            .sign_user_request(&reservation.key_id.to_string(), &self.user_id().to_string())?;
 
         let request = ImportUserKeyRequest {
             key_id: reservation.key_id.clone(),
@@ -139,6 +171,8 @@ impl SingleSignerOps for KeyMeldClient {
             auth_pubkey: credentials.auth_public_key_bytes(),
             enclave_public_key: reservation.enclave_public_key.clone(),
         };
+        let auth_signature =
+            credentials.sign_user_request(&request.auth_scope()?, &self.user_id().to_string())?;
 
         let _response: ImportUserKeyResponse = self
             .http()
@@ -208,7 +242,7 @@ impl SingleSignerOps for KeyMeldClient {
             credentials.sign_user_request(&key_id.to_string(), &self.user_id().to_string())?;
 
         // Get key status to find the enclave (validates key exists)
-        let _key_status: KeyStatusResponse = self
+        let key_status: KeyStatusResponse = self
             .http()
             .get(
                 &self.url(&format!(
@@ -221,16 +255,15 @@ impl SingleSignerOps for KeyMeldClient {
             .await
             .map_err(|_| SdkError::Key(KeyError::NotFound(key_id.clone())))?;
 
-        // We need the enclave public key - let's get it from the health endpoint
-        // This is a bit of a workaround; ideally the key status would include this
-        let enclaves = self.health().list_enclaves().await?;
-
-        // Find the enclave for this key (we'll use the first healthy one as fallback)
-        let enclave = enclaves
-            .enclaves
-            .iter()
-            .find(|e| e.healthy)
-            .ok_or_else(|| SdkError::Internal("No healthy enclaves available".to_string()))?;
+        if key_status.user_id != *self.user_id() || key_status.key_id != *key_id {
+            return Err(SdkError::InvalidInput(
+                "Gateway returned a different key identity".into(),
+            ));
+        }
+        let enclave = self
+            .health()
+            .get_enclave_key(key_status.enclave_id.as_u32())
+            .await?;
 
         let enclave_public_key = &enclave.public_key;
 
@@ -240,10 +273,7 @@ impl SingleSignerOps for KeyMeldClient {
                 .map_err(|e| SdkError::Crypto(CryptoError::EncryptionFailed(e.to_string())))?;
 
         // Generate approval signature
-        let approval_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let approval_timestamp = keymeld_core::request_auth::now_timestamp_secs()?;
 
         let approval_signature = credentials.sign_approval(
             &encrypted_message,
@@ -262,7 +292,7 @@ impl SingleSignerOps for KeyMeldClient {
         };
 
         let auth_signature =
-            credentials.sign_user_request(&key_id.to_string(), &self.user_id().to_string())?;
+            credentials.sign_user_request(&request.auth_scope()?, &self.user_id().to_string())?;
 
         let response: SignSingleResponse = self
             .http()
@@ -289,8 +319,10 @@ impl SingleSignerOps for KeyMeldClient {
             )
         })?;
 
-        let auth_signature =
-            credentials.sign_user_request(&key_id.to_string(), &self.user_id().to_string())?;
+        let auth_signature = credentials.sign_user_request(
+            &keymeld_core::request_auth::delete_key_scope(&key_id.to_string()),
+            &self.user_id().to_string(),
+        )?;
 
         let _response: DeleteUserKeyResponse = self
             .http()

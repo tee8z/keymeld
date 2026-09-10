@@ -31,7 +31,6 @@ use zeroize::Zeroize;
 
 use crate::{
     attestation::AttestationManager,
-    musig::MusigProcessor,
     operations::{
         context_aware_session::ContextAwareSession,
         create_signing_musig_from_keygen,
@@ -88,8 +87,6 @@ impl ServerCommandHandler<Command, Outcome> for EnclaveCommandHandler {
 pub struct EnclaveOperator {
     pub enclave_id: EnclaveId,
     pub sessions: Arc<DashMap<SessionId, ContextAwareSession>>,
-    /// Keygen sessions for accessing participant data (used by UserKey commands)
-    pub keygen_sessions: Arc<DashMap<SessionId, Arc<MusigProcessor>>>,
     /// User key store for single-signer operations
     pub user_key_store: Arc<UserKeyStore>,
     pub attestation_manager: Option<AttestationManager>,
@@ -103,6 +100,7 @@ pub struct EnclaveOperator {
     key_generation_time: u64,
     key_epoch: AtomicU32,
     keys_initialized: AtomicBool,
+    configure_lock: tokio::sync::Mutex<()>,
 }
 
 impl EnclaveOperator {
@@ -126,7 +124,7 @@ impl EnclaveOperator {
                     user_key_cmd.clone(),
                     &self.user_key_store,
                     &enclave_ctx,
-                    Some(&self.keygen_sessions),
+                    Some(&self.sessions),
                 )
                 .await?;
 
@@ -142,6 +140,47 @@ impl EnclaveOperator {
         command: SystemCommand,
     ) -> Result<EnclaveOutcome, EnclaveError> {
         match command {
+            SystemCommand::CheckKeygenSession {
+                keygen_session_id,
+                recipient_authorization,
+            } => {
+                let Some(session) = self.sessions.get(&keygen_session_id) else {
+                    return Ok(EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(
+                        false,
+                    )));
+                };
+                let matches = matches!(
+                    &session.status,
+                    OperatorStatus::Keygen(KeygenStatus::Completed(_))
+                ) && recipient_authorization.keygen_session_id == keygen_session_id
+                    && matches!(&session.session_context, SessionContext::Keygen(context)
+                        if context.recipient_authorization.as_ref() == Some(&recipient_authorization));
+                if !matches {
+                    return Err(EnclaveError::Validation(keymeld_core::protocol::ValidationError::Other(
+                        "Existing keygen session does not match the completed authorized session being restored".into(),
+                    )));
+                }
+                Ok(EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(
+                    true,
+                )))
+            }
+            SystemCommand::ValidateRegistration(cmd) => {
+                let context = self.context.read().unwrap();
+                let envelope = crate::operations::registration::validate_registration(
+                    &cmd.authorization_manifest,
+                    &cmd.participant,
+                    &context,
+                    Some(self.key_epoch.load(Ordering::Relaxed) as u64),
+                )?;
+                Ok(EnclaveOutcome::System(
+                    SystemOutcome::RegistrationValidated(
+                        keymeld_core::protocol::RegistrationValidatedResponse {
+                            public_key: envelope.context.public_key.clone(),
+                            auth_pubkey: envelope.context.auth_pubkey.clone(),
+                        },
+                    ),
+                ))
+            }
             SystemCommand::Ping => Ok(EnclaveOutcome::System(SystemOutcome::Pong)),
             SystemCommand::Configure(cmd) => {
                 self.handle_configure(cmd)
@@ -154,7 +193,7 @@ impl EnclaveOperator {
                     })
             }
             SystemCommand::GetPublicInfo => self.handle_get_public_info().await,
-            SystemCommand::GetAttestation => self.handle_get_attestation().await,
+            SystemCommand::GetAttestation { nonce } => self.handle_get_attestation(&nonce).await,
             SystemCommand::ClearSession(cmd) => {
                 let session_id = cmd.keygen_session_id.or(cmd.signing_session_id).ok_or(
                     EnclaveError::Session(SessionError::InvalidId(
@@ -382,6 +421,7 @@ impl EnclaveOperator {
                 Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
                     KeygenOutcome::AggregatePublicKey(AggregatePublicKeyResponse {
                         keygen_session_id: session.session_id().to_owned(),
+                        encrypted_roster: self.encrypt_participant_roster(&keygen_data)?,
                         encrypted_aggregate_public_key,
                         participant_count: keygen_data.participants.len(),
                         encrypted_subset_aggregates,
@@ -493,6 +533,7 @@ impl EnclaveOperator {
                         Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
                             KeygenOutcome::AggregatePublicKey(AggregatePublicKeyResponse {
                                 keygen_session_id: session.session_id().to_owned(),
+                                encrypted_roster: self.encrypt_participant_roster(&keygen_data)?,
                                 encrypted_aggregate_public_key,
                                 participant_count: keygen_data.participants.len(),
                                 encrypted_subset_aggregates,
@@ -508,6 +549,47 @@ impl EnclaveOperator {
                 }
             }
         }
+    }
+
+    fn encrypt_participant_roster(
+        &self,
+        data: &crate::operations::KeygenSessionData<'_>,
+    ) -> Result<String, EnclaveError> {
+        use keymeld_core::authorization::{ParticipantRoster, SignedRoster, ROSTER_CONTEXT};
+        let invalid = |message: String| EnclaveError::Internal(InternalError::Other(message));
+        let metadata = data.musig_processor.get_session_metadata_public();
+        let manifest = metadata
+            .authorization_manifest
+            .as_ref()
+            .ok_or_else(|| invalid("Missing session authorization manifest".into()))?;
+        let roster = ParticipantRoster {
+            keygen_session_id: manifest.manifest.keygen_session_id.clone(),
+            manifest_hash: manifest.digest().map_err(|e| invalid(e.to_string()))?,
+            participants: metadata
+                .participant_public_keys
+                .iter()
+                .map(|(id, key)| (id.clone(), key.serialize().to_vec()))
+                .collect(),
+            registrations: metadata.registrations.clone(),
+            aggregate_public_key: data.aggregate_public_key.clone(),
+            subset_aggregate_keys: data.subset_aggregate_keys.clone(),
+            subset_definitions: metadata.subset_definitions.clone(),
+            taproot_tweak: metadata.taproot_tweak.clone(),
+        };
+        let context = self.context.read().unwrap();
+        let secret = zeroize::Zeroizing::new(
+            <[u8; 32]>::try_from(context.private_key.as_slice())
+                .map_err(|_| invalid("Invalid enclave private key".into()))?,
+        );
+        let signed = SignedRoster::sign(roster, &secret).map_err(|e| invalid(e.to_string()))?;
+        signed
+            .verify_registrations(manifest)
+            .map_err(|e| invalid(e.to_string()))?;
+        let payload = serde_json::to_vec(&signed).map_err(|e| invalid(e.to_string()))?;
+        data.session_secret
+            .encrypt(&payload, ROSTER_CONTEXT)
+            .and_then(|value| value.to_hex())
+            .map_err(|e| invalid(e.to_string()))
     }
 
     async fn extract_signing_response(
@@ -639,7 +721,9 @@ impl EnclaveOperator {
 
     async fn handle_get_public_info(&self) -> Result<EnclaveOutcome, EnclaveError> {
         let active_sessions_count = self.sessions.iter().count() as u32;
-        let attestation_document = if let Some(attestation_manager) = &self.attestation_manager {
+        let attestation_document = if self.get_public_key().is_empty() {
+            None
+        } else if let Some(attestation_manager) = &self.attestation_manager {
             let public_key = self.get_public_key();
             match attestation_manager.get_identity_attestation_with_data(Some(&public_key)) {
                 Ok(Some(attestation_doc)) => Some(attestation_doc),
@@ -656,6 +740,7 @@ impl EnclaveOperator {
 
         Ok(EnclaveOutcome::System(SystemOutcome::PublicInfo(
             PublicInfoResponse {
+                authorization_protocol_version: 1,
                 public_key: hex::encode(&*self.public_key.read().unwrap()),
                 attestation_document,
                 active_sessions: active_sessions_count,
@@ -670,10 +755,17 @@ impl EnclaveOperator {
         )))
     }
 
-    async fn handle_get_attestation(&self) -> Result<EnclaveOutcome, EnclaveError> {
+    async fn handle_get_attestation(&self, nonce: &[u8]) -> Result<EnclaveOutcome, EnclaveError> {
+        if nonce.len() != 32 {
+            return Err(EnclaveError::Attestation(
+                AttestationError::GenerationFailed(
+                    "Attestation requires a 32-byte challenge".into(),
+                ),
+            ));
+        }
         if let Some(attestation_manager) = &self.attestation_manager {
             let public_key = self.get_public_key();
-            match attestation_manager.get_identity_attestation_with_data(Some(&public_key)) {
+            match attestation_manager.get_identity_attestation_with_nonce(&public_key, nonce) {
                 Ok(Some(attestation_doc)) => Ok(EnclaveOutcome::System(
                     SystemOutcome::Attestation(attestation_doc),
                 )),
@@ -706,8 +798,6 @@ impl EnclaveOperator {
         );
 
         let sessions: Arc<DashMap<SessionId, ContextAwareSession>> = Arc::new(DashMap::new());
-        let keygen_sessions: Arc<DashMap<SessionId, Arc<MusigProcessor>>> =
-            Arc::new(DashMap::new());
         let user_key_store = Arc::new(UserKeyStore::new());
         let enclave_public_keys = Arc::new(DashMap::new());
         let queue = Queue::new(sessions.clone());
@@ -724,7 +814,6 @@ impl EnclaveOperator {
         Ok(EnclaveOperator {
             enclave_id,
             sessions,
-            keygen_sessions,
             user_key_store,
             attestation_manager: None,
             public_key: Arc::new(RwLock::new(Vec::new())),
@@ -737,6 +826,7 @@ impl EnclaveOperator {
             key_generation_time: startup_time,
             key_epoch: AtomicU32::new(1),
             keys_initialized: AtomicBool::new(false),
+            configure_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -748,6 +838,17 @@ impl EnclaveOperator {
         &self,
         cmd: ConfigureCommand,
     ) -> Result<Option<ConfiguredResponse>, EnclaveError> {
+        let _configuration = self.configure_lock.lock().await;
+        if self.keys_initialized.load(Ordering::Acquire) {
+            return Err(EnclaveError::Internal(InternalError::Other(
+                "Enclave is already configured; restart to change its configuration".into(),
+            )));
+        }
+        if cmd.enclave_id != self.enclave_id {
+            return Err(EnclaveError::Internal(InternalError::Other(
+                "Configure enclave identity mismatch".into(),
+            )));
+        }
         info!(
             "Configuring enclave {}, key_epoch: {:?}, kms_config: {}",
             cmd.enclave_id,
@@ -777,85 +878,71 @@ impl EnclaveOperator {
         // Track whether we received keys (restart) or generated new ones
         let provided_keys = cmd.encrypted_dek.is_some() && cmd.encrypted_private_key.is_some();
 
-        let configured_response =
-            if let (Some(kms_endpoint), Some(kms_key_id)) = (cmd.kms_endpoint, cmd.kms_key_id) {
-                let already_initialized = self.keys_initialized.load(Ordering::Relaxed);
+        let configured_response = if let (Some(kms_endpoint), Some(kms_key_id)) =
+            (cmd.kms_endpoint, cmd.kms_key_id)
+        {
+            info!("Initializing enclave keys via KMS");
 
-                if already_initialized {
-                    info!("Keys already initialized, skipping KMS initialization");
-                    // Return current keys
-                    let public_key = self.public_key.read().unwrap().clone();
-                    if !public_key.is_empty() {
-                        // We can't return encrypted keys here since we don't store them
-                        // But this case shouldn't happen in normal flow
-                        None
-                    } else {
-                        None
-                    }
-                } else {
-                    info!("Initializing enclave keys via KMS");
-
-                    // Configure AWS SDK with endpoint
-                    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                        .endpoint_url(&kms_endpoint)
-                        .load()
-                        .await;
-
-                    let kms_client = aws_sdk_kms::Client::new(&aws_config);
-
-                    let mut temp_context = EnclaveSharedContext::new(
-                        self.enclave_id,
-                        Vec::new(),
-                        Vec::new(),
-                        self.attestation_manager.clone(),
-                        keymeld_core::managed_socket::config::TimeoutConfig::default(),
-                    );
-
-                    let (encrypted_dek, encrypted_private_key, public_key): (
-                        Vec<u8>,
-                        Vec<u8>,
-                        Vec<u8>,
-                    ) = temp_context
-                        .init_keys_with_kms(
-                            &kms_client,
-                            &kms_key_id,
-                            cmd.encrypted_dek.clone(),
-                            cmd.encrypted_private_key.clone(),
-                        )
-                        .await?;
-
-                    *self.public_key.write().unwrap() = public_key.clone();
-                    *self.private_key.write().unwrap() = temp_context.private_key.clone();
-                    *self.master_dek.write().unwrap() = temp_context.master_dek;
-                    self.keys_initialized.store(true, Ordering::Relaxed);
-
-                    // Update operator-owned context with the new keys
-                    {
-                        let mut context = self.context.write().unwrap();
-                        context.public_key = public_key.clone();
-                        context.private_key = temp_context.private_key.clone();
-                        context.master_dek = temp_context.master_dek;
-                        context.attestation_manager = self.attestation_manager.clone();
-                    }
-
-                    info!(
-                        "Keys initialized successfully, public_key: {}, newly_generated: {}",
-                        hex::encode(&public_key[..8]),
-                        !provided_keys
-                    );
-
-                    // Return the encrypted keys so gateway can store them
-                    Some(ConfiguredResponse {
-                        encrypted_dek,
-                        encrypted_private_key,
-                        public_key,
-                        newly_generated: !provided_keys,
-                    })
-                }
+            // Configure AWS SDK with endpoint
+            let loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+            let loader = if kms_endpoint == "aws-kms" {
+                loader
             } else {
-                // No KMS config - simple epoch sync only
-                None
+                loader.endpoint_url(&kms_endpoint)
             };
+            let aws_config = loader.load().await;
+
+            let kms_client = aws_sdk_kms::Client::new(&aws_config);
+
+            let mut temp_context = EnclaveSharedContext::new(
+                self.enclave_id,
+                Vec::new(),
+                Vec::new(),
+                self.attestation_manager.clone(),
+                keymeld_core::managed_socket::config::TimeoutConfig::default(),
+            );
+
+            let (encrypted_dek, encrypted_private_key, public_key): (Vec<u8>, Vec<u8>, Vec<u8>) =
+                temp_context
+                    .init_keys_with_kms(
+                        &kms_client,
+                        &kms_key_id,
+                        cmd.encrypted_dek.clone(),
+                        cmd.encrypted_private_key.clone(),
+                    )
+                    .await?;
+
+            *self.public_key.write().unwrap() = public_key.clone();
+            *self.private_key.write().unwrap() = temp_context.private_key.clone();
+            *self.master_dek.write().unwrap() = temp_context.master_dek;
+            self.keys_initialized.store(true, Ordering::Relaxed);
+
+            // Update operator-owned context with the new keys
+            {
+                let mut context = self.context.write().unwrap();
+                context.public_key = public_key.clone();
+                context.private_key = temp_context.private_key.clone();
+                context.master_dek = temp_context.master_dek;
+                context.attestation_manager = self.attestation_manager.clone();
+            }
+
+            info!(
+                "Keys initialized successfully, public_key: {}, newly_generated: {}",
+                hex::encode(&public_key[..8]),
+                !provided_keys
+            );
+
+            // Return the encrypted keys so gateway can store them
+            Some(ConfiguredResponse {
+                encrypted_dek,
+                encrypted_private_key,
+                public_key,
+                newly_generated: !provided_keys,
+            })
+        } else {
+            // No KMS configuration cannot initialize key custody.
+            None
+        };
 
         let current_epoch = self.key_epoch.load(Ordering::Relaxed);
         let public_key = self.public_key.read().unwrap();

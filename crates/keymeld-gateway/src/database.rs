@@ -1,3 +1,5 @@
+mod request_auth;
+
 use crate::{
     config::DatabaseConfig,
     encrypted_data::{SigningEnclaveData, SigningSessionData},
@@ -11,6 +13,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use keymeld_core::{
+    authorization::ParticipantApproval,
     identifiers::{EnclaveId, KeyId, SessionId, UserId},
     protocol::{KeygenStatusKind, SigningStatusKind},
 };
@@ -419,6 +422,7 @@ impl Database {
                 let expires_at = current_time + request.timeout_secs as i64;
 
                 let status = KeygenSessionStatus::Reserved(KeygenReserved {
+                    authorization_manifest: Box::new(request.authorization_manifest.clone()),
                     keygen_session_id: request.keygen_session_id.clone(),
                     coordinator_user_id: request.coordinator_user_id.clone(),
                     coordinator_enclave_id,
@@ -484,12 +488,13 @@ impl Database {
 
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
+                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
                 // First get the existing reserved session
                 let existing_row = sqlx::query!(
                     "SELECT status, coordinator_enclave_id FROM keygen_sessions WHERE keygen_session_id = $1",
                     session_id
                 )
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *transaction)
                 .await?;
 
                 let existing_row = existing_row.ok_or_else(|| {
@@ -506,6 +511,19 @@ impl Database {
                     _ => return Err(ApiError::BadRequest("Session is not in reserved state".to_string())),
                 };
 
+                if reserved_session.expires_at <= DbUtils::current_timestamp() as u64 {
+                    return Err(ApiError::conflict("Keygen reservation has expired"));
+                }
+                request.verify_authorization(
+                    &session_id,
+                    &reserved_session.authorization_manifest.manifest.creator_pubkey,
+                ).map_err(|e| ApiError::unauthorized(format!("Invalid initialization authorization: {e}")))?;
+                if request.session_public_key != reserved_session.authorization_manifest.manifest.session_public_key {
+                    return Err(ApiError::bad_request("Session public key does not match reservation"));
+                }
+                request.recipient_authorization.verify(&reserved_session.authorization_manifest)
+                    .map_err(|e| ApiError::unauthorized(format!("Invalid enclave recipients: {e}")))?;
+
                 let coordinator_pubkey = match PublicKey::from_slice(&request.coordinator_pubkey) {
                     Ok(pubkey) => pubkey,
                     Err(e) => {
@@ -517,9 +535,11 @@ impl Database {
 
                 // Create the new CollectingParticipants status
                 let new_status = KeygenSessionStatus::CollectingParticipants(KeygenCollectingParticipants {
+                    recipient_authorization: Box::new(request.recipient_authorization.clone()),
+                    authorization_manifest: reserved_session.authorization_manifest,
                     keygen_session_id: reserved_session.keygen_session_id,
                     coordinator_pubkey,
-                    coordinator_encrypted_private_key: request.coordinator_encrypted_private_key.clone(),
+                    coordinator_encrypted_private_key: String::new(),
                     session_public_key: request.session_public_key.clone(),
                     encrypted_session_secret: request.encrypted_session_secret.clone(),
                     coordinator_enclave_id: reserved_session.coordinator_enclave_id,
@@ -539,7 +559,7 @@ impl Database {
                 let status_name = new_status.kind().to_string();
                 let current_time = DbUtils::current_timestamp();
                 let session_encrypted_data = request.encrypted_session_data.clone();
-                let enclave_encrypted_data = request.encrypted_enclave_data.clone();
+                let enclave_encrypted_data: Option<String> = None;
                 let session_public_key = request.session_public_key.as_slice();
 
                 // Update the session with encrypted data and new status
@@ -560,9 +580,10 @@ impl Database {
                     current_time,
                     session_id
                 )
-                .execute(&pool)
+                .execute(&mut *transaction)
                 .await?;
 
+                transaction.commit().await?;
                 Ok(request.encrypted_session_secret.clone())
             })
             .await
@@ -621,6 +642,7 @@ impl Database {
         }
     }
 
+    /// Claim one authorized slot and persist its key in the same transaction.
     pub async fn register_keygen_participant_with_encrypted_data(
         &self,
         keygen_session_id: &SessionId,
@@ -629,68 +651,110 @@ impl Database {
         enclave_key_epoch: u64,
         session_encrypted_data: String,
         enclave_encrypted_data: String,
-    ) -> Result<(), ApiError> {
+    ) -> Result<usize, ApiError> {
         let keygen_session_id = keygen_session_id.clone();
         let request = request.clone();
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
+                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let status_json: String = sqlx::query_scalar(
+                    "SELECT status FROM keygen_sessions WHERE keygen_session_id = ?",
+                )
+                .bind(&keygen_session_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| ApiError::not_found("Keygen session not found"))?;
+                let status: KeygenSessionStatus = serde_json::from_str(&status_json)?;
+                let collecting = match status {
+                    KeygenSessionStatus::CollectingParticipants(s) => s,
+                    _ => return Err(ApiError::conflict("Keygen session is not collecting participants")),
+                };
                 let current_time = DbUtils::current_timestamp();
-                let user_id = &request.user_id;
-                let enclave_id: i64 = enclave_id.into();
-                let enclave_key_epoch: i64 = enclave_key_epoch as i64;
-                let auth_pubkey = request.auth_pubkey.as_slice();
-
-                // Generate a key_id for this participant's key
-                let key_id = KeyId::new_v7();
-
-                // Decode the enclave_encrypted_data (hex-encoded encrypted private key)
-                let encrypted_private_key = hex::decode(&enclave_encrypted_data).map_err(|e| {
-                    ApiError::BadRequest(format!("Invalid enclave_encrypted_data hex: {}", e))
-                })?;
-
-                // First, insert into user_keys table
-                let result = sqlx::query!(
-                    r#"INSERT INTO user_keys (
-                        user_id, key_id, enclave_id, enclave_key_epoch,
-                        encrypted_private_key, auth_pubkey, origin_keygen_session_id,
-                        created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    RETURNING id"#,
-                    user_id,
-                    key_id,
-                    enclave_id,
-                    enclave_key_epoch,
-                    encrypted_private_key,
-                    auth_pubkey,
-                    keygen_session_id,
-                    current_time,
-                    current_time
+                if collecting.expires_at <= current_time as u64 {
+                    return Err(ApiError::conflict("Keygen session has expired"));
+                }
+                if request.keygen_session_id != keygen_session_id
+                    || !collecting.expected_participants.contains(&request.user_id)
+                {
+                    return Err(ApiError::bad_request("Participant is not expected in this session"));
+                }
+                request.registration_authorization
+                    .verify(&collecting.authorization_manifest, &enclave_encrypted_data)
+                    .map_err(|e| ApiError::unauthorized(format!("Invalid slot authorization: {e}")))?;
+                let context = &request.registration_authorization.context;
+                if context.user_id != request.user_id
+                    || context.keygen_session_id != keygen_session_id
+                    || context.enclave_id != enclave_id
+                    || context.enclave_key_epoch != enclave_key_epoch
+                    || context.public_key != request.public_key
+                    || context.auth_pubkey != request.auth_pubkey
+                    || context.require_signing_approval != request.require_signing_approval
+                {
+                    return Err(ApiError::bad_request("Registration does not match its authorized context"));
+                }
+                let registration_authorization = serde_json::to_string(&request.registration_authorization)?;
+                let existing: Option<(String, Vec<u8>, Option<String>)> = sqlx::query_as(
+                    "SELECT kp.registration_authorization, uk.encrypted_private_key, kp.session_encrypted_data \
+                     FROM keygen_participants kp JOIN user_keys uk ON uk.id = kp.user_key_id \
+                     WHERE kp.keygen_session_id = ? AND kp.user_id = ?",
                 )
-                .fetch_one(&pool)
+                .bind(&keygen_session_id)
+                .bind(&request.user_id)
+                .fetch_optional(&mut *transaction)
                 .await?;
-
-                let user_key_id = result.id.ok_or_else(|| {
-                    ApiError::database("No id returned from user_keys insert".to_string())
-                })?;
-
-                // Then, insert into keygen_participants with reference to user_keys
-                sqlx::query!(
-                    r#"INSERT OR REPLACE INTO keygen_participants (
-                        keygen_session_id, user_id, user_key_id,
-                        registered_at, require_signing_approval,
-                        session_encrypted_data
-                    ) VALUES ($1, $2, $3, $4, $5, $6)"#,
-                    keygen_session_id,
-                    user_id,
-                    user_key_id,
-                    current_time,
-                    request.require_signing_approval,
-                    session_encrypted_data
+                let encrypted_private_key = hex::decode(&enclave_encrypted_data)
+                    .map_err(|e| ApiError::bad_request(format!("Invalid encrypted key: {e}")))?;
+                if let Some((authorization, ciphertext, session_data)) = existing {
+                    if authorization != registration_authorization
+                        || ciphertext != encrypted_private_key
+                        || session_data.as_deref() != Some(&session_encrypted_data)
+                    {
+                        return Err(ApiError::conflict("Participant slot is already claimed"));
+                    }
+                } else {
+                    let key_id = KeyId::new_v7();
+                    let user_key_id: i64 = sqlx::query_scalar(
+                        "INSERT INTO user_keys (user_id, key_id, enclave_id, enclave_key_epoch, \
+                         encrypted_private_key, auth_pubkey, origin_keygen_session_id, created_at, updated_at) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    )
+                    .bind(&request.user_id)
+                    .bind(&key_id)
+                    .bind(i64::from(enclave_id))
+                    .bind(enclave_key_epoch as i64)
+                    .bind(&encrypted_private_key)
+                    .bind(&request.auth_pubkey)
+                    .bind(&keygen_session_id)
+                    .bind(current_time)
+                    .bind(current_time)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    let inserted = sqlx::query(
+                        "INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, \
+                         registered_at, require_signing_approval, session_encrypted_data, registration_authorization) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(keygen_session_id, user_id) DO NOTHING",
+                    )
+                    .bind(&keygen_session_id)
+                    .bind(&request.user_id)
+                    .bind(user_key_id)
+                    .bind(current_time)
+                    .bind(request.require_signing_approval)
+                    .bind(&session_encrypted_data)
+                    .bind(&registration_authorization)
+                    .execute(&mut *transaction)
+                    .await?;
+                    if inserted.rows_affected() != 1 {
+                        return Err(ApiError::conflict("Participant slot is already claimed"));
+                    }
+                }
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM keygen_participants WHERE keygen_session_id = ?",
                 )
-                .execute(&pool)
+                .bind(&keygen_session_id)
+                .fetch_one(&mut *transaction)
                 .await?;
-
-                Ok(())
+                transaction.commit().await?;
+                Ok(count as usize)
             })
             .await
     }
@@ -711,6 +775,7 @@ impl Database {
                 kp.require_signing_approval as "require_signing_approval!: bool",
                 uk.auth_pubkey as "auth_pubkey!",
                 kp.session_encrypted_data,
+                kp.registration_authorization as "registration_authorization!",
                 hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
              FROM keygen_participants kp
              JOIN user_keys uk ON kp.user_key_id = uk.id
@@ -740,6 +805,7 @@ impl Database {
                 kp.require_signing_approval as "require_signing_approval!: bool",
                 uk.auth_pubkey as "auth_pubkey!",
                 kp.session_encrypted_data,
+                kp.registration_authorization as "registration_authorization!",
                 hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
              FROM keygen_participants kp
              JOIN user_keys uk ON kp.user_key_id = uk.id
@@ -833,13 +899,14 @@ impl Database {
         let request = request.clone();
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
+                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
                 // First get the keygen session status
                 let keygen_session_id = &request.keygen_session_id;
                 let keygen_row = sqlx::query!(
                     "SELECT status FROM keygen_sessions WHERE keygen_session_id = $1",
                     keygen_session_id
                 )
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or(ApiError::not_found("Keygen session not found"))?;
 
@@ -848,6 +915,18 @@ impl Database {
                     serde_json::from_str(&status_json).map_err(|e| {
                         ApiError::Serialization(format!("Failed to deserialize keygen status: {e}"))
                     })?;
+
+                let manifest = keygen_status.authorization_manifest()
+                    .ok_or_else(|| ApiError::conflict("Session does not support signing authorization"))?;
+                if request.signing_authorization.timeout_secs != request.timeout_secs {
+                    return Err(ApiError::bad_request("Signing timeout differs from authorization"));
+                }
+                request.signing_authorization.verify(
+                    &manifest.manifest.signing_pubkey,
+                    &request.keygen_session_id,
+                    &request.signing_session_id,
+                    &request.enclave_batch_items(),
+                ).map_err(|e| ApiError::unauthorized(format!("Invalid signing authorization: {e}")))?;
 
                 let (encrypted_session_secret, coordinator_encrypted_private_key, taproot_tweak) =
                     match &keygen_status {
@@ -873,6 +952,7 @@ impl Database {
                         kp.require_signing_approval as "require_signing_approval!: bool",
                         uk.auth_pubkey as "auth_pubkey!",
                         kp.session_encrypted_data,
+                kp.registration_authorization as "registration_authorization!",
                         hex(uk.encrypted_private_key) as "enclave_encrypted_data!: String"
                      FROM keygen_participants kp
                      JOIN user_keys uk ON kp.user_key_id = uk.id
@@ -880,7 +960,7 @@ impl Database {
                      ORDER BY kp.registered_at ASC"#,
                     keygen_session_id
                 )
-                .fetch_all(&pool)
+                .fetch_all(&mut *transaction)
                 .await?;
 
                 let expected_participants: Vec<UserId> = keygen_participants
@@ -905,6 +985,8 @@ impl Database {
 
                 // Create initial signing session status - CollectingParticipants
                 let status = SigningSessionStatus::CollectingParticipants(SigningCollectingParticipants {
+                    signing_authorization: request.signing_authorization.clone(),
+                    approval_signatures: Vec::new(),
                     signing_session_id: request.signing_session_id.clone(),
                     keygen_session_id: request.keygen_session_id.clone(),
                     batch_items: request.batch_items.clone(),
@@ -978,7 +1060,7 @@ impl Database {
                     session_encrypted,
                     enclave_encrypted
                 )
-                .execute(&pool)
+                .execute(&mut *transaction)
                 .await?;
 
                 for participant in &keygen_participants {
@@ -997,10 +1079,11 @@ impl Database {
                         current_time,
                         participant_session_encrypted
                     )
-                    .execute(&pool)
+                    .execute(&mut *transaction)
                     .await?;
                 }
 
+                transaction.commit().await?;
                 Ok(())
             })
             .await
@@ -1078,7 +1161,7 @@ impl Database {
                             e
                         })?;
 
-                    let approved_participants = self
+                    let proofs = self
                         .get_signing_session_approvals(signing_session_id)
                         .await
                         .map_err(|e| {
@@ -1089,6 +1172,34 @@ impl Database {
                             );
                             e
                         })?;
+
+                    let batch =
+                        crate::session::signing::enclave_batch_items(&collecting.batch_items);
+                    let now = DbUtils::current_timestamp() as u64;
+                    collecting.approval_signatures = proofs
+                        .into_iter()
+                        .filter(|proof| {
+                            collecting
+                                .registered_participants
+                                .get(&proof.user_id)
+                                .is_some_and(|participant| {
+                                    proof
+                                        .verify(
+                                            &participant.auth_pubkey,
+                                            &collecting.keygen_session_id,
+                                            signing_session_id,
+                                            &batch,
+                                            now,
+                                        )
+                                        .is_ok()
+                                })
+                        })
+                        .collect();
+                    let approved_participants: Vec<UserId> = collecting
+                        .approval_signatures
+                        .iter()
+                        .map(|proof| proof.user_id.clone())
+                        .collect();
 
                     tracing::debug!(
                         "Signing session {} loaded: {} requiring approval, {} approved",
@@ -1547,6 +1658,8 @@ impl Database {
                         SigningSessionStatus::CollectingParticipants(
                             SigningCollectingParticipants {
                                 signing_session_id: init.signing_session_id,
+                                signing_authorization: init.signing_authorization,
+                                approval_signatures: init.approval_signatures,
                                 keygen_session_id: init.keygen_session_id,
                                 batch_items: init.batch_items,
                                 expected_participants: init.expected_participants,
@@ -1725,25 +1838,55 @@ impl Database {
         &self,
         signing_session_id: &SessionId,
         user_id: &UserId,
+        approval: &ParticipantApproval,
     ) -> Result<(), ApiError> {
         let signing_session_id = signing_session_id.clone();
         let user_id = user_id.clone();
+        let approval = approval.clone();
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
+                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
                 let current_time = DbUtils::current_timestamp();
-
-                sqlx::query!(
-                    r#"INSERT OR REPLACE INTO signing_approvals (
-                        signing_session_id, user_id, approved_at, user_signature_validated, session_signature_validated
-                    ) VALUES ($1, $2, $3, $4, $5)"#,
-                    signing_session_id,
-                    user_id,
-                    current_time,
-                    true,
-                    true
+                let status: String = sqlx::query_scalar(
+                    "SELECT status FROM signing_sessions WHERE signing_session_id = ?",
                 )
-                .execute(&pool)
+                .bind(&signing_session_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| ApiError::not_found("Signing session not found"))?;
+                let session = match serde_json::from_str::<SigningSessionStatus>(&status)? {
+                    SigningSessionStatus::CollectingParticipants(s) => s,
+                    _ => return Err(ApiError::conflict("Signing session is not accepting approvals")),
+                };
+                if session.expires_at <= current_time as u64 {
+                    return Err(ApiError::conflict("Signing session has expired"));
+                }
+                if approval.user_id != user_id {
+                    return Err(ApiError::bad_request("Approval participant does not match request path"));
+                }
+                let participant = session.registered_participants.get(&user_id)
+                    .ok_or_else(|| ApiError::unauthorized("Participant does not belong to signing session"))?;
+                approval.verify(
+                    &participant.auth_pubkey,
+                    &session.keygen_session_id,
+                    &signing_session_id,
+                    &crate::session::signing::enclave_batch_items(&session.batch_items),
+                    current_time as u64,
+                ).map_err(|e| ApiError::unauthorized(format!("Invalid batch approval: {e}")))?;
+                let proof = serde_json::to_string(&approval)?;
+                sqlx::query(
+                    "INSERT INTO signing_approvals (signing_session_id, user_id, approved_at, \
+                     user_signature_validated, session_signature_validated, approval_proof) \
+                     VALUES (?, ?, ?, 1, 1, ?) ON CONFLICT(signing_session_id, user_id) DO UPDATE SET \
+                     approved_at = excluded.approved_at, approval_proof = excluded.approval_proof",
+                )
+                .bind(&signing_session_id)
+                .bind(&user_id)
+                .bind(current_time)
+                .bind(&proof)
+                .execute(&mut *transaction)
                 .await?;
+                transaction.commit().await?;
                 Ok(())
             })
             .await
@@ -1767,25 +1910,17 @@ impl Database {
     async fn get_signing_session_approvals(
         &self,
         signing_session_id: &SessionId,
-    ) -> Result<Vec<UserId>, ApiError> {
-        // Force WAL checkpoint to ensure we see recent approval writes
-        // PRAGMA returns columns with NULL type that sqlx macros can't map
-        let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!("Failed to checkpoint WAL before approval query: {}", e);
-            });
-
-        let user_ids: Vec<UserId> = sqlx::query_scalar!(
-            r#"SELECT user_id as "user_id: UserId" FROM signing_approvals
-             WHERE signing_session_id = $1"#,
-            signing_session_id
+    ) -> Result<Vec<ParticipantApproval>, ApiError> {
+        let proofs: Vec<String> = sqlx::query_scalar(
+            "SELECT approval_proof FROM signing_approvals WHERE signing_session_id = ?",
         )
+        .bind(signing_session_id)
         .fetch_all(&self.pool)
         .await?;
-
-        Ok(user_ids)
+        proofs
+            .into_iter()
+            .map(|proof| serde_json::from_str(&proof).map_err(ApiError::from))
+            .collect()
     }
 
     pub async fn store_enclave_master_key(
@@ -1849,28 +1984,35 @@ impl Database {
         enclave_id: EnclaveId,
         enclave_key_epoch: u64,
         expires_at: i64,
+        auth_pubkey: &[u8],
     ) -> Result<(), ApiError> {
         let key_id = key_id.clone();
         let user_id = user_id.clone();
         let enclave_key_epoch_i64 = enclave_key_epoch as i64;
         let now = DbUtils::current_timestamp();
+        let auth_pubkey = auth_pubkey.to_vec();
 
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
-                sqlx::query!(
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_keys WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_imports WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_stores WHERE key_id = ?)")
+                    .bind(&key_id).bind(&key_id).bind(&key_id).fetch_one(&mut *tx).await?;
+                if exists {
+                    return Err(ApiError::conflict("Key ID is already claimed"));
+                }
+                let inserted = sqlx::query(
                     r#"INSERT INTO reserved_key_slots (
-                        key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6)"#,
-                    key_id,
-                    user_id,
-                    enclave_id,
-                    enclave_key_epoch_i64,
-                    now,
-                    expires_at
+                        key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at, auth_pubkey
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING"#,
                 )
-                .execute(&pool)
+                .bind(key_id).bind(user_id).bind(enclave_id).bind(enclave_key_epoch_i64)
+                .bind(now).bind(expires_at).bind(auth_pubkey)
+                .execute(&mut *tx)
                 .await?;
-
+                if inserted.rows_affected() != 1 {
+                    return Err(ApiError::conflict("Key ID is already reserved"));
+                }
+                tx.commit().await?;
                 Ok(())
             })
             .await
@@ -1882,7 +2024,7 @@ impl Database {
         key_id: &KeyId,
     ) -> Result<Option<ReservedKeySlot>, ApiError> {
         let row = sqlx::query_as::<_, ReservedKeySlot>(
-            r#"SELECT key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at
+            r#"SELECT key_id, user_id, enclave_id, enclave_key_epoch, reserved_at, expires_at, auth_pubkey
              FROM reserved_key_slots
              WHERE key_id = ? AND expires_at > ?"#,
         )
@@ -2049,7 +2191,8 @@ impl Database {
             .await
     }
 
-    /// Get all user keys for an enclave (for restoration)
+    /// Get stored single-signer keys for restoration. Registration envelopes are
+    /// restored through the keygen protocol, which verifies their slot proofs.
     pub async fn get_user_keys_for_enclave(
         &self,
         enclave_id: EnclaveId,
@@ -2059,7 +2202,10 @@ impl Database {
                     encrypted_private_key, auth_pubkey, origin_keygen_session_id,
                     created_at, updated_at
              FROM user_keys
-             WHERE enclave_id = ?"#,
+             WHERE enclave_id = ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM keygen_participants kp WHERE kp.user_key_id = user_keys.id
+               )"#,
         )
         .bind(enclave_id)
         .fetch_all(&self.pool)
@@ -2250,14 +2396,14 @@ impl Database {
 
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin().await?;
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
                 // SELECT + INSERT in one statement using CTE
                 let result = sqlx::query(
                     r#"WITH source AS (
                         SELECT key_id, user_id, enclave_id, enclave_key_epoch
                         FROM reserved_key_slots
-                        WHERE key_id = $1
+                        WHERE key_id = $1 AND auth_pubkey = $3 AND expires_at > $4
                     )
                     INSERT INTO pending_key_imports (
                         key_id, user_id, enclave_id, enclave_key_epoch,
@@ -2486,30 +2632,34 @@ impl Database {
         keygen_session_id: &SessionId,
         enclave_id: EnclaveId,
         expires_at: i64,
+        authorization: &str,
     ) -> Result<(), ApiError> {
         let key_id = key_id.clone();
         let user_id = user_id.clone();
         let keygen_session_id = keygen_session_id.clone();
         let now = DbUtils::current_timestamp();
+        let authorization = authorization.to_owned();
 
         self.writer
             .execute(self.pool.clone(), move |pool| async move {
-                sqlx::query!(
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_keys WHERE key_id = ? UNION ALL SELECT 1 FROM reserved_key_slots WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_imports WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_stores WHERE key_id = ?)")
+                    .bind(&key_id).bind(&key_id).bind(&key_id).bind(&key_id)
+                    .fetch_one(&mut *tx).await?;
+                if exists {
+                    return Err(ApiError::conflict("Destination key ID is already claimed"));
+                }
+                sqlx::query(
                     r#"INSERT INTO pending_key_stores (
                         key_id, user_id, keygen_session_id, enclave_id, status_name,
-                        created_at, updated_at, expires_at
-                    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)"#,
-                    key_id,
-                    user_id,
-                    keygen_session_id,
-                    enclave_id,
-                    now,
-                    now,
-                    expires_at
+                        created_at, updated_at, expires_at, authorization
+                    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)"#,
                 )
-                .execute(&pool)
+                .bind(key_id).bind(user_id).bind(keygen_session_id).bind(enclave_id)
+                .bind(now).bind(now).bind(expires_at).bind(authorization)
+                .execute(&mut *tx)
                 .await?;
-
+                tx.commit().await?;
                 Ok(())
             })
             .await
@@ -2677,6 +2827,7 @@ impl Database {
         // Check if key exists in user_keys (completed)
         if let Some(key) = self.get_user_key_by_user_and_key(user_id, key_id).await? {
             return Ok(Some(KeyOperationStatus {
+                enclave_id: key.enclave_id,
                 key_id: key.key_id,
                 user_id: key.user_id,
                 status: "completed".to_string(),
@@ -2689,6 +2840,7 @@ impl Database {
         if let Some(pending) = self.get_pending_key_import(key_id).await? {
             if pending.user_id == *user_id {
                 return Ok(Some(KeyOperationStatus {
+                    enclave_id: pending.enclave_id,
                     key_id: pending.key_id,
                     user_id: pending.user_id,
                     status: pending.status_name,
@@ -2702,6 +2854,7 @@ impl Database {
         if let Some(pending) = self.get_pending_key_store(key_id).await? {
             if pending.user_id == *user_id {
                 return Ok(Some(KeyOperationStatus {
+                    enclave_id: pending.enclave_id,
                     key_id: pending.key_id,
                     user_id: pending.user_id,
                     status: pending.status_name,
@@ -2800,6 +2953,7 @@ pub struct ReservedKeySlot {
     pub enclave_key_epoch: i64,
     pub reserved_at: i64,
     pub expires_at: i64,
+    pub auth_pubkey: Vec<u8>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -2917,6 +3071,7 @@ pub struct PendingKeyImport {
 /// for single-signer use.
 #[derive(Debug, Clone, FromRow)]
 pub struct PendingKeyStore {
+    pub authorization: String,
     pub id: i64,
     pub key_id: KeyId,
     pub user_id: UserId,
@@ -2935,6 +3090,7 @@ pub struct PendingKeyStore {
 /// Combined status for key operations (import or store from keygen)
 #[derive(Debug, Clone)]
 pub struct KeyOperationStatus {
+    pub enclave_id: EnclaveId,
     pub key_id: KeyId,
     pub user_id: UserId,
     pub status: String,
@@ -2986,5 +3142,121 @@ mod tests {
         assert_eq!(stats.total_sessions, 0);
         assert_eq!(stats.active_sessions, 0);
         assert_eq!(stats.total_participants, 0);
+    }
+
+    #[tokio::test]
+    async fn registration_envelopes_do_not_enter_single_key_restoration() {
+        let (db, _temp_dir) = create_test_db().await;
+        let enclave_id = EnclaveId::from(1);
+        let user_id = UserId::new_v7();
+        let session_id = SessionId::new_v7();
+        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status) VALUES (?, 'completed', 0, 1, '[]', '{}')")
+            .bind(&session_id).execute(&db.pool).await.unwrap();
+
+        let registration_key_id = KeyId::new_v7();
+        let stored_key_id = KeyId::new_v7();
+        let imported_key_id = KeyId::new_v7();
+        for (key_id, origin) in [
+            (&registration_key_id, Some(&session_id)),
+            (&stored_key_id, Some(&session_id)),
+            (&imported_key_id, None),
+        ] {
+            let row_id = db
+                .store_user_key(StoreUserKeyParams {
+                    user_id: &user_id,
+                    key_id,
+                    enclave_id,
+                    enclave_key_epoch: 1,
+                    encrypted_private_key: &[1],
+                    auth_pubkey: &[2],
+                    origin_keygen_session_id: origin,
+                })
+                .await
+                .unwrap();
+            if key_id == &registration_key_id {
+                sqlx::query("INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, registered_at) VALUES (?, ?, ?, 0)")
+                    .bind(&session_id).bind(&user_id).bind(row_id)
+                    .execute(&db.pool).await.unwrap();
+            }
+        }
+
+        let restored = db.get_user_keys_for_enclave(enclave_id).await.unwrap();
+        assert_eq!(restored.len(), 2);
+        assert!(restored.iter().any(|key| key.key_id == stored_key_id));
+        assert!(restored.iter().any(|key| key.key_id == imported_key_id));
+        assert!(!restored.iter().any(|key| key.key_id == registration_key_id));
+    }
+
+    #[tokio::test]
+    async fn reserved_key_ownership_is_immutable_and_import_rechecks_ownership_and_expiry() {
+        let (db, _directory) = create_test_db().await;
+        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+            .execute(&db.pool).await.unwrap();
+        let user = UserId::new_v7();
+        let key = KeyId::new_v7();
+        let owner = [2; 33];
+        let attacker = [3; 33];
+        let expiry = DbUtils::current_timestamp() + 600;
+        db.reserve_key_slot(&key, &user, EnclaveId::from(1), 1, expiry, &owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.reserve_key_slot(&key, &user, EnclaveId::from(1), 1, expiry, &attacker)
+                .await,
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(db
+            .move_reserved_to_pending_import(&key, &[7], &attacker, expiry)
+            .await
+            .is_err());
+        let reserved = db.get_reserved_key_slot(&key).await.unwrap().unwrap();
+        assert_eq!(reserved.auth_pubkey, owner);
+        db.move_reserved_to_pending_import(&key, &[7], &owner, expiry)
+            .await
+            .unwrap();
+        assert!(db
+            .reserve_key_slot(&key, &user, EnclaveId::from(1), 1, expiry, &attacker)
+            .await
+            .is_err());
+        assert!(db
+            .move_reserved_to_pending_import(&key, &[8], &owner, expiry)
+            .await
+            .is_err());
+        let expired = KeyId::new_v7();
+        db.reserve_key_slot(&expired, &user, EnclaveId::from(1), 1, 0, &owner)
+            .await
+            .unwrap();
+        assert!(db
+            .move_reserved_to_pending_import(&expired, &[7], &owner, expiry)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn keygen_persistence_cannot_claim_an_existing_destination() {
+        let (db, _directory) = create_test_db().await;
+        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+            .execute(&db.pool).await.unwrap();
+        let user = UserId::new_v7();
+        let key = KeyId::new_v7();
+        let expiry = DbUtils::current_timestamp() + 600;
+        db.reserve_key_slot(&key, &user, EnclaveId::from(1), 1, expiry, &[2; 33])
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.create_pending_key_store(
+                &key,
+                &user,
+                &SessionId::new_v7(),
+                EnclaveId::from(1),
+                expiry,
+                "proof"
+            )
+            .await,
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(db.get_pending_key_store(&key).await.unwrap().is_none());
     }
 }

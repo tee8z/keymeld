@@ -19,14 +19,16 @@ pub mod client;
 pub mod managers;
 
 pub use config::{HttpConfig, PollingConfig};
-pub use credentials::{SessionCredentials, UserCredentials};
+pub use credentials::{AuthorizationCredentials, SessionCredentials, UserCredentials};
 pub use error::{
     ApiError, CryptoError, KeyError, KeygenError, NetworkError, SdkError, SigningError,
 };
 pub use types::*;
 
+pub use keymeld_core::attestation::AttestationPolicy;
 pub use keymeld_core::crypto::{EncryptedData, SecureCrypto, SessionSecret};
 pub use keymeld_core::hash_message;
+pub use keymeld_core::request_auth;
 pub use keymeld_core::validation;
 
 #[cfg(feature = "client")]
@@ -39,19 +41,20 @@ pub use client::{KeyMeldClient, KeyMeldClientBuilder};
 pub use managers::{
     AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
     BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager, KeygenOptions,
-    KeygenSession, RegisterOptions, SignatureResult, SigningManager, SigningOptions,
-    SigningSession, SingleSignerOps,
+    KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult, SigningManager,
+    SigningOptions, SigningSession, SingleSignerOps,
 };
 
 pub mod prelude {
     pub use crate::config::{HttpConfig, PollingConfig};
-    pub use crate::credentials::{SessionCredentials, UserCredentials};
+    pub use crate::credentials::{AuthorizationCredentials, SessionCredentials, UserCredentials};
     pub use crate::error::SdkError;
     pub use crate::types::{
         BatchItemResult, EnclaveId, KeyId, KeygenStatusKind, SessionId, SignatureType,
         SigningBatchItem, SigningMode, SigningStatusKind, SubsetDefinition, TaprootTweak, UserId,
         UserKeyInfo,
     };
+    pub use keymeld_core::attestation::AttestationPolicy;
     pub use keymeld_core::crypto::{SecureCrypto, SessionSecret};
 
     #[cfg(feature = "client")]
@@ -64,7 +67,7 @@ pub mod prelude {
     pub use crate::managers::{
         AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
         BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager,
-        KeygenOptions, KeygenSession, RegisterOptions, SignatureResult, SigningManager,
-        SigningOptions, SigningSession, SingleSignerOps,
+        KeygenOptions, KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult,
+        SigningManager, SigningOptions, SigningSession, SingleSignerOps,
     };
 }

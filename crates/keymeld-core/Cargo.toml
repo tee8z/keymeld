@@ -1,6 +1,6 @@
 [package]
 name = "keymeld-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 authors = ["tee8z@protonmail.com"]
 description = "Core library for MuSig2 signature generation in AWS Nitro Enclaves"
@@ -24,6 +24,12 @@ hkdf = { workspace = true }
 aes-gcm = { workspace = true }
 hex = { workspace = true }
 subtle = "2.5.0"
+coset = "0.3.8"
+p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+rustls-webpki = { version = "0.103.15", default-features = false, features = ["std"] }
+rustls-pki-types = "1.12"
+x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
+serde_bytes = "0.11"
 uuid = { workspace = true }
 time = { workspace = true }
 dashmap = { workspace = true }
@@ -35,7 +41,8 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "io-util", "net"
 tokio-vsock = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+rcgen = "0.13.2"
 
 [features]
 default = ["gateway"]

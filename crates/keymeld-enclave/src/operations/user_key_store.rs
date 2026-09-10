@@ -71,18 +71,47 @@ impl UserKeyStore {
 
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let public_key_bytes = public_key.serialize().to_vec();
+        let auth_context = origin_keygen_session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "single_signer_auth".to_string());
+        let (_, derived_auth) =
+            SecureCrypto::derive_session_auth_keypair(&secret_key.secret_bytes(), &auth_context)
+                .map_err(|e| EnclaveError::Crypto(CryptoError::Other(e.to_string())))?;
+        let supplied_auth = PublicKey::from_slice(&auth_pubkey)
+            .map_err(|e| EnclaveError::Crypto(CryptoError::Other(e.to_string())))?;
+        if derived_auth != supplied_auth {
+            return Err(EnclaveError::Crypto(CryptoError::Other(
+                "Key authentication credential does not match decrypted key".to_string(),
+            )));
+        }
 
         let entry = UserKeyEntry {
             key_id: key_id.clone(),
             user_id: user_id.clone(),
             private_key,
             public_key: public_key_bytes.clone(),
-            auth_pubkey,
+            auth_pubkey: derived_auth.serialize().to_vec(),
             origin_keygen_session_id,
             created_at,
         };
 
-        self.keys.insert((user_id, key_id), entry);
+        match self.keys.entry((user_id, key_id)) {
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+            dashmap::mapref::entry::Entry::Occupied(slot) => {
+                let existing = slot.get();
+                if existing.public_key != entry.public_key
+                    || existing.auth_pubkey != entry.auth_pubkey
+                    || existing.origin_keygen_session_id != entry.origin_keygen_session_id
+                {
+                    return Err(EnclaveError::Crypto(CryptoError::Other(
+                        "Key slot is already claimed".to_string(),
+                    )));
+                }
+            }
+        }
 
         Ok(public_key_bytes)
     }
@@ -242,6 +271,14 @@ pub struct EncryptedUserKeyRecord {
 mod tests {
     use super::*;
 
+    fn auth_key(secret: &SecretKey) -> Vec<u8> {
+        SecureCrypto::derive_session_auth_keypair(&secret.secret_bytes(), "single_signer_auth")
+            .unwrap()
+            .1
+            .serialize()
+            .to_vec()
+    }
+
     #[test]
     fn test_store_and_retrieve_key() {
         let store = UserKeyStore::new();
@@ -253,7 +290,7 @@ mod tests {
         let (secret_key, _) = secp.generate_keypair(&mut rand::rng());
         let private_key = KeyMaterial::new(secret_key.secret_bytes().to_vec());
 
-        let auth_pubkey = vec![1, 2, 3, 4];
+        let auth_pubkey = auth_key(&secret_key);
         let created_at = 1234567890u64;
 
         let public_key = store
@@ -289,7 +326,14 @@ mod tests {
             let (secret_key, _) = secp.generate_keypair(&mut rand::rng());
             let private_key = KeyMaterial::new(secret_key.secret_bytes().to_vec());
             store
-                .store_key(user_id.clone(), key_id, private_key, vec![], None, 0)
+                .store_key(
+                    user_id.clone(),
+                    key_id,
+                    private_key,
+                    auth_key(&secret_key),
+                    None,
+                    0,
+                )
                 .unwrap();
         }
 
@@ -311,7 +355,7 @@ mod tests {
                 user_id.clone(),
                 key_id.clone(),
                 private_key,
-                vec![],
+                auth_key(&secret_key),
                 None,
                 0,
             )
@@ -320,5 +364,58 @@ mod tests {
         assert!(store.has_key(&user_id, &key_id));
         assert!(store.delete_key(&user_id, &key_id));
         assert!(!store.has_key(&user_id, &key_id));
+    }
+
+    #[test]
+    fn imported_key_cannot_install_an_unrelated_auth_credential_or_replace_a_slot() {
+        let store = UserKeyStore::new();
+        let user = UserId::new_v7();
+        let key = KeyId::new_v7();
+        let owner = SecretKey::from_byte_array([1; 32]).unwrap();
+        let attacker = SecretKey::from_byte_array([2; 32]).unwrap();
+        let material = |secret: &SecretKey| KeyMaterial::new(secret.secret_bytes().to_vec());
+        assert!(store
+            .store_key(
+                user.clone(),
+                key.clone(),
+                material(&owner),
+                auth_key(&attacker),
+                None,
+                0
+            )
+            .is_err());
+        assert!(!store.has_key(&user, &key));
+        let original = store
+            .store_key(
+                user.clone(),
+                key.clone(),
+                material(&owner),
+                auth_key(&owner),
+                None,
+                0,
+            )
+            .unwrap();
+        // Exact retry is harmless; changing the private key, even with matching proof, is rejected.
+        store
+            .store_key(
+                user.clone(),
+                key.clone(),
+                material(&owner),
+                auth_key(&owner),
+                None,
+                1,
+            )
+            .unwrap();
+        assert!(store
+            .store_key(
+                user.clone(),
+                key.clone(),
+                material(&attacker),
+                auth_key(&attacker),
+                None,
+                2
+            )
+            .is_err());
+        assert_eq!(store.get_key(&user, &key).unwrap().public_key, original);
     }
 }

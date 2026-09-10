@@ -1,11 +1,8 @@
-use crate::{
-    create_enclave_operator, init_enclave_logging,
-    operator::{EnclaveCommandHandler, EnclaveOperator},
-};
+use crate::{create_enclave_operator, init_enclave_logging, operator::EnclaveOperator};
 use anyhow::{anyhow, Result};
 use keymeld_core::{
+    enclave_channel::{ChannelRequest, ChannelResponse},
     managed_socket::{create_server_handler, RequestRateTracker, SocketStream, TimeoutConfig},
-    protocol::{Command, Outcome},
     EnclaveId,
 };
 use serde::{Deserialize, Serialize};
@@ -58,7 +55,7 @@ impl Default for ServerConfig {
             port: 5000,
             max_connections: 500,
             transport_mode: TransportMode::default(),
-            tcp_host: "0.0.0.0".to_string(),
+            tcp_host: "127.0.0.1".to_string(),
         }
     }
 }
@@ -76,7 +73,7 @@ pub async fn run_until_stopped(
     let state = create_enclave_operator(enclave_id)?;
 
     let transport_mode = TransportMode::from_env();
-    let tcp_host = std::env::var("TCP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let tcp_host = std::env::var("TCP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
 
     let config = ServerConfig {
         port,
@@ -93,7 +90,7 @@ pub async fn run_until_stopped(
 
 pub struct EnclaveServer {
     config: ServerConfig,
-    operator: Arc<EnclaveOperator>,
+    command_handler: Arc<crate::channel::AuthenticatedCommandHandler>,
     active_connections: Arc<AtomicU32>,
     shutdown_signal: Arc<AtomicBool>,
     timeout_config: TimeoutConfig,
@@ -105,9 +102,14 @@ impl EnclaveServer {
         operator: EnclaveOperator,
         timeout_config: TimeoutConfig,
     ) -> Result<Self> {
+        let operator = Arc::new(operator);
+        let command_handler = Arc::new(crate::channel::AuthenticatedCommandHandler::new(
+            operator.clone(),
+            crate::channel::ChannelPolicy::from_env()?,
+        ));
         Ok(Self {
             config,
-            operator: Arc::new(operator),
+            command_handler,
             active_connections: Arc::new(AtomicU32::new(0)),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
             timeout_config,
@@ -217,8 +219,8 @@ impl EnclaveServer {
     }
 
     fn handle_connection(self: Arc<Self>, stream: SocketStream) {
-        let command_handler = Arc::new(EnclaveCommandHandler::new(self.operator.clone()));
-        let handler = create_server_handler::<Command, Outcome>(
+        let command_handler = self.command_handler.clone();
+        let handler = create_server_handler::<ChannelRequest, ChannelResponse>(
             command_handler,
             self.active_connections.clone(),
         );

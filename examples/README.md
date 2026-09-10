@@ -40,10 +40,10 @@ just demo 50000 bcrt1q...  # amount and destination
 
 ### Adaptor Signatures (`keymeld_adaptor`)
 
-All adaptor types: Single, And, Or.
+Single-point adaptor signatures. Unsupported `And` and `Or` configurations are rejected.
 
 ```bash
-just demo-adaptors  # All types
+just demo-adaptors  # Single-point adaptors
 ```
 
 ### DLC Batch Signing (`dlctix_batch`)

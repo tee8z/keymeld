@@ -1,7 +1,7 @@
 use anyhow::Result;
 use aws_config::BehaviorVersion;
 use aws_sdk_kms::Client as KmsClient;
-use keymeld_core::protocol::{ConfigureCommand, SocketClient, SystemCommand};
+use keymeld_core::protocol::{ConfigureCommand, SystemCommand};
 use keymeld_core::{
     identifiers::EnclaveId,
     protocol::{Command, EnclaveCommand, EnclaveOutcome, SystemOutcome},
@@ -42,7 +42,7 @@ pub async fn init_kms_client(config: &KmsConfig) -> Result<Option<KmsClient>> {
 
 pub async fn configure_enclave_with_kms(
     enclave_id: EnclaveId,
-    client: &SocketClient,
+    client: &crate::enclave::channel::AuthenticatedEnclaveClient,
     db: &Database,
     kms_config: &KmsConfig,
 ) -> Result<()> {
@@ -55,6 +55,25 @@ pub async fn configure_enclave_with_kms(
     let kms_key_id = kms_config.key_id.clone();
 
     let existing_keys = db.get_enclave_master_key(enclave_id).await?;
+
+    // A gateway can restart while its enclaves remain alive. Configuration is
+    // immutable per enclave boot; inspect the authenticated identity first.
+    let public_info = client
+        .send_command(Command::new(EnclaveCommand::System(SystemCommand::GetPublicInfo)).into())
+        .await?;
+    if let EnclaveOutcome::System(SystemOutcome::PublicInfo(info)) = public_info.response.response {
+        if !info.public_key.is_empty() {
+            anyhow::ensure!(existing_keys.as_ref().is_some_and(|keys| keys.kms_key_id == kms_key_id),
+                "Live enclave has no matching persisted key hierarchy; restart it with the intended archived state");
+            info!(
+                "Enclave {} is already configured; retaining its authenticated live identity",
+                enclave_id
+            );
+            return Ok(());
+        }
+    } else {
+        anyhow::bail!("Cannot inspect authenticated enclave identity before configuration");
+    }
 
     let (encrypted_dek, encrypted_private_key, key_epoch) = if let Some(keys) = existing_keys {
         if keys.kms_key_id != kms_key_id {

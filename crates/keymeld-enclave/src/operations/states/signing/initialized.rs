@@ -4,17 +4,13 @@ use keymeld_core::{
     hash_message,
     identifiers::SessionId,
     managed_socket::TimeoutConfig,
-    protocol::{
-        CryptoError, EnclaveError, SessionError, SigningApproval, TaprootTweak, ValidationError,
-    },
+    protocol::{CryptoError, EnclaveError, SessionError, TaprootTweak, ValidationError},
     validation::decrypt_session_data,
     SessionSecret,
 };
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::operations::{
     context::EnclaveSharedContext,
@@ -82,118 +78,67 @@ impl Initialized {
         metadata.participant_public_keys.len()
     }
 
-    /// Verify approval signatures (validates command auth_pubkey matches stored).
-    fn verify_approval_signatures(
+    /// Verify all authorization before generating any nonce or signature.
+    fn verify_authorization(
         &self,
-        message_hash: &[u8],
-        signing_session_id: &SessionId,
-        approval_signatures: &[SigningApproval],
-        max_timestamp_age_secs: u64,
+        cmd: &keymeld_core::protocol::InitSigningSessionCommand,
     ) -> Result<(), EnclaveError> {
-        let secp = Secp256k1::verification_only();
-        let current_time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        // Check each user who requires approval
-        for (user_id, user_session) in self.musig_processor.get_all_user_sessions() {
-            if !user_session.require_signing_approval {
-                continue;
-            }
-
-            // Find the approval signature for this user
-            let approval = approval_signatures
+        let invalid = |message: String| EnclaveError::Validation(ValidationError::Other(message));
+        let metadata = self.musig_processor.get_session_metadata_public();
+        let manifest = metadata
+            .authorization_manifest
+            .as_ref()
+            .ok_or_else(|| invalid("Missing session authorization manifest".into()))?;
+        if cmd.keygen_session_id != manifest.manifest.keygen_session_id
+            || cmd.expected_participant_count != metadata.participant_public_keys.len()
+            || metadata.registrations.len() != metadata.participant_public_keys.len()
+            || cmd
+                .user_ids
                 .iter()
-                .find(|a| a.user_id == *user_id)
-                .ok_or_else(|| {
-                    EnclaveError::Validation(ValidationError::Other(format!(
-                        "Missing approval signature for user {} who requires signing approval",
-                        user_id
-                    )))
-                })?;
-
-            // Cross-check: if we have a stored auth_pubkey, verify it matches the one in the command
-            if let Some(stored_auth_pubkey) = &user_session.auth_pubkey {
-                if stored_auth_pubkey != &approval.auth_pubkey {
-                    return Err(EnclaveError::Validation(ValidationError::Other(format!(
-                        "Auth pubkey mismatch for user {}: command auth_pubkey does not match stored auth_pubkey",
-                        user_id
-                    ))));
-                }
-            }
-
-            // Verify timestamp is recent
-            if current_time > approval.timestamp
-                && current_time - approval.timestamp > max_timestamp_age_secs
-            {
-                return Err(EnclaveError::Validation(ValidationError::Other(format!(
-                    "Approval signature for user {} has expired timestamp (age: {}s, max: {}s)",
-                    user_id,
-                    current_time - approval.timestamp,
-                    max_timestamp_age_secs
-                ))));
-            }
-
-            // Construct the message that should have been signed:
-            // SHA256(message_hash || signing_session_id || timestamp)
-            let mut hasher = Sha256::new();
-            hasher.update(message_hash);
-            hasher.update(signing_session_id.to_string().as_bytes());
-            hasher.update(approval.timestamp.to_le_bytes());
-            let approval_hash = hasher.finalize();
-
-            // Parse the auth public key from the command (don't trust stored state)
-            let pubkey = PublicKey::from_slice(&approval.auth_pubkey).map_err(|e| {
-                EnclaveError::Validation(ValidationError::Other(format!(
-                    "Invalid auth_pubkey in approval for user {}: {}",
-                    user_id, e
-                )))
-            })?;
-
-            // Parse the signature (session-level approval)
-            // Note: For batch signing with per-item approvals, this would be None
-            // and we'd verify per_item_approvals instead. For now, require session-level.
-            let signature_bytes = approval.signature.as_ref().ok_or_else(|| {
-                EnclaveError::Validation(ValidationError::Other(format!(
-                    "Missing session-level approval signature for user {}",
-                    user_id
-                )))
-            })?;
-            let signature = Signature::from_compact(signature_bytes).map_err(|e| {
-                EnclaveError::Validation(ValidationError::Other(format!(
-                    "Invalid approval signature format for user {}: {}",
-                    user_id, e
-                )))
-            })?;
-
-            // Create the message for verification
-            let approval_hash_array: [u8; 32] =
-                approval_hash.as_slice().try_into().map_err(|_| {
-                    EnclaveError::Validation(ValidationError::Other(
-                        "Approval hash is not 32 bytes".to_string(),
-                    ))
-                })?;
-            let msg = Message::from_digest(approval_hash_array);
-
-            // Verify the signature against the auth_pubkey from the command
-            secp.verify_ecdsa(msg, &signature, &pubkey).map_err(|e| {
-                warn!(
-                    "Approval signature verification failed for user {}: {}",
-                    user_id, e
-                );
-                EnclaveError::Validation(ValidationError::Other(format!(
-                    "Invalid approval signature for user {}: signature verification failed",
-                    user_id
-                )))
-            })?;
-
-            info!(
-                "Verified approval signature for user {} in signing session {}",
-                user_id, signing_session_id
-            );
+                .any(|id| !metadata.registrations.contains_key(id))
+        {
+            return Err(invalid(
+                "Signing command does not match the authorized keygen roster".into(),
+            ));
         }
-
+        cmd.signing_authorization
+            .verify(
+                &manifest.manifest.signing_pubkey,
+                &cmd.keygen_session_id,
+                &cmd.signing_session_id,
+                &cmd.batch_items,
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| invalid(e.to_string()))?
+            .as_secs();
+        let mut approvals = std::collections::BTreeSet::new();
+        for approval in &cmd.approval_signatures {
+            if !approvals.insert(approval.user_id.clone()) {
+                return Err(invalid("Duplicate participant approval".into()));
+            }
+            let registration = metadata
+                .registrations
+                .get(&approval.user_id)
+                .ok_or_else(|| invalid("Approval from unknown participant".into()))?;
+            approval
+                .verify(
+                    &registration.context.auth_pubkey,
+                    &cmd.keygen_session_id,
+                    &cmd.signing_session_id,
+                    &cmd.batch_items,
+                    now,
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+        for (user_id, registration) in &metadata.registrations {
+            if registration.context.require_signing_approval && !approvals.contains(user_id) {
+                return Err(invalid(format!(
+                    "Missing required signing approval for {user_id}"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -281,21 +226,7 @@ impl Initialized {
             )));
         }
 
-        // Verify approval signatures for users who require signing approval
-        // This MUST happen before any signing operations begin
-        // Note: This is optional defense-in-depth. If no approval signatures are provided,
-        // we trust that the gateway has already validated approvals. When approval signatures
-        // ARE provided (e.g., single-signer flow), we verify them cryptographically.
-        if !init_cmd.approval_signatures.is_empty() {
-            let message_hash = keymeld_core::hash_message(&message);
-            let max_approval_age_secs = 300; // 5 minutes max age for approval timestamps
-            self.verify_approval_signatures(
-                &message_hash,
-                &init_cmd.signing_session_id,
-                &init_cmd.approval_signatures,
-                max_approval_age_secs,
-            )?;
-        }
+        self.verify_authorization(init_cmd)?;
 
         let max_size = enclave_ctx
             .read()
@@ -349,7 +280,14 @@ impl Initialized {
             // Decrypt per-item adaptor configs
             let item_adaptor_configs =
                 if let Some(ref encrypted_adaptor_configs) = batch_item.encrypted_adaptor_configs {
-                    decrypt_adaptor_configs(encrypted_adaptor_configs, &self.session_secret)?
+                    let configs =
+                        decrypt_adaptor_configs(encrypted_adaptor_configs, &self.session_secret)?;
+                    if configs.is_empty() {
+                        return Err(EnclaveError::Validation(ValidationError::Other(
+                            "Adaptor signing requires at least one Single adaptor config".into(),
+                        )));
+                    }
+                    configs
                 } else {
                     vec![]
                 };
@@ -375,6 +313,26 @@ impl Initialized {
                         })
                     })?;
 
+            if item_message.is_empty() || item_message.len() > max_size {
+                return Err(EnclaveError::Validation(ValidationError::Other(
+                    "Batch item message is empty or too large".into(),
+                )));
+            }
+            if batch_items_map.contains_key(&batch_item.batch_item_id) {
+                return Err(EnclaveError::Validation(ValidationError::Other(
+                    "Duplicate batch item ID".into(),
+                )));
+            }
+            if batch_item.subset_id.is_some_and(|id| {
+                !signing_processor
+                    .get_session_metadata_public()
+                    .subset_key_agg_contexts
+                    .contains_key(&id)
+            }) {
+                return Err(EnclaveError::Validation(ValidationError::Other(
+                    "Batch item references an unauthorized subset".into(),
+                )));
+            }
             let batch_item_data = BatchItemData {
                 batch_item_id: batch_item.batch_item_id,
                 message: item_message,
@@ -418,5 +376,129 @@ impl Initialized {
 
         // Immediately chain to nonce generation
         generating_nonces.generate_nonces(signing_ctx, enclave_ctx)
+    }
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use crate::operations::registration::tests::fixture;
+    use keymeld_core::{
+        authorization::{ParticipantApproval, SigningAuthorization},
+        crypto::SecureCrypto,
+        protocol::{EnclaveBatchItem, InitSigningSessionCommand},
+    };
+    use uuid::Uuid;
+
+    fn authorized_command() -> (Initialized, InitSigningSessionCommand) {
+        let f = fixture();
+        let keygen_id = f.manifest.manifest.keygen_session_id.clone();
+        let user_id = f.participant.user_id.clone();
+        let signing_id = SessionId::new_v7();
+        let mut processor = MusigProcessor::new(
+            &keygen_id,
+            TaprootTweak::None,
+            Some(1),
+            vec![user_id.clone()],
+        );
+        processor
+            .add_participant(
+                user_id.clone(),
+                secp256k1::PublicKey::from_slice(
+                    &f.participant.registration_authorization.context.public_key,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        processor.session_metadata.authorization_manifest = Some(f.manifest);
+        processor
+            .session_metadata
+            .registrations
+            .insert(user_id.clone(), f.participant.registration_authorization);
+        let item = EnclaveBatchItem {
+            batch_item_id: Uuid::now_v7(),
+            encrypted_message: "reviewed-message-ciphertext".into(),
+            encrypted_adaptor_configs: Some("reviewed-adaptor-ciphertext".into()),
+            encrypted_taproot_tweak: "reviewed-tweak-ciphertext".into(),
+            subset_id: None,
+        };
+        let items = vec![
+            item.clone(),
+            EnclaveBatchItem {
+                batch_item_id: Uuid::now_v7(),
+                ..item
+            },
+        ];
+        let authority =
+            SigningAuthorization::sign(&[12; 32], &keygen_id, &signing_id, 300, &items).unwrap();
+        let (auth, _) =
+            SecureCrypto::derive_session_auth_keypair(&[14; 32], &keygen_id.to_string()).unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let approval = ParticipantApproval::sign(
+            &auth.secret_bytes(),
+            user_id.clone(),
+            &keygen_id,
+            &signing_id,
+            now,
+            &items,
+        )
+        .unwrap();
+        (
+            Initialized::new(signing_id.clone(), f.session_secret, None, processor),
+            InitSigningSessionCommand {
+                keygen_session_id: keygen_id,
+                signing_session_id: signing_id,
+                signing_authorization: authority,
+                user_ids: vec![user_id],
+                encrypted_taproot_tweak: String::new(),
+                expected_participant_count: 1,
+                approval_signatures: vec![approval],
+                batch_items: items,
+            },
+        )
+    }
+
+    #[test]
+    fn required_approval_cannot_be_omitted_with_a_valid_batch_authority() {
+        let (state, mut command) = authorized_command();
+        assert!(state.verify_authorization(&command).is_ok());
+        command.approval_signatures.clear();
+        assert!(state.verify_authorization(&command).is_err());
+    }
+
+    #[test]
+    fn every_batch_item_adaptor_tweak_subset_and_session_is_authorized() {
+        let (state, command) = authorized_command();
+        for mutation in 0..5 {
+            let mut changed = command.clone();
+            match mutation {
+                0 => changed.batch_items[1].encrypted_message.push('x'),
+                1 => changed.batch_items[1].encrypted_adaptor_configs = None,
+                2 => changed.batch_items[1].encrypted_taproot_tweak.push('x'),
+                3 => changed.batch_items[1].subset_id = Some(Uuid::now_v7()),
+                _ => changed.signing_session_id = SessionId::new_v7(),
+            }
+            assert!(state.verify_authorization(&changed).is_err());
+        }
+        let mut reordered = command.clone();
+        reordered.batch_items.reverse();
+        assert!(state.verify_authorization(&reordered).is_err());
+    }
+
+    #[test]
+    fn shared_secret_and_participant_approval_cannot_replace_batch_authority() {
+        let (state, mut command) = authorized_command();
+        command.signing_authorization = SigningAuthorization::sign(
+            &[16; 32],
+            &command.keygen_session_id,
+            &command.signing_session_id,
+            300,
+            &command.batch_items,
+        )
+        .unwrap();
+        assert!(state.verify_authorization(&command).is_err());
     }
 }

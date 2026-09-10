@@ -23,6 +23,8 @@ pub struct ParticipantData {
     pub auth_pubkey: Vec<u8>,
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
+    /// Serialized, verified slot authorization. Required when importing or restoring a key.
+    pub registration_authorization: String,
 }
 
 impl fmt::Debug for ParticipantData {
@@ -44,6 +46,14 @@ impl fmt::Debug for ParticipantData {
 }
 
 impl ParticipantData {
+    pub fn registration_authorization(
+        &self,
+    ) -> Result<keymeld_core::authorization::RegistrationAuthorization, KeyMeldError> {
+        serde_json::from_str(&self.registration_authorization).map_err(|e| {
+            KeyMeldError::ValidationError(format!("Invalid registration authorization: {e}"))
+        })
+    }
+
     pub fn validate_epoch(
         &self,
         enclave_manager: &crate::enclave::EnclaveManager,

@@ -98,6 +98,14 @@ spec:
               containerPort: {{ $.Values.config.server.port }}
               protocol: TCP
           env:
+            - name: KEYMELD_GATEWAY_SIGNING_KEY_FILE
+              value: /etc/keymeld-channel/gateway-signing-key
+            - name: KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES
+              value: {{ $.Values.channel.dangerousTrustUnattestedEnclaves | quote }}
+            - name: KEYMELD_ENCLAVE_PCR0
+              value: {{ $.Values.channel.pcr0 | quote }}
+            - name: KEYMELD_ENCLAVE_PCR8
+              value: {{ $.Values.channel.pcr8 | quote }}
             - name: CONFIG_PATH
               value: /etc/keymeld/config.yaml
             {{- if $.Values.kms.enabled }}
@@ -138,6 +146,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ $.Values.persistence.mountPath }}
+            - name: channel-credential
+              mountPath: /etc/keymeld-channel
+              readOnly: true
             - name: config
               mountPath: /etc/keymeld
             {{- if and $.Values.enclave.enabled (not $.Values.enclave.simulation) }}
@@ -206,6 +217,13 @@ spec:
               memory: 64Mi
         {{- end }}
       volumes:
+        - name: channel-credential
+          secret:
+            secretName: {{ required "channel.existingSecret must name a provisioned gateway credential Secret" $.Values.channel.existingSecret }}
+            defaultMode: 0400
+            items:
+              - key: gateway-signing-key
+                path: gateway-signing-key
         - name: data
           {{- if $.Values.persistence.enabled }}
           persistentVolumeClaim:
@@ -346,6 +364,14 @@ spec:
               containerPort: {{ .Values.config.server.port }}
               protocol: TCP
           env:
+            - name: KEYMELD_GATEWAY_SIGNING_KEY_FILE
+              value: /etc/keymeld-channel/gateway-signing-key
+            - name: KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES
+              value: {{ .Values.channel.dangerousTrustUnattestedEnclaves | quote }}
+            - name: KEYMELD_ENCLAVE_PCR0
+              value: {{ .Values.channel.pcr0 | quote }}
+            - name: KEYMELD_ENCLAVE_PCR8
+              value: {{ .Values.channel.pcr8 | quote }}
             - name: CONFIG_PATH
               value: /etc/keymeld/config.yaml
             {{- if .Values.kms.enabled }}
@@ -386,6 +412,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
+            - name: channel-credential
+              mountPath: /etc/keymeld-channel
+              readOnly: true
             - name: config
               mountPath: /etc/keymeld
             {{- if and .Values.enclave.enabled (not .Values.enclave.simulation) }}
@@ -454,6 +483,13 @@ spec:
               memory: 64Mi
         {{- end }}
       volumes:
+        - name: channel-credential
+          secret:
+            secretName: {{ required "channel.existingSecret must name a provisioned gateway credential Secret" $.Values.channel.existingSecret }}
+            defaultMode: 0400
+            items:
+              - key: gateway-signing-key
+                path: gateway-signing-key
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

@@ -59,6 +59,10 @@ wasm-bindgen = "0.2"
 [lints]
 workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+mockito = { workspace = true }
+
 [package.metadata.cargo-machete]
 # These are WASM target-specific dependencies that enable proper random number
 # generation and JS interop. cargo-machete doesn't detect their usage because

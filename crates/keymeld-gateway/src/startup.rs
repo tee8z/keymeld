@@ -37,11 +37,11 @@ use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::OpenApi;
 
-use axum::http::header;
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     decompression::RequestDecompressionLayer,
+    services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -219,7 +219,7 @@ impl Application {
             nonce_cache: NonceCache::new(),
         };
 
-        let app = Self::build_router(app_state, &config);
+        let app = Self::build_router(app_state, &config)?;
 
         let address = format!("{}:{}", config.server.host, config.server.port);
         let addr = SocketAddr::from_str(&address)
@@ -374,7 +374,7 @@ impl Application {
                 success_count + failure_count,
                 failure_count
             );
-            info!("Gateway will continue startup but some enclaves may not function correctly");
+            anyhow::bail!("Refusing startup: all configured enclaves must authenticate and initialize successfully");
         } else {
             info!("Configured all {} enclaves with KMS", success_count);
         }
@@ -382,20 +382,30 @@ impl Application {
         info!("Initializing enclave public keys...");
         let enclave_manager = Arc::new(enclave_manager);
 
-        match enclave_manager.initialize_enclave_public_keys().await {
-            Ok(initialized_count) => {
-                info!("Initialized {} enclave public keys", initialized_count);
-            }
-            Err(e) => {
-                warn!("Failed to initialize some enclave public keys: {}", e);
-                info!("Gateway will attempt to fetch missing keys on-demand");
-            }
+        let initialized_count = enclave_manager.initialize_enclave_public_keys().await?;
+        anyhow::ensure!(
+            initialized_count == enclave_manager.get_all_enclave_ids().len(),
+            "Refusing startup: every enclave must provide its authenticated identity"
+        );
+
+        // Complete recovery before serving clients. A gateway-only restart probes live
+        // completed sessions, while an enclave restart restores their authorized state.
+        for enclave_id in enclave_manager.get_all_enclave_ids() {
+            let stats = enclave_manager
+                .restore_sessions_for_enclave(&enclave_id, db)
+                .await?;
+            anyhow::ensure!(
+                stats.keygen_failed == 0
+                    && stats.signing_failed == 0
+                    && stats.user_keys_failed == 0,
+                "Refusing startup: enclave {enclave_id} state recovery was incomplete"
+            );
         }
 
         Ok(enclave_manager)
     }
 
-    fn build_router(state: AppState, config: &Config) -> Router {
+    fn build_router(state: AppState, config: &Config) -> Result<Router> {
         let api_routes = Router::new()
             // Keygen routes
             .route("/keygen/reserve", post(handlers::reserve_keygen_session))
@@ -468,74 +478,35 @@ impl Application {
             );
 
         // UI routes for admin portal
-        let ui_routes = Router::new()
-            .route("/", get(routes::dashboard_handler))
-            .route("/sessions", get(routes::sessions_handler))
-            .route(
-                "/sessions/{session_id}",
-                get(routes::session_detail_handler),
-            )
-            .route("/enclaves", get(routes::enclaves_handler))
-            // HTMX fragment routes
-            .route("/fragments/stats", get(routes::stats_fragment_handler))
-            .route(
-                "/fragments/sessions-rows",
-                get(routes::sessions_rows_handler),
-            )
-            .route(
-                "/fragments/enclaves",
-                get(routes::enclaves_fragment_handler),
-            );
+        let ui_routes = operator_routes(
+            config.server.operator_token_file.as_deref(),
+            Router::new()
+                .route("/", get(routes::dashboard_handler))
+                .route("/sessions", get(routes::sessions_handler))
+                .route(
+                    "/sessions/{session_id}",
+                    get(routes::session_detail_handler),
+                )
+                .route("/enclaves", get(routes::enclaves_handler))
+                // HTMX fragment routes
+                .route("/fragments/stats", get(routes::stats_fragment_handler))
+                .route(
+                    "/fragments/sessions-rows",
+                    get(routes::sessions_rows_handler),
+                )
+                .route(
+                    "/fragments/enclaves",
+                    get(routes::enclaves_fragment_handler),
+                ),
+        )?;
 
-        // Static file serving for UI assets with explicit MIME types
-        // This ensures JavaScript files are served with the correct Content-Type
-        // even in environments where the system MIME database is missing
         let static_dir = std::env::var("KEYMELD_STATIC_DIR")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string());
-
-        // Create a handler for serving static files with explicit Content-Type headers
-        // to avoid MIME type issues in containerized environments
-        let static_dir_clone = static_dir.clone();
-        let serve_static_with_mime = axum::routing::get(
-            move |axum::extract::Path(path): axum::extract::Path<String>| {
-                let static_dir = static_dir_clone.clone();
-                async move {
-                    let file_path = std::path::Path::new(&static_dir).join(&path);
-
-                    // Determine Content-Type based on file extension
-                    let content_type = match file_path.extension().and_then(|e| e.to_str()) {
-                        Some("js") => "application/javascript; charset=utf-8",
-                        Some("css") => "text/css; charset=utf-8",
-                        Some("html") => "text/html; charset=utf-8",
-                        Some("json") => "application/json; charset=utf-8",
-                        Some("png") => "image/png",
-                        Some("jpg") | Some("jpeg") => "image/jpeg",
-                        Some("svg") => "image/svg+xml",
-                        Some("woff") => "font/woff",
-                        Some("woff2") => "font/woff2",
-                        Some("ttf") => "font/ttf",
-                        Some("ico") => "image/x-icon",
-                        _ => "application/octet-stream",
-                    };
-
-                    match tokio::fs::read(&file_path).await {
-                        Ok(contents) => axum::response::Response::builder()
-                            .header(header::CONTENT_TYPE, content_type)
-                            .body(axum::body::Body::from(contents))
-                            .unwrap(),
-                        Err(_) => axum::response::Response::builder()
-                            .status(axum::http::StatusCode::NOT_FOUND)
-                            .body(axum::body::Body::empty())
-                            .unwrap(),
-                    }
-                }
-            },
-        );
 
         let app = Router::new()
             .merge(ui_routes)
             .nest("/api/v1", api_routes)
-            .route("/static/{*path}", serve_static_with_mime);
+            .merge(static_file_routes(&static_dir));
 
         let mut app = app
             .layer(
@@ -566,8 +537,75 @@ impl Application {
             );
         }
 
-        app
+        Ok(app)
     }
+}
+
+fn operator_routes<S>(token_file: Option<&str>, routes: Router<S>) -> Result<Router<S>>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let Some(path) = token_file else {
+        return Ok(Router::new());
+    };
+    let token = zeroize::Zeroizing::new(
+        std::fs::read_to_string(path).context("Cannot read operator token file")?,
+    );
+    let token: [u8; 32] = hex::decode(token.trim())
+        .context("Operator token must contain 64 hexadecimal characters")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Operator token must contain 32 bytes"))?;
+    Ok(routes.route_layer(middleware::from_fn_with_state(
+        Arc::new(token),
+        authenticate_operator,
+    )))
+}
+
+async fn authenticate_operator(
+    axum::extract::State(expected): axum::extract::State<Arc<[u8; 32]>>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::{
+        http::{header, StatusCode},
+        response::IntoResponse,
+    };
+    use subtle::ConstantTimeEq;
+
+    let supplied = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| value.len() == 64)
+        .and_then(|value| hex::decode(value).ok());
+    let authorized = supplied
+        .as_deref()
+        .is_some_and(|token| bool::from(expected.as_slice().ct_eq(token)));
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+        )
+            .into_response();
+    }
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
+fn static_file_routes<S>(static_dir: impl AsRef<std::path::Path>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // ServeDir rejects decoded traversal components and uses a built-in MIME
+    // table, including JavaScript and CSS, without a system MIME database.
+    Router::new().nest_service(
+        "/static",
+        ServeDir::new(static_dir).append_index_html_on_directories(false),
+    )
 }
 
 async fn shutdown_signal() {
@@ -612,6 +650,656 @@ mod tests {
     };
     use keymeld_core::logging::LoggingConfig;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct StaticTestServer {
+        address: SocketAddr,
+        task: JoinHandle<()>,
+    }
+
+    impl StaticTestServer {
+        async fn start(directory: &std::path::Path) -> Self {
+            Self::start_router(static_file_routes(directory)).await
+        }
+
+        async fn start_router(router: Router) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            Self { address, task }
+        }
+
+        async fn request(&self, method: &str, path: &str) -> (u16, String, String) {
+            self.request_with_body(method, path, "", "").await
+        }
+
+        async fn request_with_body(
+            &self,
+            method: &str,
+            path: &str,
+            headers: &str,
+            body: &str,
+        ) -> (u16, String, String) {
+            // A raw request preserves encoded traversal bytes that URL clients
+            // can normalize before the gateway receives them.
+            timeout(Duration::from_secs(5), async {
+                let mut stream = tokio::net::TcpStream::connect(self.address)
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response).await.unwrap();
+                let response = String::from_utf8(response).unwrap();
+                let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+                let status = headers
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                (status, headers.to_ascii_lowercase(), body.to_owned())
+            })
+            .await
+            .expect("static file HTTP request timed out")
+        }
+    }
+
+    impl Drop for StaticTestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn http_test_state(config: &Config) -> (AppState, sqlx::SqlitePool) {
+        let db = Database::new(&config.database).await.unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", config.database.path))
+            .await
+            .unwrap();
+        let credentials =
+            crate::enclave::channel::ChannelCredentials::dangerous_trust_unattested_enclaves(
+                [42; 32],
+            )
+            .unwrap();
+        let manager = EnclaveManager::new_with_credentials(
+            vec![crate::enclave::EnclaveConfig {
+                id: 1,
+                cid: 3,
+                port: 9,
+                connector: SocketConnector::tcp("127.0.0.1", 9),
+            }],
+            TimeoutConfig::default(),
+            Arc::new(credentials),
+        )
+        .unwrap();
+        (
+            AppState {
+                db,
+                enclave_manager: Arc::new(manager),
+                metrics: Arc::new(Metrics),
+                gateway_limits: GatewayLimits::default(),
+                nonce_cache: NonceCache::new(),
+            },
+            pool,
+        )
+    }
+
+    #[tokio::test]
+    async fn operator_pages_and_htmx_are_disabled_by_default_and_require_operator_auth_when_enabled(
+    ) {
+        let (mut config, directory) = create_test_config();
+        let (state, _) = http_test_state(&config).await;
+        let paths = [
+            "/",
+            "/sessions",
+            "/sessions/0193a5de-4294-7000-8000-000000000001",
+            "/enclaves",
+            "/fragments/stats",
+            "/fragments/sessions-rows",
+            "/fragments/enclaves",
+        ];
+        let disabled = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+        for path in paths {
+            assert_eq!(disabled.request("GET", path).await.0, 404, "{path}");
+        }
+        let token = hex::encode([42; 32]);
+        let token_path = directory.path().join("operator-token");
+        std::fs::write(&token_path, &token).unwrap();
+        config.server.operator_token_file = Some(token_path.to_string_lossy().into_owned());
+        let enabled =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        for path in paths {
+            for headers in [
+                "",
+                "Authorization: Bearer invalid\r\n",
+                "X-User-Signature: participant-token\r\n",
+                "HX-Request: true\r\n",
+            ] {
+                let (status, _, body) = enabled.request_with_body("GET", path, headers, "").await;
+                assert_eq!(status, 401, "{path}: {body}");
+            }
+            let (status, headers, _) = enabled
+                .request_with_body(
+                    "GET",
+                    path,
+                    &format!("Authorization: Bearer {token}\r\nHX-Request: true\r\n"),
+                    "",
+                )
+                .await;
+            assert_eq!(status, 200, "{path}");
+            assert!(headers.contains("cache-control: no-store"));
+        }
+        // This utility route does not depend on a running enclave. The UI's
+        // operator middleware must not protect the public API router.
+        assert_eq!(enabled.request("GET", "/api/v1/version").await.0, 200);
+    }
+
+    #[test]
+    fn invalid_operator_configuration_fails_closed() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("operator-token");
+        let routes = || {
+            Router::<()>::new().route("/sessions", get(|| async { "private session inventory" }))
+        };
+        assert!(operator_routes(Some(path.to_str().unwrap()), routes()).is_err());
+        for invalid_token in ["", "password", "0011", &"ff".repeat(33)] {
+            std::fs::write(&path, invalid_token).unwrap();
+            assert!(operator_routes(Some(path.to_str().unwrap()), routes()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn single_key_reservation_and_import_http_proofs_cannot_be_omitted_rebound_or_replaced() {
+        let (config, _directory) = create_test_config();
+        let (state, pool) = http_test_state(&config).await;
+        let enclave_key = secp256k1::PublicKey::from_secret_key(
+            &secp256k1::Secp256k1::new(),
+            &secp256k1::SecretKey::from_byte_array([9; 32]).unwrap(),
+        )
+        .to_string();
+        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 9999999999, ?)").bind(&enclave_key).execute(&pool).await.unwrap();
+        let server = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+        let owner = keymeld_sdk::UserCredentials::from_private_key(&[1; 32]).unwrap();
+        let attacker = keymeld_sdk::UserCredentials::from_private_key(&[2; 32]).unwrap();
+        let request = ReserveKeySlotRequest {
+            key_id: keymeld_sdk::KeyId::new_v7(),
+            user_id: keymeld_sdk::UserId::new_v7(),
+            auth_pubkey: owner.auth_public_key_bytes(),
+        };
+        let body = serde_json::to_string(&request).unwrap();
+        assert!(
+            server
+                .request_with_body("POST", "/api/v1/keys/reserve", "", &body)
+                .await
+                .0
+                >= 400
+        );
+        assert!(state
+            .db
+            .get_reserved_key_slot(&request.key_id)
+            .await
+            .unwrap()
+            .is_none());
+        let signature = owner
+            .sign_user_request(&request.auth_scope().unwrap(), &request.user_id.to_string())
+            .unwrap();
+        let headers = format!("X-User-Signature: {signature}\r\n");
+        let mut rebound = request.clone();
+        rebound.user_id = keymeld_sdk::UserId::new_v7();
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keys/reserve",
+                    &headers,
+                    &serde_json::to_string(&rebound).unwrap()
+                )
+                .await
+                .0,
+            401
+        );
+        assert_eq!(
+            server
+                .request_with_body("POST", "/api/v1/keys/reserve", &headers, &body)
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            server
+                .request_with_body("POST", "/api/v1/keys/reserve", &headers, &body)
+                .await
+                .0,
+            401
+        );
+        let mut stolen = request.clone();
+        stolen.auth_pubkey = attacker.auth_public_key_bytes();
+        let signature = attacker
+            .sign_user_request(&stolen.auth_scope().unwrap(), &stolen.user_id.to_string())
+            .unwrap();
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keys/reserve",
+                    &format!("X-User-Signature: {signature}\r\n"),
+                    &serde_json::to_string(&stolen).unwrap()
+                )
+                .await
+                .0,
+            409
+        );
+        let mut import = ImportUserKeyRequest {
+            key_id: request.key_id.clone(),
+            user_id: request.user_id.clone(),
+            auth_pubkey: attacker.auth_public_key_bytes(),
+            encrypted_private_key: "0102".into(),
+            enclave_public_key: enclave_key,
+        };
+        let signature = attacker
+            .sign_user_request(&import.auth_scope().unwrap(), &import.user_id.to_string())
+            .unwrap();
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keys/import",
+                    &format!("X-User-Signature: {signature}\r\n"),
+                    &serde_json::to_string(&import).unwrap()
+                )
+                .await
+                .0,
+            401
+        );
+        import.auth_pubkey = owner.auth_public_key_bytes();
+        let signature = owner
+            .sign_user_request(&import.auth_scope().unwrap(), &import.user_id.to_string())
+            .unwrap();
+        let headers = format!("X-User-Signature: {signature}\r\n");
+        let mut altered = import.clone();
+        altered.encrypted_private_key = "0304".into();
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keys/import",
+                    &headers,
+                    &serde_json::to_string(&altered).unwrap()
+                )
+                .await
+                .0,
+            401
+        );
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keys/import",
+                    &headers,
+                    &serde_json::to_string(&import).unwrap()
+                )
+                .await
+                .0,
+            200
+        );
+        let persisted: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT auth_pubkey, encrypted_private_key FROM pending_key_imports WHERE key_id = ?",
+        )
+        .bind(&request.key_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted, (owner.auth_public_key_bytes(), vec![1, 2]));
+    }
+
+    #[tokio::test]
+    async fn keygen_key_persistence_http_requires_participant_proof_and_slots_survive_gateway_restart(
+    ) {
+        use crate::session::keygen::{
+            KeygenCollectingParticipants, KeygenCompleted, KeygenSessionStatus,
+        };
+        use keymeld_core::{
+            authorization::{SessionAuthorizationManifest, SignedSessionManifest},
+            SessionId, UserId,
+        };
+        use std::collections::BTreeMap;
+        let (config, _directory) = create_test_config();
+        let (state, pool) = http_test_state(&config).await;
+        let owner = keymeld_sdk::UserCredentials::from_private_key(&[1; 32]).unwrap();
+        let attacker = keymeld_sdk::UserCredentials::from_private_key(&[2; 32]).unwrap();
+        let session_credentials = keymeld_sdk::SessionCredentials::generate().unwrap();
+        let user = UserId::new_v7();
+        let session = SessionId::new_v7();
+        let authority = keymeld_sdk::AuthorizationCredentials::generate().unwrap();
+        let manifest = SignedSessionManifest::sign(
+            SessionAuthorizationManifest {
+                keygen_session_id: session.clone(),
+                coordinator_user_id: user.clone(),
+                creator_pubkey: authority.public_key_bytes(),
+                signing_pubkey: authority.public_key_bytes(),
+                session_public_key: session_credentials.public_key_bytes(),
+                participant_verifiers: BTreeMap::from([(
+                    user.clone(),
+                    attacker.public_key_bytes(),
+                )]),
+                timeout_secs: 600,
+                max_signing_sessions: None,
+                encrypted_taproot_tweak: String::new(),
+                subset_definitions: vec![],
+            },
+            &authority.export_secret(),
+        )
+        .unwrap();
+        let recipient_authorization =
+            keymeld_core::authorization::EnclaveRecipientAuthorization::sign(
+                &manifest,
+                BTreeMap::from([(user.clone(), keymeld_sdk::EnclaveId::from(1))]),
+                BTreeMap::from([(keymeld_sdk::EnclaveId::from(1), owner.public_key_bytes())]),
+                &authority.export_secret(),
+            )
+            .unwrap();
+        let completed = KeygenSessionStatus::Completed(KeygenCompleted {
+            recipient_authorization: Box::new(recipient_authorization),
+            authorization_manifest: Box::new(manifest),
+            encrypted_roster: String::new(),
+            keygen_session_id: session.clone(),
+            coordinator_pubkey: *owner.public_key(),
+            coordinator_encrypted_private_key: String::new(),
+            session_public_key: session_credentials.public_key_bytes(),
+            encrypted_session_secret: String::new(),
+            coordinator_enclave_id: keymeld_sdk::EnclaveId::from(1),
+            expected_participants: vec![user.clone()],
+            registered_participants: BTreeMap::new(),
+            aggregate_public_key: String::new(),
+            created_at: 0,
+            completed_at: 1,
+            completed_with_epochs: BTreeMap::new(),
+            encrypted_taproot_tweak: String::new(),
+            participant_encrypted_public_keys: vec![],
+            enclave_encrypted_session_secrets: vec![],
+            subset_definitions: vec![],
+            encrypted_subset_aggregates: BTreeMap::new(),
+        });
+        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 9999999999, '')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status, session_public_key) VALUES (?, 'completed', 0, 9999999999, '[]', ?, ?)")
+            .bind(&session).bind(serde_json::to_string(&completed).unwrap()).bind(session_credentials.public_key_bytes()).execute(&pool).await.unwrap();
+        let key_row = state
+            .db
+            .store_user_key(crate::database::StoreUserKeyParams {
+                user_id: &user,
+                key_id: &keymeld_sdk::KeyId::new_v7(),
+                enclave_id: keymeld_sdk::EnclaveId::from(1),
+                enclave_key_epoch: 1,
+                encrypted_private_key: &[1],
+                auth_pubkey: &owner
+                    .derive_session_auth_pubkey(&session.to_string())
+                    .unwrap(),
+                origin_keygen_session_id: Some(&session),
+            })
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, registered_at) VALUES (?, ?, ?, 0)")
+            .bind(&session).bind(&user).bind(key_row).execute(&pool).await.unwrap();
+        let server = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+        let request = StoreKeyFromKeygenRequest {
+            key_id: keymeld_sdk::KeyId::new_v7(),
+        };
+        let url = format!("/api/v1/keys/{user}/keygen/{session}");
+        let body = serde_json::to_string(&request).unwrap();
+        assert!(server.request_with_body("POST", &url, "", &body).await.0 >= 400);
+        let scope = request.auth_scope(&user, &session).unwrap();
+        let bad_signature = attacker
+            .sign_for_session(&scope, &user.to_string(), &session.to_string())
+            .unwrap();
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    &url,
+                    &format!("X-User-Signature: {bad_signature}\r\n"),
+                    &body
+                )
+                .await
+                .0,
+            401
+        );
+        let signature = owner
+            .sign_for_session(&scope, &user.to_string(), &session.to_string())
+            .unwrap();
+        let headers = format!("X-User-Signature: {signature}\r\n");
+        let altered = StoreKeyFromKeygenRequest {
+            key_id: keymeld_sdk::KeyId::new_v7(),
+        };
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    &url,
+                    &headers,
+                    &serde_json::to_string(&altered).unwrap()
+                )
+                .await
+                .0,
+            401
+        );
+        assert!(state
+            .db
+            .get_pending_key_store(&request.key_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            server
+                .request_with_body("POST", &url, &headers, &body)
+                .await
+                .0,
+            200
+        );
+        let pending = state
+            .db
+            .get_pending_key_store(&request.key_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.authorization, signature);
+        assert_eq!(pending.user_id, user);
+        assert_eq!(pending.keygen_session_id, session);
+
+        // A fresh gateway has persisted session state and an empty in-memory
+        // assignment cache until background restoration finishes.
+        assert!(state
+            .enclave_manager
+            .get_session_assignment(&session)
+            .unwrap()
+            .is_none());
+        let KeygenSessionStatus::Completed(completed_data) = &completed else {
+            unreachable!()
+        };
+        let collecting =
+            KeygenSessionStatus::CollectingParticipants(KeygenCollectingParticipants {
+                authorization_manifest: completed_data.authorization_manifest.clone(),
+                recipient_authorization: completed_data.recipient_authorization.clone(),
+                keygen_session_id: session.clone(),
+                coordinator_pubkey: completed_data.coordinator_pubkey,
+                coordinator_encrypted_private_key: String::new(),
+                session_public_key: session_credentials.public_key_bytes(),
+                encrypted_session_secret: String::new(),
+                coordinator_enclave_id: completed_data.coordinator_enclave_id,
+                expected_participants: vec![user.clone()],
+                registered_participants: BTreeMap::new(),
+                created_at: 0,
+                expires_at: 9999999999,
+                required_enclave_epochs: BTreeMap::new(),
+                encrypted_taproot_tweak: String::new(),
+                subset_definitions: vec![],
+            });
+        let slots_url = format!("/api/v1/keygen/{session}/slots");
+        assert!(server.request("GET", &slots_url).await.0 >= 400);
+        for (status_name, status) in [
+            ("completed", completed),
+            ("collecting_participants", collecting),
+        ] {
+            sqlx::query("UPDATE keygen_sessions SET status_name = ?, status = ? WHERE keygen_session_id = ?")
+                .bind(status_name).bind(serde_json::to_string(&status).unwrap()).bind(&session).execute(&pool).await.unwrap();
+            let signature = session_credentials
+                .sign_session_request(&session.to_string())
+                .unwrap();
+            let (code, _, body) = server
+                .request_with_body(
+                    "GET",
+                    &slots_url,
+                    &format!("X-Session-Signature: {signature}\r\n"),
+                    "",
+                )
+                .await;
+            assert_eq!(code, 200, "{status_name}: {body}");
+            let slots: GetAvailableSlotsResponse = serde_json::from_str(&body).unwrap();
+            assert_eq!(slots.session_id, session);
+            assert_eq!(slots.available_slots.len(), 1);
+            assert_eq!(slots.available_slots[0].user_id, user);
+            assert_eq!(
+                slots.available_slots[0].enclave_id,
+                keymeld_sdk::EnclaveId::from(1)
+            );
+            assert_eq!(slots.available_slots[0].signer_index, 0);
+            assert!(slots.available_slots[0].claimed);
+
+            for change_signature in [false, true] {
+                let mut corrupted = status.clone();
+                let (recipient_authorization, coordinator_enclave) = match &mut corrupted {
+                    KeygenSessionStatus::Completed(s) => (
+                        &mut s.recipient_authorization,
+                        &mut s.coordinator_enclave_id,
+                    ),
+                    KeygenSessionStatus::CollectingParticipants(s) => (
+                        &mut s.recipient_authorization,
+                        &mut s.coordinator_enclave_id,
+                    ),
+                    _ => unreachable!(),
+                };
+                if change_signature {
+                    recipient_authorization.signature[0] ^= 1;
+                } else {
+                    *coordinator_enclave = keymeld_sdk::EnclaveId::from(2);
+                }
+                sqlx::query("UPDATE keygen_sessions SET status = ? WHERE keygen_session_id = ?")
+                    .bind(serde_json::to_string(&corrupted).unwrap())
+                    .bind(&session)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let signature = session_credentials
+                    .sign_session_request(&session.to_string())
+                    .unwrap();
+                assert_eq!(
+                    server
+                        .request_with_body(
+                            "GET",
+                            &slots_url,
+                            &format!("X-Session-Signature: {signature}\r\n"),
+                            ""
+                        )
+                        .await
+                        .0,
+                    500
+                );
+            }
+        }
+        assert!(state
+            .enclave_manager
+            .get_session_assignment(&session)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn static_assets_preserve_content_and_mime_types() {
+        let directory = TempDir::new().unwrap();
+        std::fs::write(directory.path().join("app.js"), "console.log('asset');").unwrap();
+        std::fs::write(directory.path().join("styles.css"), "body { color: red; }").unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        std::fs::write(directory.path().join("nested/probe.txt"), "STATIC-OK").unwrap();
+        std::fs::write(
+            directory.path().join("nested/index.html"),
+            "not an asset index",
+        )
+        .unwrap();
+        let server = StaticTestServer::start(directory.path()).await;
+
+        for (path, mime, expected) in [
+            ("/static/app.js", "text/javascript", "console.log('asset');"),
+            ("/static/styles.css", "text/css", "body { color: red; }"),
+            ("/static/nested/probe.txt", "text/plain", "STATIC-OK"),
+        ] {
+            let (status, headers, body) = server.request("GET", path).await;
+            assert_eq!(status, 200, "{path}");
+            assert!(
+                headers.contains(&format!("content-type: {mime}")),
+                "{headers}"
+            );
+            assert_eq!(body, expected, "{path}");
+        }
+
+        let (status, _, body) = server.request("HEAD", "/static/app.js").await;
+        assert_eq!(status, 200);
+        assert!(body.is_empty());
+        assert_eq!(server.request("POST", "/static/app.js").await.0, 405);
+        assert_eq!(server.request("GET", "/static/missing.js").await.0, 404);
+        assert_eq!(server.request("GET", "/static/nested/").await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn static_encoded_traversals_cannot_read_a_sibling_secret() {
+        let directory = TempDir::new().unwrap();
+        let asset_directory = directory.path().join("static");
+        std::fs::create_dir_all(asset_directory.join("nested")).unwrap();
+        std::fs::write(asset_directory.join("probe.txt"), "STATIC-OK").unwrap();
+        let secret_path = directory.path().join("secret.txt");
+        let secret = "OUTSIDE-THE-STATIC-ROOT";
+        std::fs::write(&secret_path, secret).unwrap();
+        let server = StaticTestServer::start(&asset_directory).await;
+        assert_eq!(
+            server.request("GET", "/static/probe.txt").await.2,
+            "STATIC-OK"
+        );
+
+        let absolute_escape = format!(
+            "/static/{}",
+            secret_path.to_str().unwrap().replace('/', "%2f")
+        );
+        for path in [
+            "/static/../secret.txt",
+            "/static/..%2fsecret.txt",
+            "/static/%2e%2e%2fsecret.txt",
+            "/static/nested%2f..%2f..%2fsecret.txt",
+            "/static/..%5csecret.txt",
+            "/static/%252e%252e%252fsecret.txt",
+            absolute_escape.as_str(),
+        ] {
+            let (status, _, body) = server.request("GET", path).await;
+            assert_eq!(status, 404, "{path}: {body}");
+            assert!(!body.contains(secret), "{path} exposed the sibling secret");
+        }
+    }
 
     fn create_test_config() -> (Config, TempDir) {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -624,6 +1312,7 @@ mod tests {
                 port: 0,
                 enable_cors: true,
                 enable_compression: true,
+                operator_token_file: None,
             },
             database: DatabaseConfig {
                 path: db_path.to_string_lossy().to_string(),
@@ -677,27 +1366,60 @@ mod tests {
 
     #[tokio::test]
     async fn test_application_build() {
+        const CHILD_MARKER: &str = "KEYMELD_TEST_MISSING_CHANNEL_CREDENTIAL_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            // Test the actual environment-backed startup path in a subprocess.
+            // Mutating this test process's environment would race other tests.
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "startup::tests::test_application_build",
+                    "--nocapture",
+                ])
+                .env(CHILD_MARKER, "1")
+                .env_remove("KEYMELD_GATEWAY_SIGNING_KEY_FILE")
+                .output()
+                .await
+                .expect("Failed to launch isolated startup test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let (config, _temp_dir) = create_test_config();
-
         let result = Application::build(config).await;
-        assert!(result.is_ok());
+        let error = match result {
+            Ok(_) => panic!("Gateway started without a provisioned channel credential"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("KEYMELD_GATEWAY_SIGNING_KEY_FILE"),
+            "Unexpected startup failure: {error:#}"
+        );
     }
 
     #[tokio::test]
     async fn test_enclave_manager_setup() {
         let (config, _temp_dir) = create_test_config();
-
-        let db = Database::new(&config.database)
-            .await
-            .expect("Failed to create database");
-
-        let enclave_manager = Application::setup_enclave_manager(&config, &db)
-            .await
-            .expect("Failed to setup enclave manager");
-
-        let health_result = enclave_manager.health_check().await;
-
-        assert!(!health_result.is_empty() || health_result.is_empty());
+        let (state, _pool) = http_test_state(&config).await;
+        // Explicit test credentials construct the intended enclave client
+        // without process-wide configuration or probes to live services.
+        let enclave_id = keymeld_core::EnclaveId::from(1);
+        assert_eq!(
+            state.enclave_manager.get_all_enclave_ids(),
+            vec![enclave_id]
+        );
+        assert!(state
+            .enclave_manager
+            .get_enclave_client(&enclave_id)
+            .is_some());
+        assert_eq!(
+            state.enclave_manager.get_enclave_key_epoch(&enclave_id),
+            Some(1)
+        );
     }
 
     #[test]

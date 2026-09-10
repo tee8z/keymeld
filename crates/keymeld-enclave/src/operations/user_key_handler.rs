@@ -22,21 +22,22 @@ use keymeld_core::{
 };
 use secp256k1::{ecdsa::Signature as EcdsaSignature, Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+
 use tracing::{debug, info, warn};
 
 use super::{
     enclave_context::EnclaveSharedContext,
     user_key_store::{EncryptedUserKeyRecord, UserKeyStore},
 };
-use crate::musig::MusigProcessor;
 
 /// Handle a UserKeyCommand and return the appropriate outcome
 pub async fn handle_user_key_command(
     cmd: UserKeyCommand,
     user_key_store: &UserKeyStore,
     enclave_ctx: &EnclaveSharedContext,
-    keygen_sessions: Option<&dashmap::DashMap<SessionId, Arc<MusigProcessor>>>,
+    keygen_sessions: Option<
+        &dashmap::DashMap<SessionId, crate::operations::context_aware_session::ContextAwareSession>,
+    >,
 ) -> Result<UserKeyOutcome, EnclaveError> {
     match cmd {
         UserKeyCommand::ImportKey(import_cmd) => {
@@ -135,6 +136,7 @@ async fn handle_import_key(
 }
 
 const MAX_APPROVAL_TIMESTAMP_AGE_SECS: u64 = 300;
+const MAX_APPROVAL_FUTURE_SKEW_SECS: u64 = 30;
 
 /// Format: ECDSA(auth_privkey, SHA256(encrypted_message || key_id || timestamp))
 fn validate_approval_signature(
@@ -157,6 +159,12 @@ fn validate_approval_signature(
             current_time - cmd.approval_timestamp,
             MAX_APPROVAL_TIMESTAMP_AGE_SECS
         ))));
+    }
+
+    if cmd.approval_timestamp.saturating_sub(current_time) > MAX_APPROVAL_FUTURE_SKEW_SECS {
+        return Err(EnclaveError::Validation(ValidationError::Other(
+            "Approval timestamp is too far in the future".to_string(),
+        )));
     }
 
     let mut hasher = Sha256::new();
@@ -423,7 +431,9 @@ async fn handle_delete_key(
 async fn handle_store_from_keygen(
     cmd: StoreKeyFromKeygenCommand,
     user_key_store: &UserKeyStore,
-    keygen_sessions: Option<&dashmap::DashMap<SessionId, Arc<MusigProcessor>>>,
+    keygen_sessions: Option<
+        &dashmap::DashMap<SessionId, crate::operations::context_aware_session::ContextAwareSession>,
+    >,
     enclave_ctx: &EnclaveSharedContext,
 ) -> Result<UserKeyOutcome, EnclaveError> {
     let keygen_sessions = keygen_sessions.ok_or_else(|| {
@@ -433,12 +443,23 @@ async fn handle_store_from_keygen(
     })?;
 
     // Get the keygen session
-    let processor = keygen_sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
+    let session = keygen_sessions.get(&cmd.keygen_session_id).ok_or_else(|| {
         EnclaveError::Crypto(CryptoError::Other(format!(
             "Keygen session not found: {}",
             cmd.keygen_session_id
         )))
     })?;
+
+    let processor = match &session.status {
+        crate::operations::states::OperatorStatus::Keygen(
+            crate::operations::states::KeygenStatus::Completed(completed),
+        ) => completed.musig_processor(),
+        _ => {
+            return Err(EnclaveError::Validation(ValidationError::Other(
+                "Only completed keygen sessions can export an authorized key".into(),
+            )))
+        }
+    };
 
     // Get the user's session data from the processor
     let user_session = processor
@@ -471,6 +492,19 @@ async fn handle_store_from_keygen(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+
+    keymeld_core::request_auth::RequestAuth::parse(&cmd.authorization)
+        .and_then(|proof| {
+            proof.verify(
+                keymeld_core::request_auth::AuthKind::User,
+                &cmd.auth_scope()?,
+                &cmd.user_id.to_string(),
+                &PublicKey::from_slice(&auth_pubkey)
+                    .map_err(keymeld_core::KeyMeldError::InvalidKey)?,
+                created_at,
+            )
+        })
+        .map_err(|e| EnclaveError::Validation(ValidationError::Other(e.to_string())))?;
 
     // Store the key with origin keygen session reference
     user_key_store.store_key(
@@ -632,6 +666,34 @@ mod tests {
             "Error should mention expiration: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_validate_approval_signature_future() {
+        let secp = Secp256k1::new();
+        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for timestamp in [now + 600, 4_102_444_800, u64::MAX] {
+            let key_id = KeyId::new_v7();
+            let encrypted_message = "future-approval-ciphertext".to_string();
+            let approval_signature =
+                create_approval_signature(&auth_secret_key, &encrypted_message, &key_id, timestamp);
+            let cmd = SignSingleCommand {
+                user_id: UserId::new_v7(),
+                key_id,
+                encrypted_message,
+                signature_type: SignatureType::SchnorrBip340,
+                encrypted_session_secret: "dummy".to_string(),
+                approval_signature,
+                approval_timestamp: timestamp,
+            };
+            let error =
+                validate_approval_signature(&cmd, &auth_public_key.serialize()).unwrap_err();
+            assert!(error.to_string().contains("future"), "{error}");
+        }
     }
 
     #[test]
