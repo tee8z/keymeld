@@ -44,7 +44,6 @@ pub struct SessionDetailView {
 #[derive(Clone)]
 pub struct ParticipantView {
     pub user_id: String,
-    pub public_key: Option<String>,
     pub enclave_id: Option<u32>,
     pub approved: bool,
 }
@@ -151,7 +150,6 @@ pub fn session_detail_content(session: &SessionDetailView) -> Markup {
                         thead {
                             tr {
                                 th { "User ID" }
-                                th class="is-hidden-mobile" { "Public Key" }
                                 th { "Enclave" }
                                 th { "Status" }
                             }
@@ -166,19 +164,6 @@ pub fn session_detail_content(session: &SessionDetailView) -> Markup {
                                             } @else {
                                                 (participant.user_id)
                                             }
-                                        }
-                                    }
-                                    td class="is-hidden-mobile" {
-                                        @if let Some(ref pubkey) = participant.public_key {
-                                            span class="pubkey" {
-                                                @if pubkey.len() > 20 {
-                                                    (format!("{}...", &pubkey[..20]))
-                                                } @else {
-                                                    (pubkey)
-                                                }
-                                            }
-                                        } @else {
-                                            span class="has-text-grey" { "-" }
                                         }
                                     }
                                     td {

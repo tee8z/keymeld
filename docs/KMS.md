@@ -1,142 +1,99 @@
-# KMS Integration
+# KMS integration
 
-KeyMeld uses AWS KMS to persist enclave private keys across restarts without exposing them outside the enclave.
+KeyMeld uses AWS KMS to recover its enclave key hierarchy after a restart.
+The gateway stores an encrypted data encryption key (DEK), encrypted enclave private key, public key, and KMS key identifier.
 
-## How It Works
+## Current trust boundary
 
-1. Enclave generates secp256k1 keypair
-2. KMS generates a Data Encryption Key (DEK)
-3. Enclave encrypts private key with DEK (AES-256-GCM)
-4. Both encrypted DEK and encrypted private key stored in gateway database
-5. On restart, enclave requests KMS to decrypt DEK, then decrypts private key
+The enclave calls `GenerateDataKey` and `Decrypt` through the standard AWS SDK and consumes their `Plaintext` responses.
+These calls use IAM authorization and do not supply Nitro `Recipient` attestation.
+A principal with `kms:Decrypt` permission and the stored ciphertext and encryption context can recover the DEK outside the enclave.
+Treat that KMS principal and any TLS-terminating KMS proxy as trusted custody components.
 
-The private key never exists in plaintext outside the enclave.
+The 0.4.0 client and gateway attestation checks authenticate enclave keys before sending secrets or commands.
+They do not change the KMS recovery trust boundary.
+The KMS encryption context includes the enclave ID and any configured PCR labels; these labels are caller-supplied metadata, not attestation evidence.
+
+Enclave-only KMS recovery requires additional implementation: supply `Recipient`, decrypt `CiphertextForRecipient` inside the enclave, and enforce an attestation-based KMS policy.
+AWS documents this protocol in [attested KMS calls](https://docs.aws.amazon.com/kms/latest/developerguide/attested-calls.html).
+A policy that requires `kms:RecipientAttestation` rejects the current implementation's calls.
+Hardware testing alone does not add this missing protocol.
+
+## Key lifecycle
+
+1. The enclave generates its secp256k1 keypair.
+2. KMS generates a DEK and returns plaintext and encrypted copies.
+3. The enclave encrypts its private key with the DEK using AES-256-GCM.
+4. The gateway stores both encrypted values and their KMS key identifier.
+5. On restart, the enclave asks KMS to decrypt the DEK under the pinned KMS key.
+6. The enclave decrypts its private key and verifies the recovered public identity through the authenticated channel.
+
+The DEK remains in enclave memory while keys are in use.
+The gateway command response contains the encrypted hierarchy, not the plaintext DEK.
+An authorized caller's ability to obtain plaintext from KMS is described above.
 
 ## Configuration
 
-### Development (LocalStack)
+For local simulation with Moto:
 
 ```yaml
-# config/development.yaml
 kms:
   enabled: true
-  endpoint_url: "http://localhost:4566"
+  endpoint_url: "http://127.0.0.1:4566"
   key_id: "alias/keymeld-enclave-master-key"
-  enable_attestation: false
 ```
 
-### Production (AWS KMS)
+For the standard regional AWS endpoint:
 
 ```yaml
-# config/production.yaml
 kms:
   enabled: true
   endpoint_url: null
   key_id: "arn:aws:kms:us-west-2:ACCOUNT:key/KEY_ID"
-  enable_attestation: true
 ```
 
-## AWS Setup
+Provision matching `ENCLAVE_KMS_ENDPOINT` and `ENCLAVE_KMS_KEY_ID` values in the enclave image.
+Use `aws-kms` for `ENCLAVE_KMS_ENDPOINT` when the gateway endpoint is `null`.
+Set `AWS_REGION` to the intended region.
+Use a key ARN to pin a specific key; aliases can be reassigned outside KeyMeld.
+There is no `kms.enable_attestation` configuration field.
 
-### 1. Create KMS Key
+The enclave rejects configuration with a different endpoint or key identifier.
+An initialized enclave rejects another configuration command.
+Restoration passes the pinned key identifier to `Decrypt`; ciphertext for a different key must fail.
+See the [AWS Decrypt reference](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html) for the `KeyId` behavior.
 
-```bash
-aws kms create-key --description "KeyMeld Production Master Key"
-aws kms create-alias --alias-name alias/keymeld-master --target-key-id YOUR_KEY_ID
-```
+See [security configuration](SECURITY_OPERATIONS.md) for gateway credentials, measured image configuration, SDK attestation policy, and deployment acceptance.
 
-### 2. Get Enclave PCR Values
+## Permissions and deployment
 
-```bash
-nitro-cli describe-eif --eif-path artifacts/keymeld-enclave.eif | jq '.Measurements'
-```
+Grant `kms:GenerateDataKey` and `kms:Decrypt` only for the intended KMS key.
+Provision credentials for the enclave's KMS client according to the deployment's credential delivery mechanism.
+If a parent-instance process can use the same permissions, that process is also trusted for recovery of the stored hierarchy.
+A proxy that forwards end-to-end TLS bytes does not necessarily receive plaintext; a proxy that terminates TLS does.
 
-### 3. Configure Key Policy
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowKeyMeldEnclaveWithAttestation",
-      "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/KeyMeldGatewayRole"},
-      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
-      "Resource": "*",
-      "Condition": {
-        "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "YOUR_PCR0_VALUE",
-          "kms:RecipientAttestation:PCR1": "YOUR_PCR1_VALUE",
-          "kms:RecipientAttestation:PCR2": "YOUR_PCR2_VALUE"
-        }
-      }
-    }
-  ]
-}
-```
-
-### 4. IAM Role for Gateway
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
-    "Resource": "arn:aws:kms:us-west-2:ACCOUNT:key/YOUR_KEY_ID"
-  }]
-}
-```
-
-## Updating Enclave Builds
-
-When deploying new enclave code with different PCR values, update the KMS key policy to allow both old and new builds:
-
-```json
-"kms:RecipientAttestation:PCR0": ["OLD_PCR0", "NEW_PCR0"]
-```
-
-Remove old PCR values after migration completes.
-
-## Database Schema
-
-```sql
-CREATE TABLE enclave_master_keys (
-    enclave_id INTEGER PRIMARY KEY,
-    kms_encrypted_dek BLOB NOT NULL,
-    encrypted_private_key BLOB NOT NULL,
-    public_key BLOB NOT NULL,
-    kms_key_id TEXT NOT NULL,
-    key_epoch INTEGER DEFAULT 1
-);
-```
+The enclave image contains the pinned endpoint and key identifier.
+AWS IAM and KMS key policies remain external configuration and are not measured image contents.
+Record those policies with the reviewed deployment configuration.
 
 ## Testing
 
 ```bash
-just start
-just test-kms-e2e
+nix develop -c bash examples/run-authorization-e2e.sh
 ```
 
-The test validates:
-- Initial key generation with KMS
-- Signing with KMS-backed keys
-- Key persistence across restarts
-- Database integrity
+The isolated runner uses temporary Moto keys and a fresh database.
+It verifies authorized signing, key persistence, gateway-only restart, and full enclave restart.
+The workspace's Rust KMS fixture verifies that encrypted hierarchy restoration rejects a different key, using AWS's documented behavior.
+Moto 5.1.11 ignores `KeyId` during decrypt, so it cannot validate that negative case.
+The simulation does not verify real Nitro networking, IAM credential delivery, or attested KMS recovery.
 
 ## Troubleshooting
 
-**Attestation validation failed**: PCR values in KMS policy don't match your EIF
-
-**Access denied**: IAM role doesn't have KMS permissions
-
-**Keys not persisting**: Check database for encrypted keys:
-```bash
-sqlite3 data/keymeld.db "SELECT enclave_id, length(encrypted_private_key) FROM enclave_master_keys;"
-```
-
-## Cost
-
-- KMS Key: $1/month
-- API Requests: $0.03 per 10,000 requests
-- Typical usage: ~$1/month total
+| Symptom | Check and corrective action |
+| --- | --- |
+| `AccessDeniedException` | Check the client's IAM principal and the intended KMS key policy. An attestation-only policy cannot authorize the current un-attested calls. |
+| `IncorrectKeyException` | Check the configured key ARN and the archived hierarchy's key identifier. Restore the matching configuration and archive. |
+| Encryption context mismatch | Restore the original enclave ID and context configuration. |
+| Configuration rejected | Match the gateway's endpoint and key identifier to the values provisioned in the enclave image. |
+| Gateway cannot restore after restart | Confirm the persisted encrypted hierarchy, KMS access, enclave assignments, and matching 0.4.0 protocol state. |

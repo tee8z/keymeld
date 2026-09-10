@@ -3,8 +3,8 @@ use std::fmt;
 
 /// For session-based authentication using seed-derived key pairs
 /// Custom header for session signature authentication
-/// Format: "nonce:signature"
-/// Where signature is ECDSA signature of "session_id:nonce" using seed-derived private key
+/// Format: "v1:timestamp:nonce:signature"
+/// ECDSA commits to the versioned session scope, timestamp, and nonce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSignature(pub String);
 
@@ -49,8 +49,8 @@ impl fmt::Display for SessionSignature {
 
 /// For user-based authentication using user private keys (signing operations)
 /// Custom header for user signature authentication (signing operations)
-/// Format: "nonce:signature"
-/// Where signature is ECDSA signature over SHA256("signing_session_id:user_id:nonce") created with the user's private key
+/// Format: "v1:timestamp:nonce:signature"
+/// ECDSA commits to the versioned operation scope, user ID, timestamp, and nonce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSignature(pub String);
 

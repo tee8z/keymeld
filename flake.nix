@@ -1,5 +1,5 @@
 {
-  description = "KeyMeld - Production-ready distributed MuSig2 Bitcoin signing system for AWS Nitro Enclaves";
+  description = "KeyMeld - Experimental distributed MuSig2 Bitcoin signing system for AWS Nitro Enclaves";
 
   # Note: This flake includes SQLite eval cache conflict prevention.
   # If you encounter "SQLite database is busy" errors, run: just fix-cache
@@ -34,6 +34,7 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
+        workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
@@ -69,7 +70,7 @@
         # Use fixed hash to improve caching and avoid eval conflicts
         workspaceDeps = craneLib.buildDepsOnly {
           pname = "keymeld-workspace-deps";
-          version = "0.1.0";
+          version = workspaceVersion;
           src = craneLib.path ./.;
           buildInputs = commonDeps;
           nativeBuildInputs = commonDeps;
@@ -111,7 +112,7 @@
         # Individual service builds with filtered sources
         keymeld-gateway = craneLib.buildPackage {
           pname = "keymeld-gateway";
-          version = "0.1.0";
+          version = workspaceVersion;
           src = gatewaySrc;
           cargoArtifacts = workspaceDeps;
           buildInputs = commonDeps;
@@ -133,7 +134,7 @@
 
         keymeld-enclave = craneLib.buildPackage {
           pname = "keymeld-enclave";
-          version = "0.1.0";
+          version = workspaceVersion;
           src = enclaveSrc;
           cargoArtifacts = workspaceDeps;
           buildInputs = commonDeps;
@@ -147,7 +148,7 @@
 
         keymeld-demo = craneLib.buildPackage {
           pname = "keymeld-demo";
-          version = "0.1.0";
+          version = workspaceVersion;
           src = demoSrc;
           cargoArtifacts = workspaceDeps;
           buildInputs = commonDeps;
@@ -575,7 +576,9 @@ EOF
 
         # Script to run gateway
         run-gateway = pkgs.writeShellScriptBin "run-gateway" ''
-          set -e
+          set -euo pipefail
+          source "$PWD/scripts/development-auth.sh"
+          keymeld_setup_development_auth "$PWD" "${keymeld-gateway}/bin/keymeld-gateway"
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_gateway=debug"}
           export KEYMELD_HOST=''${KEYMELD_HOST:-"127.0.0.1"}
           export KEYMELD_PORT=''${KEYMELD_PORT:-"8090"}
@@ -590,13 +593,7 @@ EOF
           mkdir -p "$(dirname "$KEYMELD_DATABASE_PATH")"
           mkdir -p "$PWD/logs"
 
-          # Run migrations if database doesn't exist
-          if [ ! -f "$KEYMELD_DATABASE_PATH" ]; then
-            echo "Creating and migrating database..."
-            ${pkgs.sqlx-cli}/bin/sqlx database create --database-url "sqlite:$KEYMELD_DATABASE_PATH"
-            cd crates/keymeld-gateway && ${pkgs.sqlx-cli}/bin/sqlx migrate run --database-url "sqlite:../../$KEYMELD_DATABASE_PATH"
-            cd ../..
-          fi
+          # The gateway applies its embedded migrations at startup.
 
           echo "Starting KeyMeld Gateway..."
           echo "  Host: $KEYMELD_HOST:$KEYMELD_PORT"
@@ -608,7 +605,9 @@ EOF
 
         # Script to run enclave
         run-enclave = pkgs.writeShellScriptBin "run-enclave" ''
-          set -e
+          set -euo pipefail
+          source "$PWD/scripts/development-auth.sh"
+          keymeld_setup_development_auth "$PWD" "${keymeld-gateway}/bin/keymeld-gateway"
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_enclave=debug"}
           export VSOCK_PORT=''${VSOCK_PORT:-"5000"}
           export ENCLAVE_ID=''${ENCLAVE_ID:-"0"}
@@ -743,15 +742,15 @@ EOF
 
         # CI/CD Pipeline: Build Enclave EIF
         build-enclave-eif = pkgs.writeShellScriptBin "build-enclave-eif" ''
-          set -e
+          set -euo pipefail
 
           echo "🏗️ CI/CD: Building KeyMeld Enclave EIF for AWS Nitro"
 
           # Configuration
           EIF_NAME="''${EIF_NAME:-keymeld-enclave}"
           VERSION="''${VERSION:-$(git rev-parse --short HEAD 2>/dev/null || echo 'latest')}"
-          OUTPUT_FILE="''${OUTPUT_FILE:-$EIF_NAME-$VERSION.eif}"
-          S3_BUCKET="''${S3_BUCKET:-}"
+          ENCLAVE_ID="''${ENCLAVE_ID:-0}"
+          OUTPUT_FILE="''${OUTPUT_FILE:-$EIF_NAME-$ENCLAVE_ID-$VERSION.eif}"
 
           # Check prerequisites
           if ! command -v nitro-cli &> /dev/null; then
@@ -764,183 +763,72 @@ EOF
           echo "   EIF Name: $EIF_NAME"
           echo "   Version: $VERSION"
           echo "   Output: $OUTPUT_FILE"
-          echo "   S3 Bucket: ''${S3_BUCKET:-not_configured}"
 
-          # Build Nix package first for reproducibility
-          echo "📦 Building Nix package..."
-          nix build .#keymeld-enclave
-
-          # Create Docker image using Nix result
-          echo "🐳 Creating Docker image from Nix build..."
-          cat > Dockerfile.eif <<EOF
-          FROM amazonlinux:latest
-          COPY result/bin/keymeld-enclave /usr/bin/keymeld-enclave
-          RUN chmod +x /usr/bin/keymeld-enclave
-          ENTRYPOINT ["/usr/bin/keymeld-enclave"]
-          EOF
-
-          docker build -t $EIF_NAME:$VERSION -f Dockerfile.eif .
-
-          # Build EIF from Docker image
-          echo "🔧 Converting Docker image to EIF..."
-          nitro-cli build-enclave \
-            --docker-uri $EIF_NAME:$VERSION \
-            --output-file "$OUTPUT_FILE"
-
-          echo "✅ Enclave EIF built: $OUTPUT_FILE"
-          echo "📊 EIF Metadata:"
-          nitro-cli describe-eif --eif-path "$OUTPUT_FILE"
-
-          # Upload to S3 if bucket configured (CI/CD pipeline)
-          if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
-            echo "📤 Uploading EIF to S3..."
-            aws s3 cp "$OUTPUT_FILE" "s3://$S3_BUCKET/keymeld/eifs/$OUTPUT_FILE"
-            echo "✅ EIF uploaded to s3://$S3_BUCKET/keymeld/eifs/$OUTPUT_FILE"
-
-            # Create latest symlink
-            aws s3 cp "s3://$S3_BUCKET/keymeld/eifs/$OUTPUT_FILE" "s3://$S3_BUCKET/keymeld/eifs/$EIF_NAME-latest.eif"
-            echo "🔗 Latest symlink updated"
+          # These public settings become part of the measured enclave image.
+          : "''${ENCLAVE_GATEWAY_PUBLIC_KEY:?Set the provisioned gateway verification key}"
+          : "''${ENCLAVE_KMS_KEY_ID:?Set the KMS key allowed for this enclave}"
+          : "''${AWS_REGION:?Set the enclave AWS region}"
+          ENCLAVE_KMS_ENDPOINT="''${ENCLAVE_KMS_ENDPOINT:-aws-kms}"
+          [[ "$ENCLAVE_GATEWAY_PUBLIC_KEY" =~ ^(02|03)[0-9a-fA-F]{64}$ ]] || { echo "Invalid gateway public key" >&2; exit 1; }
+          [[ "$ENCLAVE_ID" =~ ^(0|[1-9][0-9]{0,9})$ ]] && (( ENCLAVE_ID <= 4294967295 )) || { echo "Invalid enclave ID" >&2; exit 1; }
+          [[ ! -e "$OUTPUT_FILE" && ! -e "$OUTPUT_FILE.manifest.json" ]] || { echo "Refusing to overwrite an EIF artifact" >&2; exit 1; }
+          command -v jq >/dev/null
+          signing_args=()
+          if [[ -n "''${EIF_SIGNING_KEY:-}" || -n "''${EIF_SIGNING_CERTIFICATE:-}" ]]; then
+            : "''${EIF_SIGNING_KEY:?Set the EIF signing key path or KMS ARN}"
+            : "''${EIF_SIGNING_CERTIFICATE:?Set the matching EIF signing certificate path}"
+            signing_args=(--private-key "$EIF_SIGNING_KEY" --signing-certificate "$EIF_SIGNING_CERTIFICATE")
           fi
+          provisioned_image="$EIF_NAME-$ENCLAVE_ID:$VERSION"
 
-          # Cleanup
-          rm -f Dockerfile.eif
-          docker rmi $EIF_NAME:$VERSION 2>/dev/null || true
+          # Include the Nix runtime closure; copying only the binary breaks its loader.
+          nix build .#docker-enclave
+          docker load < result
+          build_context=$(mktemp -d -t keymeld-eif.XXXXXXXX)
+          trap 'rm -rf -- "$build_context"' EXIT
+          cat > "$build_context/Dockerfile" <<'EOF'
+          FROM keymeld-enclave:latest
+          ARG ENCLAVE_GATEWAY_PUBLIC_KEY
+          ARG ENCLAVE_KMS_KEY_ID
+          ARG ENCLAVE_KMS_ENDPOINT
+          ARG ENCLAVE_ID
+          ARG AWS_REGION
+          ENV ENCLAVE_GATEWAY_PUBLIC_KEY=$ENCLAVE_GATEWAY_PUBLIC_KEY
+          ENV ENCLAVE_KMS_KEY_ID=$ENCLAVE_KMS_KEY_ID
+          ENV ENCLAVE_KMS_ENDPOINT=$ENCLAVE_KMS_ENDPOINT
+          ENV ENCLAVE_ID=$ENCLAVE_ID
+          ENV AWS_REGION=$AWS_REGION
+          ENV KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=false
+          ENV TRANSPORT_MODE=vsock
+          EOF
+          docker build -t "$provisioned_image" \
+            --build-arg ENCLAVE_GATEWAY_PUBLIC_KEY="$ENCLAVE_GATEWAY_PUBLIC_KEY" \
+            --build-arg ENCLAVE_KMS_KEY_ID="$ENCLAVE_KMS_KEY_ID" \
+            --build-arg ENCLAVE_KMS_ENDPOINT="$ENCLAVE_KMS_ENDPOINT" \
+            --build-arg ENCLAVE_ID="$ENCLAVE_ID" --build-arg AWS_REGION="$AWS_REGION" \
+            "$build_context"
+
+          # Signing credentials are supplied only to Nitro CLI, never to Docker.
+          echo "Converting provisioned enclave image to EIF..."
+          nitro-cli build-enclave --docker-uri "$provisioned_image" \
+            --output-file "$OUTPUT_FILE" "''${signing_args[@]}"
+          nitro-cli describe-eif --eif-path "$OUTPUT_FILE" > "$build_context/measurements.json"
+          artifact_hash=$(sha256sum -- "$OUTPUT_FILE")
+          jq -n --argjson enclave_id "$ENCLAVE_ID" --arg eif_path "$OUTPUT_FILE" \
+            --arg sha256 "''${artifact_hash%% *}" \
+            --slurpfile description "$build_context/measurements.json" \
+            '{enclave_id: $enclave_id, eif_path: $eif_path, sha256: $sha256,
+              pcr0: $description[0].Measurements.PCR0,
+              pcr8: ($description[0].Measurements.PCR8 // null)}' > "$OUTPUT_FILE.manifest.json"
+          echo "Built $OUTPUT_FILE and $OUTPUT_FILE.manifest.json. Review the measurements before publishing."
+          # This build helper does not publish artifacts or move mutable aliases.
+          docker rmi "$provisioned_image" 2>/dev/null || true
         '';
 
-        # Production: Download EIF and Deploy
+        # Production: Deploy reviewed per-enclave EIF artifacts
         deploy-aws-enclaves = pkgs.writeShellScriptBin "deploy-aws-enclaves" ''
-          set -e
-
-          echo "🚀 Production: Deploying KeyMeld to AWS Nitro Enclaves"
-
-          # Configuration
-          EIF_NAME="''${EIF_NAME:-keymeld-enclave}"
-          VERSION="''${VERSION:-latest}"
-          S3_BUCKET="''${S3_BUCKET:-}"
-          EIF_PATH="''${EIF_PATH:-$EIF_NAME-$VERSION.eif}"
-          ENCLAVE_MEMORY="''${ENCLAVE_MEMORY:-512}"
-          ENCLAVE_CPUS="''${ENCLAVE_CPUS:-1}"
-          NUM_ENCLAVES="''${NUM_ENCLAVES:-3}"
-
-          # Check prerequisites
-          if ! command -v nitro-cli &> /dev/null; then
-            echo "❌ nitro-cli not found. Install AWS Nitro CLI first."
-            exit 1
-          fi
-
-          if ! command -v jq &> /dev/null; then
-            echo "❌ jq not found. Please install jq for JSON parsing."
-            exit 1
-          fi
-
-          echo "📋 Deployment Configuration:"
-          echo "   EIF Name: $EIF_NAME"
-          echo "   Version: $VERSION"
-          echo "   S3 Bucket: ''${S3_BUCKET:-local_file}"
-          echo "   Memory: $ENCLAVE_MEMORY MB"
-          echo "   CPUs: $ENCLAVE_CPUS"
-          echo "   Enclaves: $NUM_ENCLAVES"
-
-          # Download EIF from S3 if configured, otherwise use local
-          if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
-            echo "📥 Downloading EIF from S3..."
-            aws s3 cp "s3://$S3_BUCKET/keymeld/eifs/$EIF_PATH" "./$EIF_PATH"
-            echo "✅ Downloaded: $EIF_PATH"
-          elif [ ! -f "$EIF_PATH" ]; then
-            echo "❌ EIF not found: $EIF_PATH"
-            echo "   Either set S3_BUCKET or provide local EIF file"
-            exit 1
-          fi
-
-          # Verify EIF
-          echo "🔍 Verifying EIF..."
-          nitro-cli describe-eif --eif-path "$EIF_PATH"
-
-          # Arrays to store enclave info
-          declare -a ENCLAVE_IDS
-          declare -a ENCLAVE_CIDS
-
-          # Start enclaves and capture CIDs
-          echo "🔧 Starting AWS Nitro Enclaves..."
-          for i in $(seq 0 $((NUM_ENCLAVES-1))); do
-            echo "Starting enclave $i..."
-
-            # Start enclave with debug output
-            ENCLAVE_OUTPUT=$(nitro-cli run-enclave \
-              --eif-path "$EIF_PATH" \
-              --memory "$ENCLAVE_MEMORY" \
-              --cpu-count "$ENCLAVE_CPUS" \
-              --enclave-name "keymeld-enclave-$i" \
-              --debug-mode 2>/dev/null || nitro-cli run-enclave \
-              --eif-path "$EIF_PATH" \
-              --memory "$ENCLAVE_MEMORY" \
-              --cpu-count "$ENCLAVE_CPUS" \
-              --enclave-name "keymeld-enclave-$i")
-
-            # Extract enclave ID
-            ENCLAVE_ID=$(echo "$ENCLAVE_OUTPUT" | jq -r '.EnclaveId')
-            ENCLAVE_IDS[$i]="$ENCLAVE_ID"
-
-            # Wait and get CID - retry logic for reliability
-            echo "   Waiting for enclave to initialize..."
-            for attempt in $(seq 1 10); do
-              sleep 2
-              ENCLAVE_CID=$(nitro-cli describe-enclaves 2>/dev/null | \
-                jq -r ".[] | select(.EnclaveId == \"$ENCLAVE_ID\") | .ContextId" 2>/dev/null || echo "")
-
-              if [ -n "$ENCLAVE_CID" ] && [ "$ENCLAVE_CID" != "null" ]; then
-                ENCLAVE_CIDS[$i]="$ENCLAVE_CID"
-                echo "✅ Enclave $i ready: ID=$ENCLAVE_ID, CID=$ENCLAVE_CID"
-                break
-              fi
-
-              if [ $attempt -eq 10 ]; then
-                echo "❌ Failed to get CID for enclave $i after 10 attempts"
-                exit 1
-              fi
-
-              echo "   Attempt $attempt: Waiting for CID assignment..."
-            done
-          done
-
-          # Generate environment configuration
-          echo "📝 Generating production environment..."
-          cat > keymeld-aws.env <<EOF
-# KeyMeld AWS Nitro Enclave Production Configuration
-# Generated: $(date)
-# Version: $VERSION
-# EIF: $EIF_PATH
-
-# Enclave CIDs (dynamically assigned by AWS)
-export KEYMELD_ENCLAVE_0_CID=''${ENCLAVE_CIDS[0]}
-export KEYMELD_ENCLAVE_1_CID=''${ENCLAVE_CIDS[1]}
-export KEYMELD_ENCLAVE_2_CID=''${ENCLAVE_CIDS[2]}
-
-# Production environment
-export KEYMELD_ENVIRONMENT=production
-export CONFIG_PATH=config/production.yaml
-
-# Deployment metadata
-export KEYMELD_VERSION=$VERSION
-export KEYMELD_EIF_PATH=$EIF_PATH
-export KEYMELD_DEPLOYED_AT=$(date -Iseconds)
-EOF
-
-          echo "✅ AWS Nitro Enclaves deployed successfully!"
-          echo ""
-          echo "📋 Deployment Summary:"
-          echo "   Version: $VERSION"
-          echo "   EIF: $EIF_PATH"
-          for i in $(seq 0 $((NUM_ENCLAVES-1))); do
-            echo "   Enclave $i: ID=''${ENCLAVE_IDS[$i]}, CID=''${ENCLAVE_CIDS[$i]}"
-          done
-          echo ""
-          echo "🔧 Next Steps:"
-          echo "   1. Source environment: source keymeld-aws.env"
-          echo "   2. Start gateway: nix run .#gateway-aws"
-          echo "   3. Health check: curl http://localhost:443/health"
-          echo ""
-          echo "📄 Environment saved: keymeld-aws.env"
+          set -euo pipefail
+          exec ${pkgs.bash}/bin/bash "$PWD/scripts/deploy-aws-enclaves.sh"
         '';
 
         gateway-aws = pkgs.writeShellScriptBin "gateway-aws" ''
@@ -1246,7 +1134,7 @@ EOF
           # Run basic build check
           build = craneLib.cargoClippy ({
             pname = "keymeld-clippy";
-            version = "0.1.0";
+            version = workspaceVersion;
             src = craneLib.path ./.;
             cargoArtifacts = workspaceDeps;
             buildInputs = commonDeps;
@@ -1258,7 +1146,7 @@ EOF
           # Run tests
           test = craneLib.cargoNextest ({
             pname = "keymeld-tests";
-            version = "0.1.0";
+            version = workspaceVersion;
             src = craneLib.path ./.;
             cargoArtifacts = workspaceDeps;
             buildInputs = commonDeps;

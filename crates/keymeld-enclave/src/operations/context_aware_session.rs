@@ -36,6 +36,21 @@ impl ContextAwareSession {
     }
 
     pub fn process(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
+        if matches!(
+            self.status,
+            OperatorStatus::Keygen(KeygenStatus::Completed(_))
+        ) && matches!(
+            cmd,
+            EnclaveCommand::Musig(keymeld_core::protocol::MusigCommand::Keygen(
+                keymeld_core::protocol::KeygenCommand::AddParticipantsBatch(_)
+            ))
+        ) {
+            return Err(EnclaveError::Validation(
+                keymeld_core::protocol::ValidationError::Other(
+                    "Participant registration is closed for completed keygen sessions".into(),
+                ),
+            ));
+        }
         debug!(
             "Processing command {:?} for session {}",
             cmd,

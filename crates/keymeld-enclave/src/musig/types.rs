@@ -87,6 +87,8 @@ impl std::fmt::Debug for UserMusigSession {
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {
     pub session_id: SessionId,
+    pub authorization_manifest: Option<keymeld_core::authorization::SignedSessionManifest>,
+    pub registrations: BTreeMap<UserId, keymeld_core::authorization::RegistrationAuthorization>,
     pub expected_participants: Vec<UserId>,
     pub participant_public_keys: BTreeMap<UserId, musig2::secp256k1::PublicKey>,
     pub expected_participant_count: Option<usize>,

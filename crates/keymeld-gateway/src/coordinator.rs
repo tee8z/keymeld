@@ -1637,6 +1637,7 @@ impl Coordinator {
                         user_id: record.user_id.clone(),
                         key_id: record.key_id.clone(),
                         keygen_session_id: record.keygen_session_id.clone(),
+                        authorization: record.authorization.clone(),
                     },
                 ),
             );

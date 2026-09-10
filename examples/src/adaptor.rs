@@ -1,6 +1,6 @@
 //! Adaptor Signatures Example
 //!
-//! Demonstrates adaptor signature types (Single, And, Or) using the SDK:
+//! Demonstrates single-point adaptor signatures using the SDK:
 //! 1. Create KeyMeldClient for coordinator and participants
 //! 2. Coordinator creates keygen session, participants join
 //! 3. Create signing session with adaptor configs, approve, get adaptor signatures
@@ -97,16 +97,18 @@ async fn run_adaptor_signatures_test(
     let coordinator_credentials =
         UserCredentials::from_private_key(&test.coordinator_derived_private_key.secret_bytes())?;
 
-    let coordinator_client =
-        KeyMeldClient::builder(&test.config.gateway_url, test.coordinator_user_id.clone())
-            .credentials(coordinator_credentials)
-            .build()?;
+    let coordinator_client = keymeld_examples::client_builder(
+        &test.config.gateway_url,
+        test.coordinator_user_id.clone(),
+    )?
+    .credentials(coordinator_credentials)
+    .build()?;
 
     let mut participant_clients = Vec::new();
     for participant in &test.participants {
         let credentials =
             UserCredentials::from_private_key(&participant.derived_private_key.secret_bytes())?;
-        let client = KeyMeldClient::builder(&test.config.gateway_url, UserId::new_v7())
+        let client = keymeld_examples::client_builder(&test.config.gateway_url, UserId::new_v7())?
             .credentials(credentials)
             .build()?;
         participant_clients.push(client);
@@ -132,6 +134,11 @@ async fn run_adaptor_signatures_test(
 
     let session_id = keygen_session.session_id().clone();
     let session_secret = keygen_session.export_session_secret();
+    let authorization_manifest = keygen_session.authorization_manifest().clone();
+    let signing_authority = keygen_session
+        .authorization_credentials()
+        .ok_or_else(|| anyhow!("Missing signing authority"))?
+        .clone();
     info!("Created keygen session: {}", session_id);
 
     keygen_session
@@ -147,7 +154,9 @@ async fn run_adaptor_signatures_test(
             .join_session(
                 session_id.clone(),
                 &session_secret,
-                JoinOptions::default().approval(requires_approval),
+                JoinOptions::default()
+                    .approval(requires_approval)
+                    .invitation(keygen_session.invitation(client.user_id())?),
             )
             .await?;
 
@@ -194,19 +203,24 @@ async fn run_adaptor_signatures_test(
     // Restore keygen session for signing
     let keygen_session = coordinator_client
         .keygen()
-        .restore_session(
+        .restore_session_with_authority(
             session_id.clone(),
             SessionCredentials::from_session_secret(&session_secret)?,
+            authorization_manifest.clone(),
+            signing_authority,
         )
         .await?;
 
     // Create signing session with adaptor configs using SDK
+    let expected_batch = vec![BatchSigningItem::adaptor(
+        message_hash,
+        adaptor_configs.clone(),
+    )];
     let mut signing_session = coordinator_client
         .signer()
-        .sign_adaptor(
+        .sign_batch(
             &keygen_session,
-            message_hash,
-            adaptor_configs.clone(),
+            expected_batch.clone(),
             SigningOptions::default().timeout(1800),
         )
         .await?;
@@ -224,7 +238,7 @@ async fn run_adaptor_signatures_test(
     );
 
     // Approve using SDK
-    signing_session.approve().await?;
+    signing_session.approve(&expected_batch).await?;
     info!("✅ Coordinator approved");
 
     // Approve for first participant (requires approval)
@@ -236,6 +250,7 @@ async fn run_adaptor_signatures_test(
             .restore_session(
                 session_id.clone(),
                 SessionCredentials::from_session_secret(&session_secret)?,
+                authorization_manifest.clone(),
             )
             .await?;
 
@@ -245,7 +260,7 @@ async fn run_adaptor_signatures_test(
             .await?;
 
         info!("🔍 Participant 0 validating message before approval");
-        participant_signing.approve().await?;
+        participant_signing.approve(&expected_batch).await?;
         info!("✅ Participant 0 approved");
     }
 

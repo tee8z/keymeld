@@ -8,8 +8,6 @@ use hkdf::Hkdf;
 use rand::{rngs::OsRng as RandOsRng, TryRngCore};
 use secp256k1::{ecdh::SharedSecret, ecdsa::Signature, Message, PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_cbor::Value as CborValue;
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -152,6 +150,24 @@ impl SecureCrypto {
         Ok((secret_key, public_key))
     }
 
+    /// Derive an independent MuSig2 nonce seed for one batch item and adaptor.
+    /// The base seed must come from fresh cryptographic randomness for each round.
+    pub fn derive_signing_nonce_seed(
+        base_seed: &[u8; 32],
+        session_id: &crate::SessionId,
+        user_id: &crate::UserId,
+        batch_item_id: &uuid::Uuid,
+        adaptor_id: Option<&uuid::Uuid>,
+    ) -> Result<[u8; 32], KeyMeldError> {
+        let context = serde_json::to_vec(&(session_id, user_id, batch_item_id, adaptor_id))
+            .map_err(|e| KeyMeldError::SerializationError(e.to_string()))?;
+        let hkdf = Hkdf::<Sha256>::new(Some(b"keymeld-musig2-nonce-v1"), base_seed);
+        let mut seed = [0u8; 32];
+        hkdf.expand(&context, &mut seed)
+            .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
+        Ok(seed)
+    }
+
     pub fn ecies_encrypt(
         public_key: &PublicKey,
         plaintext: &[u8],
@@ -217,84 +233,30 @@ impl SecureCrypto {
         Self::ecies_encrypt(&public_key, plaintext)
     }
 
+    /// Verify the signed Nitro document and its recipient/challenge binding.
     pub fn verify_attestation_and_extract_key(
         attestation_doc: &str,
         expected_pcr_measurements: &HashMap<String, String>,
+        expected_public_key: &str,
+        nonce: &[u8],
+        now_seconds: u64,
     ) -> Result<String, KeyMeldError> {
-        let attestation_bytes =
-            hex::decode(attestation_doc).map_err(KeyMeldError::HexDecodeError)?;
-
-        let parsed_doc: serde_cbor::Value =
-            serde_cbor::from_slice(&attestation_bytes).map_err(|e| {
-                KeyMeldError::CryptoError(format!("Failed to parse attestation CBOR: {e}"))
-            })?;
-
-        let pcrs = Self::extract_pcr_measurements(&parsed_doc)?;
-
-        for (pcr_index, expected_value) in expected_pcr_measurements {
-            let actual_value = pcrs
-                .get(pcr_index)
-                .ok_or(KeyMeldError::CryptoError(format!(
-                    "Missing PCR {pcr_index}"
-                )))?;
-
-            if actual_value != expected_value {
-                return Err(KeyMeldError::CryptoError(format!(
-                    "PCR {pcr_index} mismatch: expected {expected_value}, got {actual_value}"
-                )));
-            }
-        }
-
-        let public_key = Self::extract_public_key_from_attestation(&parsed_doc)?;
-
-        Ok(public_key)
-    }
-
-    fn extract_pcr_measurements(
-        doc: &serde_cbor::Value,
-    ) -> Result<HashMap<String, String>, KeyMeldError> {
-        let mut pcrs = HashMap::new();
-
-        if let CborValue::Map(map) = doc {
-            if let Some(CborValue::Map(pcr_map)) = map.get(&CborValue::Text("pcrs".to_string())) {
-                for (key, value) in pcr_map {
-                    if let (CborValue::Integer(pcr_idx), CborValue::Bytes(pcr_value)) = (key, value)
-                    {
-                        pcrs.insert(pcr_idx.to_string(), hex::encode(pcr_value));
-                    }
-                }
-            }
-        }
-
-        Ok(pcrs)
-    }
-
-    fn extract_public_key_from_attestation(
-        doc: &serde_cbor::Value,
-    ) -> Result<String, KeyMeldError> {
-        if let CborValue::Map(map) = doc {
-            if let Some(CborValue::Bytes(user_data)) =
-                map.get(&CborValue::Text("user_data".to_string()))
-            {
-                let user_data_str = String::from_utf8(user_data.clone()).map_err(|e| {
-                    KeyMeldError::CryptoError(format!("Invalid user_data UTF-8: {e}"))
-                })?;
-
-                let user_data_json: JsonValue =
-                    serde_json::from_str(&user_data_str).map_err(|e| {
-                        KeyMeldError::CryptoError(format!("Invalid user_data JSON: {e}"))
-                    })?;
-
-                if let Some(public_key) = user_data_json.get("enclave_public_key") {
-                    if let Some(key_str) = public_key.as_str() {
-                        return Ok(key_str.to_string());
-                    }
-                }
-            }
-        }
-
-        Err(KeyMeldError::CryptoError(
-            "No public key found in attestation".to_string(),
+        let document = hex::decode(attestation_doc).map_err(KeyMeldError::HexDecodeError)?;
+        let public_key = hex::decode(expected_public_key).map_err(KeyMeldError::HexDecodeError)?;
+        let measurements = expected_pcr_measurements
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        crate::attestation::AttestationPolicy::from_hex_measurements(&measurements)?.verify(
+            &document,
+            &public_key,
+            nonce,
+            now_seconds,
+        )?;
+        Ok(hex::encode(
+            PublicKey::from_slice(&public_key)
+                .map_err(KeyMeldError::InvalidKey)?
+                .serialize(),
         ))
     }
 
@@ -602,94 +564,6 @@ impl SecureCrypto {
 
         Ok((auth_privkey, auth_pubkey))
     }
-
-    pub fn sign_auth_message_with_session_key(
-        signing_privkey: &[u8; 32],
-        keygen_session_id: &str,
-        signing_session_id: &str,
-        user_id: &str,
-        nonce: &[u8],
-    ) -> Result<Vec<u8>, KeyMeldError> {
-        let (auth_privkey, _) =
-            Self::derive_session_auth_keypair(signing_privkey, keygen_session_id)?;
-
-        let mut message = Vec::new();
-        message.extend_from_slice(signing_session_id.as_bytes());
-        message.extend_from_slice(user_id.as_bytes());
-        message.extend_from_slice(nonce);
-
-        let message_hash = Sha256::digest(&message);
-        let msg = Message::from_digest(message_hash.into());
-
-        let signature = SECP256K1.sign_ecdsa(msg, &auth_privkey);
-        Ok(signature.serialize_compact().to_vec())
-    }
-
-    pub fn verify_auth_signature_with_session_key(
-        auth_pubkey: &PublicKey,
-        signing_session_id: &str,
-        user_id: &str,
-        nonce: &[u8],
-        signature_bytes: &[u8],
-    ) -> Result<bool, KeyMeldError> {
-        let mut message = Vec::new();
-        message.extend_from_slice(signing_session_id.as_bytes());
-        message.extend_from_slice(user_id.as_bytes());
-        message.extend_from_slice(nonce);
-
-        let message_hash = Sha256::digest(&message);
-        let msg = Message::from_digest(message_hash.into());
-
-        let signature = Signature::from_compact(signature_bytes)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature: {e}")))?;
-
-        match SECP256K1.verify_ecdsa(msg, &signature, auth_pubkey) {
-            Ok(()) => Ok(true),
-            Err(_) => Ok(false),
-        }
-    }
-
-    pub fn sign_session_message(
-        session_id: &str,
-        nonce: &str,
-        seed: &[u8],
-    ) -> Result<String, KeyMeldError> {
-        let private_key = Self::derive_private_key_from_seed(seed)?;
-
-        let message_str = format!("{session_id}:{nonce}");
-        let message_hash = Sha256::digest(message_str.as_bytes());
-
-        let message = Message::from_digest(message_hash.into());
-
-        let signature = SECP256K1.sign_ecdsa(message, &private_key);
-        Ok(hex::encode(signature.serialize_compact()))
-    }
-
-    pub fn validate_session_signature(
-        session_id: &str,
-        nonce: &str,
-        signature_hex: &str,
-        public_key: &[u8],
-    ) -> Result<(), KeyMeldError> {
-        let message_str = format!("{session_id}:{nonce}");
-        let message_hash = Sha256::digest(message_str.as_bytes());
-
-        let message = Message::from_digest(message_hash.into());
-
-        let signature_bytes = hex::decode(signature_hex)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature hex: {e}")))?;
-        let signature = Signature::from_compact(&signature_bytes)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid signature format: {e}")))?;
-
-        let public_key = PublicKey::from_slice(public_key)
-            .map_err(|e| KeyMeldError::ValidationError(format!("Invalid public key: {e}")))?;
-
-        SECP256K1
-            .verify_ecdsa(message, &signature, &public_key)
-            .map_err(|_| KeyMeldError::ValidationError("Invalid session signature".to_string()))?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -752,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seed_based_authentication() {
+    fn test_seed_based_key_derivation() {
         let seed = SecureCrypto::generate_session_seed().unwrap();
         assert_eq!(seed.len(), 32);
 
@@ -764,42 +638,6 @@ mod tests {
 
         assert_eq!(private_key.secret_bytes(), private_key2.secret_bytes());
         assert_eq!(public_key.serialize(), public_key2.serialize());
-
-        let session_id = "test-session-123";
-        let nonce = "1234567890abcdef";
-
-        let signature = SecureCrypto::sign_session_message(session_id, nonce, &seed).unwrap();
-        assert!(SecureCrypto::validate_session_signature(
-            session_id,
-            nonce,
-            &signature,
-            &public_key.serialize()
-        )
-        .is_ok());
-
-        assert!(SecureCrypto::validate_session_signature(
-            session_id,
-            nonce,
-            "invalid_signature",
-            &public_key.serialize()
-        )
-        .is_err());
-
-        assert!(SecureCrypto::validate_session_signature(
-            "wrong-session",
-            nonce,
-            &signature,
-            &public_key.serialize()
-        )
-        .is_err());
-
-        assert!(SecureCrypto::validate_session_signature(
-            session_id,
-            "wrong-nonce",
-            &signature,
-            &public_key.serialize()
-        )
-        .is_err());
     }
 
     #[test]

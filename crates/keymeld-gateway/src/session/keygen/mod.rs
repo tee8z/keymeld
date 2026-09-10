@@ -3,6 +3,7 @@ use crate::{
     session::{types::ParticipantData, validation},
     AggregatePublicKey, KeyMeldError,
 };
+use keymeld_core::authorization::SignedSessionManifest;
 use keymeld_core::protocol::{
     EncryptedParticipantPublicKey, EncryptedSessionSecret, KeygenStatusKind, SubsetDefinition,
 };
@@ -19,6 +20,7 @@ pub mod processing;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct KeygenReserved {
+    pub authorization_manifest: Box<SignedSessionManifest>,
     pub keygen_session_id: SessionId,
     pub coordinator_user_id: UserId,
     pub coordinator_enclave_id: EnclaveId,
@@ -36,6 +38,8 @@ pub struct KeygenReserved {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct KeygenCollectingParticipants {
+    pub recipient_authorization: Box<keymeld_core::authorization::EnclaveRecipientAuthorization>,
+    pub authorization_manifest: Box<SignedSessionManifest>,
     pub keygen_session_id: SessionId,
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
@@ -58,6 +62,9 @@ pub struct KeygenCollectingParticipants {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct KeygenCompleted {
+    pub recipient_authorization: Box<keymeld_core::authorization::EnclaveRecipientAuthorization>,
+    pub authorization_manifest: Box<SignedSessionManifest>,
+    pub encrypted_roster: String,
     pub keygen_session_id: SessionId,
     #[schema(value_type = String)]
     pub coordinator_pubkey: PublicKey,
@@ -99,6 +106,7 @@ impl KeygenCompleted {
         participant_encrypted_public_keys: Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>,
         enclave_encrypted_session_secrets: Vec<EncryptedSessionSecret>,
         encrypted_subset_aggregates: BTreeMap<Uuid, String>,
+        encrypted_roster: String,
     ) -> Self {
         let completed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -106,6 +114,9 @@ impl KeygenCompleted {
             .as_secs();
 
         Self {
+            recipient_authorization: collecting.recipient_authorization,
+            authorization_manifest: collecting.authorization_manifest,
+            encrypted_roster,
             keygen_session_id: collecting.keygen_session_id,
             coordinator_pubkey: collecting.coordinator_pubkey,
             coordinator_encrypted_private_key: collecting.coordinator_encrypted_private_key,
@@ -154,6 +165,15 @@ pub enum KeygenSessionStatus {
 }
 
 impl KeygenSessionStatus {
+    pub fn authorization_manifest(&self) -> Option<&SignedSessionManifest> {
+        match self {
+            Self::Reserved(s) => Some(&s.authorization_manifest),
+            Self::CollectingParticipants(s) => Some(&s.authorization_manifest),
+            Self::Completed(s) => Some(&s.authorization_manifest),
+            Self::Failed(_) => None,
+        }
+    }
+
     pub fn active_states() -> Vec<KeygenStatusKind> {
         vec![
             KeygenStatusKind::Reserved,

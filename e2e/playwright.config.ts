@@ -1,5 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const operatorTokenFile = process.env.KEYMELD_OPERATOR_TOKEN_FILE;
+if (!operatorTokenFile) {
+  throw new Error('Set KEYMELD_OPERATOR_TOKEN_FILE to the gateway operator token file, or use just test-ui-e2e.');
+}
+
 export default defineConfig({
   testDir: './tests',
   fullyParallel: true,

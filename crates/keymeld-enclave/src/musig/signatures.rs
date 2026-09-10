@@ -233,7 +233,7 @@ impl MusigProcessor {
         }
 
         // Sort by compressed public key bytes (BIP327) - same order as KeyAggContext
-        subset_pubkeys_with_ids.sort_by(|a, b| a.1.serialize().cmp(&b.1.serialize()));
+        subset_pubkeys_with_ids.sort_by_key(|a| a.1.serialize());
 
         // Find user's position in sorted order
         subset_pubkeys_with_ids

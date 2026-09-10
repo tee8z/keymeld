@@ -1,6 +1,6 @@
 [package]
 name = "keymeld-enclave"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 authors = ["tee8z@protonmail.com"]
 description = "Enclave runtime for KeyMeld - runs inside AWS Nitro Enclaves"
@@ -35,6 +35,10 @@ dashmap = { workspace = true }
 
 [features]
 default = []
+
+[dev-dependencies]
+axum = { workspace = true }
+base64 = "0.22"
 
 [[bin]]
 name = "keymeld-enclave"

@@ -6,6 +6,7 @@ use keymeld_core::{
 use tracing::info;
 
 pub mod attestation;
+pub mod channel;
 pub mod musig;
 pub mod operations;
 pub mod operator;
@@ -23,8 +24,17 @@ pub fn init_enclave_logging() {
 
 pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator> {
     info!("Creating enclave operator for enclave {}", enclave_id);
-    EnclaveOperator::new(enclave_id)
-        .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {e}"))
+    let mut operator = EnclaveOperator::new(enclave_id)
+        .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {e}"))?;
+    let development =
+        std::env::var("KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES").as_deref() == Ok("true");
+    let config = attestation::AttestationConfig {
+        enabled: !development,
+        generate_attestations: !development,
+        ..Default::default()
+    };
+    operator.attestation_manager = Some(attestation::AttestationManager::new(config)?);
+    Ok(operator)
 }
 
 #[cfg(test)]
@@ -39,7 +49,7 @@ mod tests {
     fn test_enclave_operator_creation() {
         init_test();
         let enclave_id = EnclaveId::new(1);
-        let state = create_enclave_operator(enclave_id).unwrap();
+        let state = EnclaveOperator::new(enclave_id).unwrap();
         assert_eq!(state.enclave_id, enclave_id);
         // Public key is empty until Configure command is called with KMS
         assert!(state.get_public_key().is_empty());
@@ -49,7 +59,7 @@ mod tests {
     async fn test_enclave_status() {
         init_test();
         let enclave_id = EnclaveId::new(1);
-        let state = create_enclave_operator(enclave_id).unwrap();
+        let state = EnclaveOperator::new(enclave_id).unwrap();
 
         assert_eq!(state.enclave_id, enclave_id);
         // Public key is empty until Configure command is called with KMS

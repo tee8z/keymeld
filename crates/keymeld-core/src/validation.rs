@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 
@@ -80,14 +80,16 @@ pub fn validate_session_signature(
     signature_header: &str,
     session_public_key: &[u8],
 ) -> Result<(), KeyMeldError> {
-    let (nonce, signature_hex) =
-        signature_header
-            .split_once(':')
-            .ok_or(KeyMeldError::ValidationError(
-                "Invalid signature format, expected 'nonce:signature'".to_string(),
-            ))?;
-
-    SecureCrypto::validate_session_signature(session_id, nonce, signature_hex, session_public_key)
+    let proof = crate::request_auth::RequestAuth::parse(signature_header)?;
+    let public_key = secp256k1::PublicKey::from_slice(session_public_key)
+        .map_err(|e| KeyMeldError::ValidationError(format!("Invalid session public key: {e}")))?;
+    proof.verify(
+        crate::request_auth::AuthKind::Session,
+        session_id,
+        "",
+        &public_key,
+        crate::request_auth::now_timestamp_secs()?,
+    )
 }
 
 pub fn decrypt_message_with_secret(
@@ -197,15 +199,18 @@ pub fn decrypt_adaptor_configs(
     let secret = SessionSecret::from_hex(session_secret)?;
     let decrypted_bytes = secret.decrypt(&encrypted_data, "adaptor_configs")?;
 
-    serde_json::from_slice(&decrypted_bytes).map_err(|e| {
+    let configs: Vec<AdaptorConfig> = serde_json::from_slice(&decrypted_bytes).map_err(|e| {
         KeyMeldError::CryptoError(format!("Failed to deserialize adaptor configs: {e}"))
-    })
+    })?;
+    validate_decrypted_adaptor_configs(&configs)?;
+    Ok(configs)
 }
 
 pub fn encrypt_adaptor_configs_for_client(
     configs: &[AdaptorConfig],
     session_secret: &str,
 ) -> Result<String, KeyMeldError> {
+    validate_decrypted_adaptor_configs(configs)?;
     if configs.is_empty() {
         return Ok(String::new());
     }
@@ -220,7 +225,13 @@ pub fn encrypt_adaptor_configs_for_client(
 }
 
 pub fn validate_decrypted_adaptor_configs(configs: &[AdaptorConfig]) -> Result<(), KeyMeldError> {
+    let mut adaptor_ids = BTreeSet::new();
     for config in configs {
+        if !adaptor_ids.insert(config.adaptor_id) {
+            return Err(KeyMeldError::InvalidConfiguration(
+                "Adaptor IDs must be unique within each batch item".into(),
+            ));
+        }
         match config.adaptor_type {
             AdaptorType::Single => {
                 if config.adaptor_points.len() != 1 {
@@ -229,24 +240,10 @@ pub fn validate_decrypted_adaptor_configs(configs: &[AdaptorConfig]) -> Result<(
                     ));
                 }
             }
-            AdaptorType::And => {
-                if config.adaptor_points.len() < 2 {
-                    return Err(KeyMeldError::InvalidConfiguration(
-                        "And adaptor requires at least 2 points".to_string(),
-                    ));
-                }
-            }
-            AdaptorType::Or => {
-                if config.adaptor_points.len() < 2 {
-                    return Err(KeyMeldError::InvalidConfiguration(
-                        "Or adaptor requires at least 2 points".to_string(),
-                    ));
-                }
-                if config.hints.is_none() {
-                    return Err(KeyMeldError::InvalidConfiguration(
-                        "Or adaptor requires hints".to_string(),
-                    ));
-                }
+            AdaptorType::And | AdaptorType::Or => {
+                return Err(KeyMeldError::InvalidConfiguration(
+                    "And and Or adaptor modes are unsupported; use Single with one point".into(),
+                ));
             }
         }
 
@@ -272,6 +269,11 @@ pub fn validate_decrypted_adaptor_configs(configs: &[AdaptorConfig]) -> Result<(
                     "Adaptor point must be a valid compressed secp256k1 point".to_string(),
                 ));
             }
+            secp256k1::PublicKey::from_slice(&point_bytes).map_err(|_| {
+                KeyMeldError::InvalidConfiguration(
+                    "Adaptor point is not a valid secp256k1 curve point".into(),
+                )
+            })?;
         }
 
         if let Some(hints) = &config.hints {
@@ -325,4 +327,54 @@ pub fn decrypt_adaptor_signatures_with_secret(
     serde_json::from_slice(&decrypted_bytes).map_err(|e| {
         KeyMeldError::CryptoError(format!("Failed to deserialize adaptor signatures: {e}"))
     })
+}
+
+#[cfg(test)]
+mod adaptor_validation_tests {
+    use super::*;
+
+    fn point() -> String {
+        hex::encode(
+            secp256k1::SecretKey::from_byte_array([17; 32])
+                .unwrap()
+                .public_key(secp256k1::SECP256K1)
+                .serialize(),
+        )
+    }
+
+    #[test]
+    fn unsupported_modes_are_rejected_even_when_ciphertext_bypasses_client_validation() {
+        let secret = SessionSecret::from_bytes([18; 32]);
+        for config in [
+            AdaptorConfig::and(vec![point(), point()]),
+            AdaptorConfig::or(vec![point(), point()])
+                .with_hints(vec![AdaptorHint::Hash(vec![19; 32])]),
+        ] {
+            let configs = vec![config];
+            assert!(validate_decrypted_adaptor_configs(&configs).is_err());
+            let encrypted = secret
+                .encrypt(&serde_json::to_vec(&configs).unwrap(), "adaptor_configs")
+                .unwrap()
+                .to_hex()
+                .unwrap();
+            assert!(decrypt_adaptor_configs(&encrypted, &hex::encode(secret.as_bytes())).is_err());
+        }
+    }
+
+    #[test]
+    fn single_requires_one_valid_point_and_unique_config_ids() {
+        let valid = AdaptorConfig::single(point());
+        validate_decrypted_adaptor_configs(std::slice::from_ref(&valid)).unwrap();
+        assert!(validate_decrypted_adaptor_configs(&[valid.clone(), valid.clone()]).is_err());
+        let mut invalid = valid.clone();
+        invalid.adaptor_points.clear();
+        assert!(validate_decrypted_adaptor_configs(&[invalid]).is_err());
+        let mut invalid = valid;
+        invalid.adaptor_points.push(point());
+        assert!(validate_decrypted_adaptor_configs(&[invalid]).is_err());
+        let invalid_point = format!("02{}", "ff".repeat(32));
+        assert!(
+            validate_decrypted_adaptor_configs(&[AdaptorConfig::single(invalid_point)]).is_err()
+        );
+    }
 }

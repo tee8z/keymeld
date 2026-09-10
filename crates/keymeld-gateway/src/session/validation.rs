@@ -118,6 +118,7 @@ mod tests {
         existing.insert(
             user1.clone(),
             ParticipantData {
+                registration_authorization: String::new(),
                 user_id: user1.clone(),
                 user_key_id: 1,
                 enclave_id: enclave1,
@@ -133,6 +134,7 @@ mod tests {
         fresh.insert(
             user2.clone(),
             ParticipantData {
+                registration_authorization: String::new(),
                 user_id: user2.clone(),
                 user_key_id: 2,
                 enclave_id: enclave1,

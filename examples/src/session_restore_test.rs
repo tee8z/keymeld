@@ -55,6 +55,8 @@ pub struct SavedSessionData {
     pub plain_keygen_session_id: String,
     pub plain_aggregate_key_hex: String,
     pub plain_session_secret_hex: String,
+    pub plain_authorization_manifest: keymeld_sdk::SignedSessionManifest,
+    pub plain_signing_authority_hex: String,
     pub plain_utxo_txid: String,
     pub plain_utxo_vout: u32,
     pub plain_coordinator_user_id: String,
@@ -66,6 +68,8 @@ pub struct SavedSessionData {
     pub adaptor_keygen_session_id: String,
     pub adaptor_aggregate_key_hex: String,
     pub adaptor_session_secret_hex: String,
+    pub adaptor_authorization_manifest: keymeld_sdk::SignedSessionManifest,
+    pub adaptor_signing_authority_hex: String,
     pub adaptor_utxo_txid: String,
     pub adaptor_utxo_vout: u32,
     pub adaptor_coordinator_user_id: String,
@@ -138,7 +142,7 @@ async fn run_keygen(
     let plain_coordinator_credentials =
         UserCredentials::from_private_key(&test.coordinator_derived_private_key.secret_bytes())?;
     let plain_coordinator_client =
-        KeyMeldClient::builder(&config.gateway_url, test.coordinator_user_id.clone())
+        keymeld_examples::client_builder(&config.gateway_url, test.coordinator_user_id.clone())?
             .credentials(plain_coordinator_credentials)
             .build()?;
 
@@ -146,7 +150,7 @@ async fn run_keygen(
     for participant in &test.participants {
         let credentials =
             UserCredentials::from_private_key(&participant.derived_private_key.secret_bytes())?;
-        let client = KeyMeldClient::builder(&config.gateway_url, UserId::new_v7())
+        let client = keymeld_examples::client_builder(&config.gateway_url, UserId::new_v7())?
             .credentials(credentials)
             .build()?;
         plain_participant_clients.push(client);
@@ -188,7 +192,9 @@ async fn run_keygen(
             .join_session(
                 plain_session_id.clone(),
                 &plain_session_secret,
-                JoinOptions::default().approval(requires_approval),
+                JoinOptions::default()
+                    .approval(requires_approval)
+                    .invitation(plain_keygen_session.invitation(client.user_id())?),
             )
             .await?;
         info!("Participant {} joined", idx);
@@ -219,10 +225,10 @@ async fn run_keygen(
     let adaptor_coordinator_credentials = UserCredentials::from_private_key(
         &adaptor_test.coordinator_derived_private_key.secret_bytes(),
     )?;
-    let adaptor_coordinator_client = KeyMeldClient::builder(
+    let adaptor_coordinator_client = keymeld_examples::client_builder(
         &config.gateway_url,
         adaptor_test.coordinator_user_id.clone(),
-    )
+    )?
     .credentials(adaptor_coordinator_credentials)
     .build()?;
 
@@ -230,7 +236,7 @@ async fn run_keygen(
     for participant in &adaptor_test.participants {
         let credentials =
             UserCredentials::from_private_key(&participant.derived_private_key.secret_bytes())?;
-        let client = KeyMeldClient::builder(&config.gateway_url, UserId::new_v7())
+        let client = keymeld_examples::client_builder(&config.gateway_url, UserId::new_v7())?
             .credentials(credentials)
             .build()?;
         adaptor_participant_clients.push(client);
@@ -272,7 +278,9 @@ async fn run_keygen(
             .join_session(
                 adaptor_session_id.clone(),
                 &adaptor_session_secret,
-                JoinOptions::default().approval(requires_approval),
+                JoinOptions::default()
+                    .approval(requires_approval)
+                    .invitation(adaptor_keygen_session.invitation(client.user_id())?),
             )
             .await?;
         info!("Participant {} joined", idx);
@@ -329,6 +337,13 @@ async fn run_keygen(
         plain_keygen_session_id: plain_session_id.to_string(),
         plain_aggregate_key_hex,
         plain_session_secret_hex: hex::encode(plain_session_secret),
+        plain_authorization_manifest: plain_keygen_session.authorization_manifest().clone(),
+        plain_signing_authority_hex: hex::encode(
+            plain_keygen_session
+                .authorization_credentials()
+                .ok_or_else(|| anyhow!("Missing signing authority"))?
+                .export_secret(),
+        ),
         plain_utxo_txid: plain_utxo.txid.to_string(),
         plain_utxo_vout: plain_utxo.vout,
         plain_coordinator_user_id: plain_coordinator_client.user_id().to_string(),
@@ -348,6 +363,13 @@ async fn run_keygen(
         adaptor_keygen_session_id: adaptor_session_id.to_string(),
         adaptor_aggregate_key_hex,
         adaptor_session_secret_hex: hex::encode(adaptor_session_secret),
+        adaptor_authorization_manifest: adaptor_keygen_session.authorization_manifest().clone(),
+        adaptor_signing_authority_hex: hex::encode(
+            adaptor_keygen_session
+                .authorization_credentials()
+                .ok_or_else(|| anyhow!("Missing signing authority"))?
+                .export_secret(),
+        ),
         adaptor_utxo_txid: adaptor_utxo.txid.to_string(),
         adaptor_utxo_vout: adaptor_utxo.vout,
         adaptor_coordinator_user_id: adaptor_coordinator_client.user_id().to_string(),
@@ -425,6 +447,8 @@ async fn run_sign(config_path: String, input_path: String) -> Result<()> {
         &saved_data.plain_keygen_session_id,
         &saved_data.plain_aggregate_key_hex,
         &saved_data.plain_session_secret_hex,
+        &saved_data.plain_authorization_manifest,
+        &saved_data.plain_signing_authority_hex,
         &saved_data.plain_utxo_txid,
         saved_data.plain_utxo_vout,
         &saved_data.destination,
@@ -453,6 +477,8 @@ async fn run_sign(config_path: String, input_path: String) -> Result<()> {
         &saved_data.adaptor_keygen_session_id,
         &saved_data.adaptor_aggregate_key_hex,
         &saved_data.adaptor_session_secret_hex,
+        &saved_data.adaptor_authorization_manifest,
+        &saved_data.adaptor_signing_authority_hex,
         &saved_data.adaptor_utxo_txid,
         saved_data.adaptor_utxo_vout,
         &saved_data.destination,
@@ -521,6 +547,8 @@ async fn test_signing_with_sdk(
     keygen_session_id_str: &str,
     aggregate_key_hex: &str,
     session_secret_hex: &str,
+    authorization_manifest: &keymeld_sdk::SignedSessionManifest,
+    signing_authority_hex: &str,
     utxo_txid: &str,
     utxo_vout: u32,
     destination: &str,
@@ -548,9 +576,10 @@ async fn test_signing_with_sdk(
     // Create SDK clients with restored credentials AND original user IDs
     let coordinator_credentials =
         UserCredentials::from_private_key(&coordinator_private_key_bytes)?;
-    let coordinator_client = KeyMeldClient::builder(&config.gateway_url, coordinator_user_id)
-        .credentials(coordinator_credentials)
-        .build()?;
+    let coordinator_client =
+        keymeld_examples::client_builder(&config.gateway_url, coordinator_user_id)?
+            .credentials(coordinator_credentials)
+            .build()?;
 
     let mut participant_clients = Vec::new();
     for (idx, key_hex) in participant_private_keys_hex.iter().enumerate() {
@@ -559,19 +588,26 @@ async fn test_signing_with_sdk(
         let key_bytes =
             hex::decode(key_hex).map_err(|e| anyhow!("Invalid participant key hex: {}", e))?;
         let credentials = UserCredentials::from_private_key(&key_bytes)?;
-        let client = KeyMeldClient::builder(&config.gateway_url, user_id)
+        let client = keymeld_examples::client_builder(&config.gateway_url, user_id)?
             .credentials(credentials)
             .build()?;
         participant_clients.push(client);
     }
 
+    let signing_secret: [u8; 32] = hex::decode(signing_authority_hex)?
+        .try_into()
+        .map_err(|_| anyhow!("Signing authority must contain 32 bytes"))?;
+    let signing_authority = keymeld_sdk::AuthorizationCredentials::from_secret(&signing_secret)?;
+
     // Restore keygen session using SDK
     info!("{}: Restoring keygen session...", session_type);
     let keygen_session = coordinator_client
         .keygen()
-        .restore_session(
+        .restore_session_with_authority(
             keygen_session_id.clone(),
             SessionCredentials::from_session_secret(&session_secret)?,
+            authorization_manifest.clone(),
+            signing_authority,
         )
         .await?;
     info!("{}: Keygen session restored", session_type);
@@ -594,11 +630,12 @@ async fn test_signing_with_sdk(
 
     // Create signing session using SDK
     info!("{}: Creating signing session...", session_type);
+    let expected_batch = vec![BatchSigningItem::new(message_hash)];
     let mut signing_session = coordinator_client
         .signer()
-        .sign(
+        .sign_batch(
             &keygen_session,
-            message_hash,
+            expected_batch.clone(),
             SigningOptions::default().timeout(1800),
         )
         .await?;
@@ -610,7 +647,7 @@ async fn test_signing_with_sdk(
     );
 
     // Coordinator approves
-    signing_session.approve().await?;
+    signing_session.approve(&expected_batch).await?;
     info!("{}: Coordinator approved", session_type);
 
     // First participant approves (requires approval)
@@ -622,6 +659,7 @@ async fn test_signing_with_sdk(
             .restore_session(
                 keygen_session_id.clone(),
                 SessionCredentials::from_session_secret(&session_secret)?,
+                authorization_manifest.clone(),
             )
             .await?;
 
@@ -630,7 +668,7 @@ async fn test_signing_with_sdk(
             .restore_session(signing_session_id.clone(), &participant_keygen)
             .await?;
 
-        participant_signing.approve().await?;
+        participant_signing.approve(&expected_batch).await?;
         info!("{}: Participant 0 approved", session_type);
     }
 

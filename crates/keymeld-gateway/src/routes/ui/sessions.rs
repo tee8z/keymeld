@@ -57,11 +57,6 @@ pub async fn session_detail_handler(
             .iter()
             .map(|(user_id, data)| ParticipantView {
                 user_id: user_id.to_string(),
-                public_key: if data.auth_pubkey.is_empty() {
-                    None
-                } else {
-                    Some(hex::encode(&data.auth_pubkey))
-                },
                 enclave_id: Some(data.enclave_id.as_u32()),
                 approved: true, // Keygen participants are "approved" once registered
             })
@@ -105,11 +100,6 @@ pub async fn session_detail_handler(
                 let approved = approvals.contains(user_id);
                 ParticipantView {
                     user_id: user_id.to_string(),
-                    public_key: if data.auth_pubkey.is_empty() {
-                        None
-                    } else {
-                        Some(hex::encode(&data.auth_pubkey))
-                    },
                     enclave_id: Some(data.enclave_id.as_u32()),
                     approved,
                 }

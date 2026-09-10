@@ -26,11 +26,14 @@ pub enum SessionContext {
 
 #[derive(Debug)]
 pub struct KeygenSessionContext {
+    pub recipient_authorization:
+        Option<Box<keymeld_core::authorization::EnclaveRecipientAuthorization>>,
     pub session_id: SessionId,
     pub created_at: SystemTime,
     pub musig_processor: Option<MusigProcessor>,
     pub session_secret: Option<SessionSecret>,
     pub coordinator_data: Option<CoordinatorData>,
+    pub coordinator_user_id: Option<UserId>,
     pub encrypted_public_keys_for_response: Vec<EncryptedParticipantPublicKey>,
     pub session_enclave_public_keys: BTreeMap<EnclaveId, String>, // Other enclaves in this session
     pub command_history: Vec<Command>, // Track processed commands for idempotency
@@ -55,11 +58,13 @@ pub struct SigningSessionContext {
 impl SessionContext {
     pub fn new_keygen(session_id: SessionId) -> Self {
         Self::Keygen(Box::new(KeygenSessionContext {
+            recipient_authorization: None,
             session_id,
             created_at: SystemTime::now(),
             musig_processor: None,
             session_secret: None,
             coordinator_data: None,
+            coordinator_user_id: None,
             encrypted_public_keys_for_response: Vec::new(),
             session_enclave_public_keys: BTreeMap::new(),
             command_history: Vec::new(),
@@ -252,11 +257,13 @@ impl
         ),
     ) -> Self {
         let mut ctx = KeygenSessionContext {
+            recipient_authorization: None,
             session_id: cmd.keygen_session_id.clone(),
             created_at: SystemTime::now(),
             musig_processor: None,
             session_secret: None,
             coordinator_data: None,
+            coordinator_user_id: None,
             encrypted_public_keys_for_response: Vec::new(),
             session_enclave_public_keys: BTreeMap::new(),
             command_history: Vec::new(),
@@ -271,26 +278,9 @@ impl
             }
         }
 
-        // Decrypt coordinator private key
-        if let Some(encrypted_key) = &cmd.coordinator_encrypted_private_key {
-            if let Some(coordinator_user_id) = &cmd.coordinator_user_id {
-                if let Ok(coordinator_data) = decrypt_coordinator_data_from_enclave(
-                    enclave_ctx,
-                    encrypted_key,
-                    coordinator_user_id,
-                ) {
-                    ctx.coordinator_data = Some(coordinator_data);
-                }
-            }
-        }
+        // Participant registration is the only authorized key import path.
 
-        // Store session participant enclave public keys in session context
-        for enclave_key_info in &cmd.enclave_public_keys {
-            ctx.session_enclave_public_keys.insert(
-                enclave_key_info.enclave_id,
-                enclave_key_info.public_key.clone(),
-            );
-        }
+        // Recipient keys are installed only by init_session after creator authorization.
 
         // Decrypt taproot tweak if we have a session secret
         let taproot_tweak = if let Some(ref session_secret) = ctx.session_secret {

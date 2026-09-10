@@ -2,8 +2,8 @@ apiVersion: v2
 name: keymeld
 description: Distributed MuSig2 signing system for AWS Nitro Enclaves
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.4.0
+appVersion: "0.4.0"
 
 home: https://github.com/tee8z/keymeld
 sources:

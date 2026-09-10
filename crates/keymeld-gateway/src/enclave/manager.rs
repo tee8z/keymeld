@@ -6,9 +6,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::{
     identifiers::{EnclaveId, SessionId, UserId},
     managed_socket::{
-        client::{ClientMetrics, SocketClient},
-        config::{RetryConfig, TimeoutConfig},
-        pool::ConnectionStats,
+        client::ClientMetrics, config::TimeoutConfig, pool::ConnectionStats,
         transport::SocketConnector,
     },
     protocol::{
@@ -34,7 +32,7 @@ use uuid::Uuid;
 
 use super::distribution::{EnclaveAssignmentManager, SessionAssignment};
 
-type EnclaveClient = SocketClient<Command, Outcome>;
+type EnclaveClient = super::channel::AuthenticatedEnclaveClient;
 
 type BatchParticipantResult = (EnclaveId, Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>);
 
@@ -42,6 +40,7 @@ type BatchParticipantResult = (EnclaveId, Vec<(UserId, Vec<EncryptedParticipantP
 /// for session restoration.
 #[derive(Debug, Clone)]
 pub struct KeygenInitResult {
+    pub encrypted_roster: String,
     pub aggregate_public_key: AggregatePublicKey,
     pub participant_encrypted_public_keys: Vec<(UserId, Vec<EncryptedParticipantPublicKey>)>,
     pub enclave_encrypted_session_secrets: Vec<EncryptedSessionSecret>,
@@ -57,6 +56,8 @@ pub struct OperationResult<T> {
 
 #[derive(Debug, Clone)]
 pub struct SigningSessionInitParams {
+    pub signing_authorization: keymeld_core::authorization::SigningAuthorization,
+    pub approval_signatures: Vec<keymeld_core::authorization::ParticipantApproval>,
     pub keygen_session_id: SessionId,
     pub signing_session_id: SessionId,
     /// Batch items to sign (single message = batch of 1)
@@ -139,6 +140,7 @@ impl EnclaveManager {
                 .entry(participant.enclave_id)
                 .or_default()
                 .push(ParticipantRegistrationData {
+                    registration_authorization: participant.registration_authorization()?,
                     user_id: user_id.clone(),
                     enclave_encrypted_data: participant.enclave_encrypted_data.clone(),
                     auth_pubkey: participant.auth_pubkey.clone(),
@@ -328,17 +330,29 @@ impl EnclaveManager {
         enclave_configs: Vec<EnclaveConfig>,
         timeout_config: TimeoutConfig,
     ) -> Result<Self, KeyMeldError> {
+        Self::new_with_credentials(
+            enclave_configs,
+            timeout_config,
+            Arc::new(super::channel::ChannelCredentials::from_env()?),
+        )
+    }
+
+    pub fn new_with_credentials(
+        enclave_configs: Vec<EnclaveConfig>,
+        timeout_config: TimeoutConfig,
+        channel_credentials: Arc<super::channel::ChannelCredentials>,
+    ) -> Result<Self, KeyMeldError> {
         let mut clients = BTreeMap::new();
         let mut enclave_info = BTreeMap::new();
-
         let now = SystemTime::now();
 
         for config in enclave_configs {
             let enclave_id = EnclaveId::from(config.id);
-            let client = SocketClient::with_config(
+            let client = EnclaveClient::new(
+                enclave_id,
                 config.connector.clone(),
                 &timeout_config,
-                &RetryConfig::default(),
+                channel_credentials.clone(),
             );
 
             let info = EnclaveInfo {
@@ -466,10 +480,11 @@ impl EnclaveManager {
     pub async fn health_check(&self) -> BTreeMap<EnclaveId, bool> {
         let mut results = BTreeMap::new();
         for (enclave_id, client) in &self.clients {
-            let healthy = client
-                .health_check::<keymeld_core::protocol::EnclaveHealthCheck>()
-                .await
-                .unwrap_or(false);
+            let healthy = matches!(client.send_command(Command::new(
+                EnclaveCommand::System(SystemCommand::Ping)
+            ).into()).await,
+                Ok(response) if matches!(response.response.response, EnclaveOutcome::System(SystemOutcome::Pong))
+            );
             results.insert(*enclave_id, healthy);
         }
         results
@@ -620,6 +635,26 @@ impl EnclaveManager {
         }))
     }
 
+    pub async fn get_enclave_attestation(
+        &self,
+        enclave_id: &EnclaveId,
+        nonce: Vec<u8>,
+    ) -> Result<AttestationDocument, KeyMeldError> {
+        let command = Command::new(EnclaveCommand::System(SystemCommand::GetAttestation {
+            nonce,
+        }));
+        match self
+            .send_command_to_enclave(enclave_id, command)
+            .await?
+            .response
+        {
+            EnclaveOutcome::System(SystemOutcome::Attestation(document)) => Ok(document),
+            _ => Err(KeyMeldError::EnclaveError(
+                "Enclave did not return attestation evidence".into(),
+            )),
+        }
+    }
+
     pub async fn get_enclave_public_info(
         &self,
         enclave_id: &EnclaveId,
@@ -628,14 +663,18 @@ impl EnclaveManager {
 
         match self.send_command_to_enclave(enclave_id, command).await {
             Ok(outcome) => match outcome.response {
-                EnclaveOutcome::System(SystemOutcome::PublicInfo(response)) => Ok((
-                    response.public_key,
-                    response.attestation_document,
-                    response.active_sessions,
-                    response.uptime_seconds,
-                    response.key_epoch,
-                    response.key_generation_time,
-                )),
+                EnclaveOutcome::System(SystemOutcome::PublicInfo(response))
+                    if response.authorization_protocol_version == 1 =>
+                {
+                    Ok((
+                        response.public_key,
+                        response.attestation_document,
+                        response.active_sessions,
+                        response.uptime_seconds,
+                        response.key_epoch,
+                        response.key_generation_time,
+                    ))
+                }
                 EnclaveOutcome::Error(err) => Err(KeyMeldError::EnclaveError(format!(
                     "Enclave {enclave_id} returned error: {}",
                     err.error
@@ -920,8 +959,10 @@ impl EnclaveManager {
     pub async fn orchestrate_keygen_session_initialization(
         &self,
         keygen_session_id: &SessionId,
+        authorization_manifest: &keymeld_core::authorization::SignedSessionManifest,
+        recipient_authorization: &keymeld_core::authorization::EnclaveRecipientAuthorization,
         coordinator_enclave_id: &EnclaveId,
-        coordinator_encrypted_private_key: &str,
+        _coordinator_encrypted_private_key: &str,
         encrypted_session_secret: &str,
         participants: &BTreeMap<UserId, ParticipantData>,
         encrypted_taproot_tweak: &str,
@@ -941,6 +982,15 @@ impl EnclaveManager {
         let fresh_enclave_public_keys = self
             .collect_enclave_public_keys(&enclaves_with_participants)
             .await?;
+        recipient_authorization
+            .verify_recipient_keys(authorization_manifest, &fresh_enclave_public_keys)?;
+        if recipient_authorization.user_enclave_assignments
+            != session_assignment.user_enclave_assignments
+        {
+            return Err(KeyMeldError::ValidationError(
+                "Participant enclave assignments changed after authorization".into(),
+            ));
+        }
 
         let mut expected_participants: Vec<UserId> = participants.keys().cloned().collect();
         expected_participants.sort_by(|a, b| b.cmp(a));
@@ -959,13 +1009,13 @@ impl EnclaveManager {
         // First, initialize the coordinator enclave to get encrypted session secrets for all other enclaves
         {
             let init_cmd = InitKeygenSessionCommand {
+                recipient_authorization: Box::new(recipient_authorization.clone()),
+                authorization_manifest: Box::new(authorization_manifest.clone()),
                 keygen_session_id: keygen_session_id.clone(),
-                coordinator_encrypted_private_key: Some(
-                    coordinator_encrypted_private_key.to_string(),
-                ),
+                coordinator_encrypted_private_key: None,
                 coordinator_user_id: Some(session_assignment.coordinator_user_id.clone()),
                 encrypted_session_secret: Some(encrypted_session_secret.to_string()),
-                timeout_secs: 1800,
+                timeout_secs: authorization_manifest.manifest.timeout_secs,
                 encrypted_taproot_tweak: encrypted_taproot_tweak.to_string(),
                 expected_participant_count: participants.len(),
                 expected_participants: expected_participants.clone(),
@@ -1041,11 +1091,13 @@ impl EnclaveManager {
                         encrypted_secrets_by_enclave.get(&enclave_id).cloned();
 
                     let init_cmd = InitKeygenSessionCommand {
+                        recipient_authorization: Box::new(recipient_authorization.clone()),
+                        authorization_manifest: Box::new(authorization_manifest.clone()),
                         keygen_session_id: keygen_session_id.clone(),
                         coordinator_encrypted_private_key: None,
                         coordinator_user_id: None,
                         encrypted_session_secret: enclave_encrypted_secret,
-                        timeout_secs: 1800,
+                        timeout_secs: authorization_manifest.manifest.timeout_secs,
                         encrypted_taproot_tweak: encrypted_taproot_tweak.to_string(),
                         expected_participant_count: participants.len(),
                         expected_participants: expected_participants.clone(),
@@ -1130,7 +1182,7 @@ impl EnclaveManager {
         // might not be ready immediately after participants are added. The musig processor
         // creates the key aggregation context when participant_count >= expected_count,
         // but there can be a timing window between participant addition and context creation.
-        let (aggregate_public_key_bytes, encrypted_subset_aggregates) = self
+        let (aggregate_public_key_bytes, encrypted_subset_aggregates, encrypted_roster) = self
             .execute_with_retry(
                 &session_assignment.coordinator_enclave,
                 || {
@@ -1146,6 +1198,7 @@ impl EnclaveManager {
                     )) => Ok((
                         response.encrypted_aggregate_public_key,
                         response.encrypted_subset_aggregates,
+                        response.encrypted_roster,
                     )),
                     outcome => Err(KeyMeldError::EnclaveError(format!(
                         "Unexpected response for aggregate public key request: {outcome:?}"
@@ -1160,6 +1213,7 @@ impl EnclaveManager {
         );
 
         Ok(KeygenInitResult {
+            encrypted_roster,
             aggregate_public_key: aggregate_public_key_bytes,
             participant_encrypted_public_keys,
             enclave_encrypted_session_secrets: all_encrypted_session_secrets,
@@ -1252,12 +1306,13 @@ impl EnclaveManager {
                     .collect();
 
                 let init_cmd = InitSigningSessionCommand {
+                    signing_authorization: params.signing_authorization.clone(),
                     keygen_session_id: params.keygen_session_id.clone(),
                     signing_session_id: params.signing_session_id.clone(),
                     user_ids: user_ids.clone(),
                     encrypted_taproot_tweak: params.encrypted_taproot_tweak.clone(),
                     expected_participant_count: params.participants.len(),
-                    approval_signatures: vec![], // TODO: Pass approval signatures from request
+                    approval_signatures: params.approval_signatures.clone(),
                     batch_items: enclave_batch_items,
                 };
 
@@ -1751,24 +1806,46 @@ impl EnclaveManager {
             keygen_session_id, enclave_id
         );
 
-        // Restore the session assignment in the assignment manager
-        let user_ids: Vec<UserId> = completed.registered_participants.keys().cloned().collect();
-
-        // Find the coordinator user from the participants
+        // Restore the exact creator-authorized assignment; never recompute placement.
+        completed
+            .recipient_authorization
+            .verify(&completed.authorization_manifest)?;
         let coordinator_user_id = completed
-            .registered_participants
-            .iter()
-            .find(|(_, p)| p.enclave_id == completed.coordinator_enclave_id)
-            .map(|(user_id, _)| user_id.clone())
-            .unwrap_or_else(|| user_ids.first().cloned().unwrap_or_else(UserId::new_v7));
+            .authorization_manifest
+            .manifest
+            .coordinator_user_id
+            .clone();
+        let session_assignment = SessionAssignment {
+            session_id: keygen_session_id.clone(),
+            coordinator_user_id: coordinator_user_id.clone(),
+            coordinator_enclave: completed.coordinator_enclave_id,
+            user_enclave_assignments: completed
+                .recipient_authorization
+                .user_enclave_assignments
+                .clone(),
+            created_at: completed.created_at,
+        };
+        self.restore_session_assignment(session_assignment.clone())?;
 
-        // Create session assignment
-        let session_assignment = self.create_session_assignment_with_coordinator(
-            keygen_session_id.clone(),
-            &user_ids,
-            &coordinator_user_id,
-            completed.coordinator_enclave_id,
-        )?;
+        // A gateway-only restart leaves live enclave sessions intact. This read does
+        // not enqueue a state transition or reopen immutable participant registration.
+        let probe = Command::new(EnclaveCommand::System(SystemCommand::CheckKeygenSession {
+            keygen_session_id: keygen_session_id.clone(),
+            recipient_authorization: completed.recipient_authorization.clone(),
+        }));
+        match self
+            .send_command_to_enclave(enclave_id, probe)
+            .await?
+            .response
+        {
+            EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(true)) => return Ok(()),
+            EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(false)) => {}
+            other => {
+                return Err(KeyMeldError::EnclaveError(format!(
+                    "Cannot safely restore keygen session: {other:?}"
+                )))
+            }
+        }
 
         // Collect enclave public keys for all participating enclaves
         // Use cached keys to avoid network calls during restoration
@@ -1834,19 +1911,17 @@ impl EnclaveManager {
             });
 
         let init_cmd = InitKeygenSessionCommand {
+            recipient_authorization: completed.recipient_authorization.clone(),
+            authorization_manifest: completed.authorization_manifest.clone(),
             keygen_session_id: keygen_session_id.clone(),
-            coordinator_encrypted_private_key: if is_coordinator {
-                Some(completed.coordinator_encrypted_private_key.clone())
-            } else {
-                None
-            },
+            coordinator_encrypted_private_key: None,
             coordinator_user_id: if is_coordinator {
                 Some(coordinator_user_id.clone())
             } else {
                 None
             },
             encrypted_session_secret: encrypted_session_secret_for_enclave,
-            timeout_secs: 1800,
+            timeout_secs: completed.authorization_manifest.manifest.timeout_secs,
             encrypted_taproot_tweak: completed.encrypted_taproot_tweak.clone(),
             expected_participant_count: completed.registered_participants.len(),
             expected_participants: expected_participants.clone(),
@@ -1881,13 +1956,16 @@ impl EnclaveManager {
             .registered_participants
             .iter()
             .filter(|(_, p)| p.enclave_id == *enclave_id)
-            .map(|(user_id, p)| ParticipantRegistrationData {
-                user_id: user_id.clone(),
-                enclave_encrypted_data: p.enclave_encrypted_data.clone(),
-                auth_pubkey: p.auth_pubkey.clone(),
-                require_signing_approval: p.require_signing_approval,
+            .map(|(user_id, p)| {
+                Ok(ParticipantRegistrationData {
+                    registration_authorization: p.registration_authorization()?,
+                    user_id: user_id.clone(),
+                    enclave_encrypted_data: p.enclave_encrypted_data.clone(),
+                    auth_pubkey: p.auth_pubkey.clone(),
+                    require_signing_approval: p.require_signing_approval,
+                })
             })
-            .collect();
+            .collect::<Result<_, KeyMeldError>>()?;
 
         if !participants_for_enclave.is_empty() {
             let batch_cmd = AddParticipantsBatchCommand {
@@ -2014,6 +2092,7 @@ mod tests {
         for i in 0..3 {
             let user_id = UserId::new_v7();
             let participant = ParticipantData {
+                registration_authorization: String::new(),
                 user_id: user_id.clone(),
                 user_key_id: i as i64,
                 enclave_id: EnclaveId::from(i),
@@ -2062,6 +2141,11 @@ mod tests {
         };
 
         let params = SigningSessionInitParams {
+            signing_authorization: keymeld_core::authorization::SigningAuthorization {
+                timeout_secs: 60,
+                signature: vec![],
+            },
+            approval_signatures: vec![],
             keygen_session_id: keygen_session_id.clone(),
             signing_session_id: signing_session_id.clone(),
             batch_items: vec![batch_item],

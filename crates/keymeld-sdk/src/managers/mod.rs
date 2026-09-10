@@ -4,7 +4,10 @@ mod signing;
 mod single_signer;
 
 pub use health::HealthManager;
-pub use keygen::{JoinOptions, KeygenManager, KeygenOptions, KeygenSession, RegisterOptions};
+pub use keygen::{
+    JoinOptions, KeygenManager, KeygenOptions, KeygenSession, ParticipantInvitation,
+    RegisterOptions,
+};
 pub use signing::{
     AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
     BatchSigningMode, SignatureResult, SigningManager, SigningOptions, SigningSession,

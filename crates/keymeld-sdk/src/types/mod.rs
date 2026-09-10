@@ -6,6 +6,11 @@ use uuid::Uuid;
 use utoipa::ToSchema;
 
 // Re-export core types that are part of the API
+pub use keymeld_core::authorization::{
+    ParticipantApproval, ParticipantRoster, RegistrationAuthorization, RegistrationContext,
+    RegistrationEnvelope, SessionAuthorizationManifest, SignedRoster, SignedSessionManifest,
+    SigningAuthorization,
+};
 pub use keymeld_core::identifiers::{EnclaveId, KeyId, SessionId, UserId};
 pub use keymeld_core::protocol::{
     AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, KeygenStatusKind,
@@ -48,6 +53,7 @@ impl SubsetDefinition {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct ReserveKeygenSessionRequest {
+    pub authorization_manifest: SignedSessionManifest,
     pub keygen_session_id: SessionId,
     pub coordinator_user_id: UserId,
     pub expected_participants: Vec<UserId>,
@@ -63,6 +69,7 @@ pub struct ReserveKeygenSessionRequest {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct ReserveKeygenSessionResponse {
+    pub user_enclave_assignments: BTreeMap<UserId, EnclaveId>,
     pub keygen_session_id: SessionId,
     pub coordinator_enclave_id: EnclaveId,
     pub coordinator_public_key: String,
@@ -75,12 +82,12 @@ pub struct ReserveKeygenSessionResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct InitializeKeygenSessionRequest {
+    pub recipient_authorization: keymeld_core::authorization::EnclaveRecipientAuthorization,
+    pub authorization_signature: Vec<u8>,
     pub coordinator_pubkey: Vec<u8>,
-    pub coordinator_encrypted_private_key: String,
     pub session_public_key: Vec<u8>,
     pub encrypted_session_secret: String,
     pub encrypted_session_data: String,
-    pub encrypted_enclave_data: String,
     pub enclave_key_epoch: u64,
 }
 
@@ -94,9 +101,52 @@ pub struct InitializeKeygenSessionResponse {
     pub session_public_key: Vec<u8>,
 }
 
+impl InitializeKeygenSessionRequest {
+    fn authorization_payload(&self, session_id: &SessionId) -> impl Serialize + '_ {
+        // Serialize a typed tuple, excluding only the signature itself.
+        (
+            session_id.clone(),
+            &self.coordinator_pubkey,
+            &self.session_public_key,
+            &self.encrypted_session_secret,
+            &self.encrypted_session_data,
+            self.enclave_key_epoch,
+            &self.recipient_authorization,
+        )
+    }
+
+    pub fn sign_authorization(
+        &mut self,
+        session_id: &SessionId,
+        secret: &[u8; 32],
+    ) -> Result<(), keymeld_core::KeyMeldError> {
+        let signature = keymeld_core::authorization::sign_authorization(
+            secret,
+            "initialize-session",
+            &self.authorization_payload(session_id),
+        )?;
+        self.authorization_signature = signature;
+        Ok(())
+    }
+
+    pub fn verify_authorization(
+        &self,
+        session_id: &SessionId,
+        public_key: &[u8],
+    ) -> Result<(), keymeld_core::KeyMeldError> {
+        keymeld_core::authorization::verify_authorization(
+            public_key,
+            "initialize-session",
+            &self.authorization_payload(session_id),
+            &self.authorization_signature,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct RegisterKeygenParticipantRequest {
+    pub registration_authorization: RegistrationAuthorization,
     pub keygen_session_id: SessionId,
     pub user_id: UserId,
     pub encrypted_private_key: String,
@@ -129,6 +179,9 @@ pub struct RegisterKeygenParticipantResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct KeygenSessionStatusResponse {
+    pub recipient_authorization: keymeld_core::authorization::EnclaveRecipientAuthorization,
+    pub authorization_manifest: SignedSessionManifest,
+    pub encrypted_roster: Option<String>,
     pub keygen_session_id: SessionId,
     pub status: KeygenStatusKind,
     pub expected_participants: usize,
@@ -163,6 +216,7 @@ pub struct GetAvailableSlotsResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct CreateSigningSessionRequest {
+    pub signing_authorization: SigningAuthorization,
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub timeout_secs: u64,
@@ -180,10 +234,20 @@ pub struct CreateSigningSessionResponse {
     pub expires_at: u64,
 }
 
+impl CreateSigningSessionRequest {
+    pub fn enclave_batch_items(&self) -> Vec<keymeld_core::protocol::EnclaveBatchItem> {
+        self.batch_items
+            .iter()
+            .map(SigningBatchItem::to_enclave_batch_item)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct SigningSessionStatusResponse {
+    pub batch_items: Vec<SigningBatchItem>,
     pub signing_session_id: SessionId,
     pub keygen_session_id: SessionId,
     pub status: SigningStatusKind,
@@ -245,6 +309,21 @@ pub struct SigningBatchItem {
 }
 
 impl SigningBatchItem {
+    pub fn to_enclave_batch_item(&self) -> keymeld_core::protocol::EnclaveBatchItem {
+        keymeld_core::protocol::EnclaveBatchItem {
+            batch_item_id: self.batch_item_id,
+            encrypted_message: self.signing_mode.encrypted_message().to_owned(),
+            encrypted_adaptor_configs: self
+                .signing_mode
+                .encrypted_adaptor_configs()
+                .map(str::to_owned),
+            encrypted_taproot_tweak: self.encrypted_taproot_tweak.clone(),
+            subset_id: self.subset_id,
+        }
+    }
+}
+
+impl SigningBatchItem {
     pub fn new(
         message_hash: Vec<u8>,
         encrypted_taproot_tweak: String,
@@ -288,7 +367,17 @@ pub struct BatchItemApproval {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct ReserveKeySlotRequest {
+    pub key_id: KeyId,
     pub user_id: UserId,
+    pub auth_pubkey: Vec<u8>,
+}
+
+impl ReserveKeySlotRequest {
+    pub fn auth_scope(&self) -> Result<String, keymeld_core::KeyMeldError> {
+        Ok(hex::encode(
+            keymeld_core::authorization::authorization_digest("reserve-user-key", self)?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +400,14 @@ pub struct ImportUserKeyRequest {
     pub encrypted_private_key: String,
     pub auth_pubkey: Vec<u8>,
     pub enclave_public_key: String,
+}
+
+impl ImportUserKeyRequest {
+    pub fn auth_scope(&self) -> Result<String, keymeld_core::KeyMeldError> {
+        Ok(hex::encode(
+            keymeld_core::authorization::authorization_digest("import-user-key", self)?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +440,7 @@ pub struct DeleteUserKeyResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct KeyStatusResponse {
+    pub enclave_id: EnclaveId,
     pub key_id: KeyId,
     pub user_id: UserId,
     pub status: String,
@@ -355,6 +453,21 @@ pub struct KeyStatusResponse {
 #[serde(rename_all = "snake_case")]
 pub struct StoreKeyFromKeygenRequest {
     pub key_id: KeyId,
+}
+
+impl StoreKeyFromKeygenRequest {
+    pub fn auth_scope(
+        &self,
+        user_id: &UserId,
+        session_id: &SessionId,
+    ) -> Result<String, keymeld_core::KeyMeldError> {
+        Ok(hex::encode(
+            keymeld_core::authorization::authorization_digest(
+                "store-key-from-keygen",
+                &(user_id, session_id, &self.key_id),
+            )?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +490,14 @@ pub struct SignSingleRequest {
     pub encrypted_session_secret: String,
     pub approval_signature: Vec<u8>,
     pub approval_timestamp: u64,
+}
+
+impl SignSingleRequest {
+    pub fn auth_scope(&self) -> Result<String, keymeld_core::KeyMeldError> {
+        Ok(hex::encode(
+            keymeld_core::authorization::authorization_digest("sign-single", self)?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,6 +635,27 @@ pub struct ErrorResponse {
 pub fn validate_reserve_keygen_session_request(
     request: &ReserveKeygenSessionRequest,
 ) -> Result<(), keymeld_core::KeyMeldError> {
+    request.authorization_manifest.verify()?;
+    let manifest = &request.authorization_manifest.manifest;
+    let participants: std::collections::BTreeSet<_> =
+        request.expected_participants.iter().collect();
+    let verifiers: std::collections::BTreeSet<_> = manifest.participant_verifiers.keys().collect();
+    if participants.len() != request.expected_participants.len()
+        || participants != verifiers
+        || request.keygen_session_id != manifest.keygen_session_id
+        || request.coordinator_user_id != manifest.coordinator_user_id
+        || request.timeout_secs != manifest.timeout_secs
+        || request.max_signing_sessions != manifest.max_signing_sessions
+        || request.encrypted_taproot_tweak != manifest.encrypted_taproot_tweak
+        || serde_json::to_value(&request.subset_definitions)
+            .map_err(|e| keymeld_core::KeyMeldError::SerializationError(e.to_string()))?
+            != serde_json::to_value(&manifest.subset_definitions)
+                .map_err(|e| keymeld_core::KeyMeldError::SerializationError(e.to_string()))?
+    {
+        return Err(keymeld_core::KeyMeldError::ValidationError(
+            "Reservation does not match its signed authorization manifest".into(),
+        ));
+    }
     keymeld_core::validation::Validator::validate_vec_length(
         &request.expected_participants,
         Some(1),
@@ -594,11 +736,6 @@ pub fn validate_initialize_keygen_session_request(
         Some(33),
         Some(65),
         "Coordinator public key",
-    )?;
-
-    keymeld_core::validation::Validator::validate_non_empty_string(
-        &request.coordinator_encrypted_private_key,
-        "Coordinator encrypted private key",
     )?;
 
     keymeld_core::validation::Validator::validate_vec_length(

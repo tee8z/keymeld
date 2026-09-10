@@ -1,17 +1,43 @@
 use crate::client::KeyMeldClient;
 use crate::credentials::SessionCredentials;
-use crate::error::{ApiError, SdkError, SigningError};
+use crate::error::{SdkError, SigningError};
 use crate::managers::keygen::KeygenSession;
 use crate::types::{
     BatchItemResult, CreateSigningSessionRequest, CreateSigningSessionResponse, SessionId,
     SigningBatchItem, SigningMode, SigningSessionStatusResponse, SigningStatusKind, TaprootTweak,
     UserId,
 };
+use keymeld_core::authorization::{ParticipantApproval, SigningAuthorization};
 use uuid::Uuid;
 
 // Re-export adaptor types from keymeld-core
 pub use keymeld_core::protocol::{AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType};
 use std::collections::BTreeMap;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn approval_timestamp() -> Result<u64, SdkError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|e| SdkError::Internal(e.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn approval_timestamp() -> Result<u64, SdkError> {
+    use wasm_bindgen::prelude::wasm_bindgen;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = Date, js_name = now)]
+        fn date_now() -> f64;
+    }
+    let seconds = date_now() / 1000.0;
+    if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
+        return Err(SdkError::Internal(
+            "Browser returned an invalid current time".into(),
+        ));
+    }
+    Ok(seconds.floor() as u64)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SigningOptions {
@@ -25,7 +51,7 @@ impl SigningOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BatchSigningItem {
     pub(crate) id: Uuid,
     pub(crate) message: [u8; 32],
@@ -35,6 +61,22 @@ pub struct BatchSigningItem {
 }
 
 impl BatchSigningItem {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn message(&self) -> &[u8; 32] {
+        &self.message
+    }
+    pub fn mode(&self) -> &BatchSigningMode {
+        &self.mode
+    }
+    pub fn taproot_tweak(&self) -> &TaprootTweak {
+        &self.taproot_tweak
+    }
+    pub fn subset_id(&self) -> Option<Uuid> {
+        self.subset_id
+    }
+
     pub fn new(message: [u8; 32]) -> Self {
         Self {
             id: Uuid::now_v7(),
@@ -71,7 +113,7 @@ impl BatchSigningItem {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum BatchSigningMode {
     Regular,
     Adaptor { configs: Vec<AdaptorConfig> },
@@ -127,6 +169,13 @@ impl<'a> SigningManager<'a> {
             ));
         }
 
+        keygen_session.verify_roster()?;
+        let authority = keygen_session.authorization_credentials().ok_or_else(|| {
+            SdkError::InvalidInput(
+                "Signing requires authority credentials independent of the shared session secret"
+                    .into(),
+            )
+        })?;
         let keygen_credentials = keygen_session.credentials();
         let signing_session_id = SessionId::new_v7();
 
@@ -135,7 +184,19 @@ impl<'a> SigningManager<'a> {
         let credentials =
             SessionCredentials::from_session_secret(&keygen_credentials.export_session_secret())?;
 
+        let enclave_batch_items: Vec<_> = batch_items
+            .iter()
+            .map(SigningBatchItem::to_enclave_batch_item)
+            .collect();
+        let signing_authorization = SigningAuthorization::sign(
+            &authority.export_secret(),
+            keygen_session.session_id(),
+            &signing_session_id,
+            options.timeout_secs.unwrap_or(300),
+            &enclave_batch_items,
+        )?;
         let request = CreateSigningSessionRequest {
+            signing_authorization,
             signing_session_id: signing_session_id.clone(),
             keygen_session_id: keygen_session.session_id().clone(),
             timeout_secs: options.timeout_secs.unwrap_or(300),
@@ -155,7 +216,16 @@ impl<'a> SigningManager<'a> {
             )
             .await?;
 
-        Ok(SigningSession {
+        if response.signing_session_id != request.signing_session_id
+            || response.keygen_session_id != request.keygen_session_id
+        {
+            return Err(SdkError::InvalidInput(
+                "Gateway changed the authorized signing session identity".into(),
+            ));
+        }
+
+        let mut session = SigningSession {
+            batch_items: request.batch_items,
             signing_session_id: response.signing_session_id,
             keygen_session_id: response.keygen_session_id,
             credentials,
@@ -164,7 +234,9 @@ impl<'a> SigningManager<'a> {
             participants_requiring_approval: vec![],
             approved_participants: vec![],
             client: self.client,
-        })
+        };
+        session.refresh_status().await?;
+        Ok(session)
     }
 
     pub async fn restore_session(
@@ -172,6 +244,7 @@ impl<'a> SigningManager<'a> {
         signing_session_id: SessionId,
         keygen_session: &KeygenSession<'_>,
     ) -> Result<SigningSession<'a>, SdkError> {
+        keygen_session.verify_roster()?;
         let keygen_credentials = keygen_session.credentials();
 
         let credentials =
@@ -200,7 +273,16 @@ impl<'a> SigningManager<'a> {
             )
             .await?;
 
+        if status_response.signing_session_id != signing_session_id
+            || &status_response.keygen_session_id != keygen_session.session_id()
+        {
+            return Err(SdkError::InvalidInput(
+                "Gateway returned a different signing session or keygen roster".into(),
+            ));
+        }
+
         Ok(SigningSession {
+            batch_items: status_response.batch_items,
             signing_session_id: status_response.signing_session_id,
             keygen_session_id: status_response.keygen_session_id,
             credentials,
@@ -232,6 +314,13 @@ impl<'a> SigningManager<'a> {
                 let signing_mode = match &item.mode {
                     BatchSigningMode::Regular => SigningMode::Regular { encrypted_message },
                     BatchSigningMode::Adaptor { configs } => {
+                        if configs.is_empty() {
+                            return Err(SdkError::InvalidInput(
+                                "Adaptor signing requires at least one Single adaptor config"
+                                    .into(),
+                            ));
+                        }
+                        keymeld_core::validation::validate_decrypted_adaptor_configs(configs)?;
                         let configs_json = serde_json::to_vec(configs).map_err(|e| {
                             SdkError::Internal(format!(
                                 "Failed to serialize adaptor configs: {}",
@@ -261,6 +350,7 @@ impl<'a> SigningManager<'a> {
 }
 
 pub struct SigningSession<'a> {
+    batch_items: Vec<SigningBatchItem>,
     signing_session_id: SessionId,
     keygen_session_id: SessionId,
     credentials: SessionCredentials,
@@ -301,58 +391,92 @@ impl<'a> SigningSession<'a> {
         &self.approved_participants
     }
 
-    pub async fn approve(&mut self) -> Result<(), SdkError> {
+    /// Decrypt the complete batch so callers can review every signing parameter.
+    pub fn pending_batch(&self) -> Result<Vec<BatchSigningItem>, SdkError> {
+        self.batch_items
+            .iter()
+            .map(|item| {
+                let message_hex = self
+                    .credentials
+                    .decrypt(item.signing_mode.encrypted_message(), "session_data")?;
+                let message_bytes = hex::decode(&message_hex)?;
+                let message: [u8; 32] = message_bytes.try_into().map_err(|_| {
+                    SdkError::InvalidInput("Signing message must contain exactly 32 bytes".into())
+                })?;
+                let taproot_tweak = serde_json::from_slice(
+                    &self
+                        .credentials
+                        .decrypt(&item.encrypted_taproot_tweak, "session_data")?,
+                )?;
+                let mode = match &item.signing_mode {
+                    SigningMode::Regular { .. } => BatchSigningMode::Regular,
+                    SigningMode::Adaptor {
+                        encrypted_adaptor_configs,
+                        ..
+                    } => BatchSigningMode::Adaptor {
+                        configs: serde_json::from_slice(
+                            &self
+                                .credentials
+                                .decrypt(encrypted_adaptor_configs, "adaptor_configs")?,
+                        )?,
+                    },
+                };
+                Ok(BatchSigningItem {
+                    id: item.batch_item_id,
+                    message,
+                    mode,
+                    taproot_tweak,
+                    subset_id: item.subset_id,
+                })
+            })
+            .collect()
+    }
+
+    /// Approve only a batch whose plaintext parameters match the caller's review.
+    pub async fn approve(&mut self, expected_items: &[BatchSigningItem]) -> Result<(), SdkError> {
+        self.refresh_status().await?;
+        if serde_json::to_value(expected_items)? != serde_json::to_value(self.pending_batch()?)? {
+            return Err(SdkError::InvalidInput(
+                "Signing batch differs from the reviewed messages or signing parameters".into(),
+            ));
+        }
         let user_credentials = self.client.credentials().ok_or_else(|| {
             SdkError::InvalidInput("User credentials required for signing approval".to_string())
         })?;
-
         let user_signature = user_credentials.sign_for_session(
             &self.signing_session_id.to_string(),
             &self.client.user_id().to_string(),
             &self.keygen_session_id.to_string(),
         )?;
-
+        let (auth_key, _) = keymeld_core::crypto::SecureCrypto::derive_session_auth_keypair(
+            &user_credentials.private_key_bytes(),
+            &self.keygen_session_id.to_string(),
+        )?;
+        let timestamp = approval_timestamp()?;
+        let batch: Vec<_> = self
+            .batch_items
+            .iter()
+            .map(SigningBatchItem::to_enclave_batch_item)
+            .collect();
+        let approval = ParticipantApproval::sign(
+            &auth_key.secret_bytes(),
+            self.client.user_id().clone(),
+            &self.keygen_session_id,
+            &self.signing_session_id,
+            timestamp,
+            &batch,
+        )?;
         let url = self.client.url(&format!(
             "/api/v1/signing/{}/approve/{}",
             self.signing_session_id,
-            self.client.user_id()
+            self.client.user_id(),
         ));
-
-        let config = self.client.polling_config().clone();
-        let mut delay = config.initial_delay;
-
-        for attempt in 1..=config.max_attempts {
-            match self
-                .client
-                .http()
-                .post_no_response(&url, &[("x-user-signature", &user_signature)])
-                .await
-            {
-                Ok(_) => {
-                    self.refresh_status().await?;
-                    return Ok(());
-                }
-                Err(SdkError::Api(ApiError::HttpError { status: 404, .. })) => {
-                    if attempt >= config.max_attempts {
-                        return Err(SdkError::Signing(SigningError::Failed(
-                            "Signing session not ready for approval after max retries".to_string(),
-                        )));
-                    }
-
-                    #[cfg(not(target_arch = "wasm32"))]
-                    tokio::time::sleep(delay).await;
-                    #[cfg(target_arch = "wasm32")]
-                    gloo_timers::future::TimeoutFuture::new(delay.as_millis() as u32).await;
-
-                    let next_delay_ms =
-                        (delay.as_millis() as f64 * config.backoff_multiplier) as u64;
-                    delay = std::time::Duration::from_millis(next_delay_ms).min(config.max_delay);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(SdkError::Signing(SigningError::Timeout))
+        self.client
+            .http()
+            .post_json_no_response(&url, &approval, &[("x-user-signature", &user_signature)])
+            .await?;
+        self.refresh_status().await?;
+        Ok(())
     }
 
     pub async fn refresh_status(&mut self) -> Result<&SigningStatusKind, SdkError> {
@@ -379,6 +503,15 @@ impl<'a> SigningSession<'a> {
             )
             .await?;
 
+        if response.signing_session_id != self.signing_session_id
+            || response.keygen_session_id != self.keygen_session_id
+            || serde_json::to_value(&response.batch_items)?
+                != serde_json::to_value(&self.batch_items)?
+        {
+            return Err(SdkError::InvalidInput(
+                "Gateway changed the signing session or its immutable batch".into(),
+            ));
+        }
         self.status = response.status;
         self.batch_results = response.batch_results;
         self.participants_requiring_approval = response.participants_requiring_approval;
@@ -462,5 +595,39 @@ impl<'a> SigningSession<'a> {
 
     pub fn export_session_secret(&self) -> [u8; 32] {
         self.credentials.export_session_secret()
+    }
+}
+
+#[cfg(test)]
+mod adaptor_validation_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_refuses_unsupported_adaptors_before_creating_a_request() {
+        let client = KeyMeldClient::builder("http://127.0.0.1:1", UserId::new_v7())
+            .build()
+            .unwrap();
+        let manager = client.signer();
+        let credentials = SessionCredentials::generate().unwrap();
+        let point = hex::encode(
+            secp256k1::SecretKey::from_byte_array([24; 32])
+                .unwrap()
+                .public_key(secp256k1::SECP256K1)
+                .serialize(),
+        );
+        for configs in [
+            vec![],
+            vec![AdaptorConfig::and(vec![point.clone(), point.clone()])],
+            vec![AdaptorConfig::or(vec![point.clone(), point.clone()])],
+        ] {
+            assert!(manager
+                .encrypt_batch_items(
+                    &[BatchSigningItem::adaptor([25; 32], configs)],
+                    &credentials
+                )
+                .is_err());
+        }
+        let item = BatchSigningItem::adaptor([25; 32], vec![AdaptorConfig::single(point)]);
+        assert!(manager.encrypt_batch_items(&[item], &credentials).is_ok());
     }
 }

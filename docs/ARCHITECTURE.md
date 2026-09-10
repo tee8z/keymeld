@@ -2,7 +2,8 @@
 
 ## Overview
 
-KeyMeld is a distributed MuSig2 signing system using AWS Nitro Enclaves for secure key operations.
+KeyMeld is a distributed MuSig2 signing system using AWS Nitro Enclaves for key operations.
+For the 0.4.0 authorization proofs and complete request flow, see [participant and signing authorization](AUTHORIZATION.md).
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
@@ -55,8 +56,8 @@ KeyMeld is a distributed MuSig2 signing system using AWS Nitro Enclaves for secu
       │◀───────────────────────────│                              │
       │                            │                              │
       │  POST /keygen/{id}/init    │                              │
-      │  (ECIES encrypted keys)    │                              │
-      │───────────────────────────▶│  Configure enclave           │
+      │  (ECIES session secret)    │                              │
+      │───────────────────────────▶│  Initialize keygen           │
       │                            │─────────────────────────────▶│
       │                            │                              │
       │  Participants register     │                              │
@@ -141,11 +142,11 @@ CollectingParticipants ──▶ InitializingSession ──▶ DistributingNonce
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          GATEWAY LAYER                               │
 │                                                                      │
-│  • Stores ECIES-encrypted private keys (cannot decrypt)             │
+│  • Stores ECIES-encrypted private keys                              │
 │  • Stores session-key-encrypted metadata (cannot decrypt)           │
 │  • Coordinates session state transitions                            │
 │  • Routes messages to correct enclaves                              │
-│  • SQLite: encrypted blobs only                                     │
+│  • SQLite: encrypted payloads and metadata                          │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    │ VSock (encrypted payloads)
@@ -165,8 +166,8 @@ CollectingParticipants ──▶ InitializingSession ──▶ DistributingNonce
 
 | Data | Encryption | Who Can Decrypt |
 |------|-----------|-----------------|
-| Private keys | ECIES to enclave pubkey | Only target enclave |
-| Session secret | ECIES to enclave pubkey | Only enclaves |
+| Private keys | ECIES to enclave pubkey | Target enclave; also a principal able to recover its KMS hierarchy |
+| Session secret | ECIES to enclave pubkey | Authorized clients and enclaves; KMS recovery trust also applies |
 | Session metadata | AES with session key | Participants + enclaves |
 | Taproot tweak | AES with session key | Participants + enclaves |
 | Adaptor configs | AES with session key | Participants + enclaves |
@@ -192,20 +193,23 @@ Signing sessions inherit same assignments from keygen.
 
 ## KMS Key Persistence
 
+KMS recovery uses IAM-authorized calls without Nitro Recipient attestation.
+See the [KMS trust boundary](KMS.md#current-trust-boundary) for who can recover the stored key hierarchy.
+
 ```
 First Boot:
   Enclave ──▶ Generate keypair
           ──▶ KMS.GenerateDataKey() ──▶ DEK (plaintext + encrypted)
           ──▶ AES-GCM encrypt private key with DEK
           ──▶ Store {encrypted_dek, encrypted_private_key} in DB
-          ──▶ Zeroize plaintext DEK
+          ──▶ Retain DEK in enclave memory while keys are in use
 
 Restart:
   Gateway ──▶ Load {encrypted_dek, encrypted_private_key} from DB
           ──▶ Send to enclave
   Enclave ──▶ KMS.Decrypt(encrypted_dek) ──▶ DEK
           ──▶ AES-GCM decrypt private key
-          ──▶ Zeroize plaintext DEK
+          ──▶ Retain DEK in enclave memory while keys are in use
           ──▶ Resume with same keypair
 ```
 

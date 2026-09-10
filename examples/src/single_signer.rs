@@ -64,7 +64,7 @@ pub async fn run_with_args(config_path: String) -> Result<()> {
     );
 
     // Create the SDK client
-    let client = KeyMeldClient::builder(&config.gateway_url, UserId::new_v7())
+    let client = keymeld_examples::client_builder(&config.gateway_url, UserId::new_v7())?
         .credentials(credentials)
         .build()?;
 

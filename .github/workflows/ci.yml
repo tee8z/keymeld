@@ -60,7 +60,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-nix-cargo-build-
-          save-always: false
 
       - name: Build project
         run: nix develop -c cargo build --workspace --locked
@@ -205,6 +204,9 @@ jobs:
           - name: kms-restart
             command: just test-kms-e2e
             timeout: 20
+          - name: authorization
+            command: bash examples/run-authorization-e2e.sh --skip-build
+            timeout: 20
           - name: ui-playwright
             command: just test-ui-e2e
             timeout: 15
@@ -276,6 +278,7 @@ jobs:
             logs/
             data/
             *.log
+            /tmp/keymeld-authorization-e2e.*/
           retention-days: 7
 
       - name: Upload Playwright report on failure

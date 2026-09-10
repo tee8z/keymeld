@@ -306,7 +306,7 @@ impl Drop for Queue {
     fn drop(&mut self) {
         // Abort all remaining tasks
         let tasks = self.session_tasks.read().unwrap();
-        for (_session_id, handle) in tasks.iter() {
+        for handle in tasks.values() {
             handle.task_handle.abort();
         }
     }
@@ -378,16 +378,55 @@ mod tests {
 
         // This should create a task and process it with a valid session-level command
         // Use InitKeygenSession which is valid for Initialized state
+        let mut authorization_manifest = crate::operations::registration::tests::fixture()
+            .manifest
+            .manifest;
+        authorization_manifest.keygen_session_id = session_id.clone();
+        let authorization_manifest = keymeld_core::authorization::SignedSessionManifest::sign(
+            authorization_manifest,
+            &[11; 32],
+        )
+        .unwrap();
         let init_cmd = keymeld_core::protocol::InitKeygenSessionCommand {
+            recipient_authorization: Box::new(
+                keymeld_core::authorization::EnclaveRecipientAuthorization::sign(
+                    &authorization_manifest,
+                    authorization_manifest
+                        .manifest
+                        .participant_verifiers
+                        .keys()
+                        .map(|id| (id.clone(), EnclaveId::new(1)))
+                        .collect(),
+                    std::collections::BTreeMap::from([(
+                        EnclaveId::new(1),
+                        keymeld_core::crypto::SecureCrypto::generate_enclave_keypair()
+                            .unwrap()
+                            .1
+                            .serialize()
+                            .to_vec(),
+                    )]),
+                    &[11; 32],
+                )
+                .unwrap(),
+            ),
             keygen_session_id: session_id.clone(),
+            authorization_manifest: Box::new(authorization_manifest.clone()),
             coordinator_user_id: None,
             coordinator_encrypted_private_key: None,
             encrypted_session_secret: None,
             timeout_secs: 300,
             enclave_public_keys: vec![],
-            expected_participant_count: 2,
-            expected_participants: vec![],
-            encrypted_taproot_tweak: String::new(),
+            expected_participant_count: 1,
+            expected_participants: authorization_manifest
+                .manifest
+                .participant_verifiers
+                .keys()
+                .cloned()
+                .collect(),
+            encrypted_taproot_tweak: authorization_manifest
+                .manifest
+                .encrypted_taproot_tweak
+                .clone(),
             subset_definitions: vec![],
         };
         let _result = queue

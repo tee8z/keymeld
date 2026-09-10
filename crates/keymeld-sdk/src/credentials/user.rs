@@ -1,5 +1,8 @@
 use crate::error::{CryptoError, SdkError};
-use keymeld_core::crypto::SecureCrypto;
+use keymeld_core::{
+    crypto::SecureCrypto,
+    request_auth::{now_timestamp_secs, AuthKind, RequestAuth},
+};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
@@ -11,6 +14,23 @@ pub struct UserCredentials {
 }
 
 impl UserCredentials {
+    /// Prepare a context-bound key envelope. A slot owner can authorize it later,
+    /// without exposing the slot credential to the participant preparing the key.
+    pub fn prepare_registration(
+        &self,
+        context: keymeld_core::authorization::RegistrationContext,
+        enclave_public_key_hex: &str,
+    ) -> Result<String, SdkError> {
+        use zeroize::Zeroize;
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::new(
+            context,
+            &self.private_key_bytes(),
+        )?;
+        let mut plaintext = serde_json::to_vec(&envelope)?;
+        let result = SecureCrypto::ecies_encrypt_from_hex(enclave_public_key_hex, &plaintext);
+        plaintext.zeroize();
+        Ok(hex::encode(result?))
+    }
     pub fn from_private_key(private_key: &[u8]) -> Result<Self, SdkError> {
         let private_key_array: [u8; 32] = private_key.try_into().map_err(|_| {
             SdkError::Crypto(CryptoError::InvalidKeyFormat(
@@ -82,38 +102,34 @@ impl UserCredentials {
         getrandom::getrandom(&mut nonce)
             .map_err(|e| SdkError::Crypto(CryptoError::RandomGenerationFailed(e.to_string())))?;
 
-        let signature = SecureCrypto::sign_auth_message_with_session_key(
+        let (auth_private_key, _) = SecureCrypto::derive_session_auth_keypair(
             &self.private_key_bytes(),
             keygen_session_id,
+        )?;
+        Ok(RequestAuth::sign(
+            AuthKind::User,
             signing_session_id,
             user_id,
-            &nonce,
+            &auth_private_key,
+            now_timestamp_secs()?,
+            nonce,
         )
-        .map_err(|e| SdkError::Crypto(CryptoError::SigningFailed(e.to_string())))?;
-
-        Ok(format!("{}:{}", hex::encode(nonce), hex::encode(signature)))
+        .to_header())
     }
 
     pub fn sign_user_request(&self, scope_id: &str, user_id: &str) -> Result<String, SdkError> {
         let mut nonce = [0u8; 16];
         getrandom::getrandom(&mut nonce)
             .map_err(|e| SdkError::Crypto(CryptoError::RandomGenerationFailed(e.to_string())))?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(scope_id.as_bytes());
-        hasher.update(user_id.as_bytes());
-        hasher.update(nonce);
-        let hash = hasher.finalize();
-
-        let secp = Secp256k1::signing_only();
-        let message = secp256k1::Message::from_digest(hash.into());
-        let signature = secp.sign_ecdsa(message, &self.auth_private_key);
-
-        Ok(format!(
-            "{}:{}",
-            hex::encode(nonce),
-            hex::encode(signature.serialize_compact())
-        ))
+        Ok(RequestAuth::sign(
+            AuthKind::User,
+            scope_id,
+            user_id,
+            &self.auth_private_key,
+            now_timestamp_secs()?,
+            nonce,
+        )
+        .to_header())
     }
 
     pub fn sign_approval(
@@ -177,9 +193,10 @@ mod tests {
         let signature = creds.sign_user_request("key-123", "user-456").unwrap();
 
         let parts: Vec<&str> = signature.split(':').collect();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 32);
-        assert_eq!(parts[1].len(), 128);
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "v1");
+        assert_eq!(parts[2].len(), 32);
+        assert_eq!(parts[3].len(), 128);
     }
 
     #[test]
@@ -237,8 +254,9 @@ mod tests {
             .unwrap();
 
         let parts: Vec<&str> = signature.split(':').collect();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 32);
-        assert_eq!(parts[1].len(), 128);
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "v1");
+        assert_eq!(parts[2].len(), 32);
+        assert_eq!(parts[3].len(), 128);
     }
 }

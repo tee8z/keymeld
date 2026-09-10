@@ -31,7 +31,7 @@ pub async fn run_with_args(config_path: String) -> Result<()> {
     info!("");
     info!("Phase 1: Initial Setup");
 
-    let client = KeyMeldClient::builder(&config.gateway_url, user_id.clone())
+    let client = keymeld_examples::client_builder(&config.gateway_url, user_id.clone())?
         .credentials(credentials)
         .build()?;
 
@@ -62,7 +62,7 @@ pub async fn run_with_args(config_path: String) -> Result<()> {
     let restored_credentials = UserCredentials::from_private_key(&private_key_bytes)?;
 
     // Create a new client with the restored credentials
-    let restored_client = KeyMeldClient::builder(&config.gateway_url, user_id)
+    let restored_client = keymeld_examples::client_builder(&config.gateway_url, user_id)?
         .credentials(restored_credentials)
         .build()?;
     info!("Client restored from saved credentials");

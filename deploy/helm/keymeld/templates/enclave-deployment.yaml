@@ -48,6 +48,14 @@ spec:
           imagePullPolicy: {{ include "keymeld.enclaveImagePullPolicy" $ }}
           {{- end }}
           env:
+            - name: ENCLAVE_GATEWAY_PUBLIC_KEY
+              value: {{ required "channel.gatewayPublicKey must match the gateway's provisioned credential" $.Values.channel.gatewayPublicKey | quote }}
+            - name: ENCLAVE_KMS_KEY_ID
+              value: {{ required "kms.keyArn is required for the enclave KMS policy" $.Values.kms.keyArn | quote }}
+            - name: ENCLAVE_KMS_ENDPOINT
+              value: {{ $.Values.kms.endpoint | default "aws-kms" | quote }}
+            - name: KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES
+              value: {{ $.Values.channel.dangerousTrustUnattestedEnclaves | quote }}
             - name: RUST_LOG
               value: {{ $.Values.enclave.logLevel | default "info,keymeld_enclave=debug" | quote }}
             - name: VSOCK_PORT

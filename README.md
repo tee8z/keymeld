@@ -1,10 +1,12 @@
 # KeyMeld
 
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MuSig2](https://img.shields.io/badge/MuSig2-BIP--327-green.svg)](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki)
 
-> **Not audited - use with caution**
+> **Upgrade to 0.4.0** for the authorization and security fixes.
+> Upgrade the SDK, gateway, and enclaves together and create fresh session state.
+> See the [migration guide](docs/AUTHORIZATION.md) and [security configuration](docs/SECURITY_OPERATIONS.md).
 
 Distributed MuSig2 Bitcoin signing via AWS Nitro Enclaves using a secure 2-phase workflow.
 
@@ -23,7 +25,7 @@ MuSig2 as a protocol has two key constraints that make it difficult to use in mu
 KeyMeld addresses these challenges by delegating the coordination complexity to secure AWS Nitro Enclaves:
 
 - **Asynchronous participation**: Participants can join sessions without requiring others to be online
-- **Dynamic participant discovery**: No need to know all participants upfront
+- **Asynchronous key registration**: Reserve participant slots with individual invitation verifiers before their signing keys are known
 - **Reliable coordination**: Enclaves handle the two-round MuSig2 protocol automatically
 - **2-phase workflow**: Separates key generation from signing for better UX
 
@@ -109,10 +111,10 @@ SDK ──HTTP──▶ Gateway ──VSock──▶ Enclaves
 | **MuSig2 Signing** | BIP-327 compliant multi-party Schnorr signatures |
 | **Batch Signing** | Sign multiple messages in a single session with per-item configuration |
 | **Subset Signing** | Define participant subsets for 2-of-n signing within larger groups |
-| **Adaptor Signatures** | Single, And, Or logic for atomic swaps and conditional payments |
+| **Adaptor Signatures** | Single-point adaptors for atomic swaps and conditional payments; `And` and `Or` are rejected |
 | **Single-Signer Mode** | Import keys for non-MuSig signing (ECDSA & Schnorr) |
 | **Taproot Support** | Flexible tweaking modes for Bitcoin compatibility |
-| **Zero-Knowledge** | Gateway never sees plaintext keys or transaction data |
+| **Encrypted Storage** | Gateway stores encrypted key and session payloads; see the [KMS trust boundary](docs/KMS.md#current-trust-boundary) |
 
 ## Commands
 

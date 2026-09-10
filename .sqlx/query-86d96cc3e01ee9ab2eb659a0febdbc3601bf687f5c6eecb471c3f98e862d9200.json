@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                kp.user_id as \"user_id!: UserId\",\n                kp.user_key_id as \"user_key_id!\",\n                uk.enclave_id as \"enclave_id!: EnclaveId\",\n                uk.enclave_key_epoch as \"enclave_key_epoch!: u64\",\n                kp.require_signing_approval as \"require_signing_approval!: bool\",\n                uk.auth_pubkey as \"auth_pubkey!\",\n                kp.session_encrypted_data,\n                hex(uk.encrypted_private_key) as \"enclave_encrypted_data!: String\"\n             FROM keygen_participants kp\n             JOIN user_keys uk ON kp.user_key_id = uk.id\n             WHERE kp.keygen_session_id = $1 AND kp.user_id = $2",
+  "query": "SELECT\n                kp.user_id as \"user_id!: UserId\",\n                kp.user_key_id as \"user_key_id!\",\n                uk.enclave_id as \"enclave_id!: EnclaveId\",\n                uk.enclave_key_epoch as \"enclave_key_epoch!: u64\",\n                kp.require_signing_approval as \"require_signing_approval!: bool\",\n                uk.auth_pubkey as \"auth_pubkey!\",\n                kp.session_encrypted_data,\n                kp.registration_authorization as \"registration_authorization!\",\n                hex(uk.encrypted_private_key) as \"enclave_encrypted_data!: String\"\n             FROM keygen_participants kp\n             JOIN user_keys uk ON kp.user_key_id = uk.id\n             WHERE kp.keygen_session_id = $1 AND kp.user_id = $2",
   "describe": {
     "columns": [
       {
@@ -39,8 +39,13 @@
         "type_info": "Text"
       },
       {
-        "name": "enclave_encrypted_data!: String",
+        "name": "registration_authorization!",
         "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "enclave_encrypted_data!: String",
+        "ordinal": 8,
         "type_info": "Null"
       }
     ],
@@ -55,8 +60,9 @@
       false,
       false,
       true,
+      false,
       null
     ]
   },
-  "hash": "e5b2a1a1a897c9de13e7e48fbf04b6faa20283d15efb36c24a6f0a7ee9797870"
+  "hash": "86d96cc3e01ee9ab2eb659a0febdbc3601bf687f5c6eecb471c3f98e862d9200"
 }

@@ -82,16 +82,12 @@ impl MusigProcessor {
         user_id: UserId,
         public_key: PublicKey,
     ) -> Result<(), MusigError> {
-        if self
-            .session_metadata
-            .participant_public_keys
-            .contains_key(&user_id)
-        {
-            info!(
-                "Participant {} already exists in session {}, skipping duplicate addition",
-                user_id, self.session_metadata.session_id
-            );
-            return Ok(());
+        if let Some(existing) = self.session_metadata.participant_public_keys.get(&user_id) {
+            return if *existing == public_key {
+                Ok(())
+            } else {
+                Err(MusigError::DuplicateParticipant(user_id))
+            };
         }
 
         self.session_metadata
