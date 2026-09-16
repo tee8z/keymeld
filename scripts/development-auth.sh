@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # Source this helper only from explicit local simulation launchers.
 
-keymeld_setup_development_auth() {
-    local keymeld_repo_root="${1:?Repository path is required}"
-    local keymeld_gateway_binary="${2:?Gateway binary path is required}"
-    local keymeld_credential_dir keymeld_temporary_dir
-
+keymeld_setup_development_environment() {
     if [[ "${KEYMELD_ENVIRONMENT:-development}" != development ]]; then
         echo "Local simulation authentication cannot run in a production environment." >&2
         return 1
@@ -14,13 +10,21 @@ keymeld_setup_development_auth() {
         echo "This launcher requires explicit local simulation with unattested enclaves." >&2
         return 1
     fi
+    export KEYMELD_ENVIRONMENT=development
+    export KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=true
+}
+
+keymeld_setup_development_auth() {
+    local keymeld_repo_root="${1:?Repository path is required}"
+    local keymeld_gateway_binary="${2:?Gateway binary path is required}"
+    local keymeld_credential_dir keymeld_temporary_dir
+
+    keymeld_setup_development_environment || return 1
     if [[ ! -x "$keymeld_gateway_binary" ]]; then
         echo "Build keymeld-gateway before starting local services." >&2
         return 1
     fi
 
-    export KEYMELD_ENVIRONMENT=development
-    export KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=true
     export KEYMELD_GATEWAY_SIGNING_KEY_FILE="${KEYMELD_GATEWAY_SIGNING_KEY_FILE:-$keymeld_repo_root/data/development-channel.key}"
     keymeld_credential_dir="$(dirname -- "$KEYMELD_GATEWAY_SIGNING_KEY_FILE")"
     mkdir -p -- "$keymeld_credential_dir"

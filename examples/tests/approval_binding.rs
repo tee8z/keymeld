@@ -102,21 +102,17 @@ async fn required_approvals_bind_the_reviewed_complete_batch() -> Result<()> {
         .keygen()
         .create_session(
             vec![creator.user_id().clone(), approver.user_id().clone()],
-            KeygenOptions::default().require_approval().timeout(300),
+            KeygenOptions::default().timeout(300),
         )
         .await?;
     let keygen_id = keygen.session_id().clone();
-    keygen
-        .register_self(RegisterOptions::default().require_approval())
-        .await?;
+    keygen.register_self(RegisterOptions::default()).await?;
     let mut approver_keygen = approver
         .keygen()
         .join_session(
             keygen_id.clone(),
             &keygen.export_session_secret(),
-            JoinOptions::default()
-                .invitation(keygen.invitation(approver.user_id())?)
-                .require_approval(),
+            JoinOptions::default().invitation(keygen.invitation(approver.user_id())?),
         )
         .await?;
     keygen.wait_for_completion().await?;

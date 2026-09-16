@@ -1,11 +1,7 @@
 # Participant and signing authorization
 
 The `0.4.0` release separates participant registration and signing authority from the shared session secret.
-The report fixes pass local workspace and integrated transport regressions. Release publication follows review and CI.
-
-Keep this work local until every report finding has a reviewed resolution and regression evidence.
-The release gate includes every supplied finding, integrated regressions, and review.
-See the [finding inventory](#finding-inventory) and [release process](../.github/RELEASE.md).
+See the [finding inventory](#finding-inventory) and [0.4.0 upgrade notes](releases/0.4.0.md).
 
 ## Credentials and trust
 
@@ -141,6 +137,9 @@ Each item includes its ID, encrypted message, encrypted adaptor configuration, e
 Both the gateway and enclave verify this authorization.
 
 The participant's registration fixes `require_signing_approval`.
+SDK creation and join defaults require approval.
+Use `.approval(false)` explicitly for an agreed unattended workflow.
+Registration inherits the selected session policy unless its options explicitly override that policy.
 When this flag is false, the designated signing authority can request unattended signing.
 When this flag is true, the enclave also requires that participant's valid approval.
 An empty approval list cannot bypass required approvals.
@@ -201,8 +200,7 @@ The coordinator implementation is outside this KeyMeld change.
 ## Legacy sessions
 
 Releases through `v0.3.5` lack the required authorization commitments.
-Do not use those releases for key custody or signing.
-No replacement release is published by these source changes.
+Upgrade all components to 0.4.0 with fresh state.
 
 Existing session records do not contain the mandatory manifest, registration proofs, or batch approvals.
 Database migration adds storage fields; it does not manufacture trusted commitments for old sessions.
@@ -211,7 +209,7 @@ Legacy sessions fail closed under the new protocol and cannot resume through a c
 Legacy records can also fail bulk restoration and administrative queries during deserialization.
 Do not mix legacy records with new authorized sessions in one active database.
 
-For the current deployment without real funds:
+For the upgrade:
 
 1. Stop the gateway and enclaves before archiving their state.
 2. Preserve the database and associated enclave state for audit.
@@ -225,41 +223,20 @@ Do not copy an old roster into a new manifest and treat it as participant consen
 
 ## Regression verification
 
-Run the isolated transport suite from the repository root:
+Run the isolated transport suite:
 
 ```bash
 nix develop -c bash examples/run-authorization-e2e.sh
 ```
 
-The Bash runner starts a gateway, three TCP enclave processes, and the existing Moto KMS service.
-Rust tests exercise real HTTP and enclave commands with synthetic keys and messages.
-The runner uses temporary storage and retains logs after a failure.
-It performs no Bitcoin funding transactions.
-
-Coverage includes unauthorized slot claims, changed registration context, invalid possession proofs, concurrent claims, and slot replacement.
-The suite also exercises unauthorized signing, substituted rosters, and changed aggregate keys.
-Authorized delegated registration and full/subset signatures must succeed.
-Database checks reject duplicate slots and orphan key records after rejected registrations.
-
-The complete local run passed five live test executions with exit status 0.
-Required approvals produced valid signatures for the independently reviewed batch.
-Standalone key import rejected captured ciphertext paired with an attacker's authentication key.
-Authorized standalone import, keygen-key persistence, and subsequent Schnorr signing succeeded.
-Signing also succeeded after a gateway-only restart and after restarting the gateway and all three enclaves.
-Both recovery scenarios retained the same database and KMS keys.
-The final database checks found no orphan key records or duplicate participant slots.
-
-The full workspace test suite passed 164 tests, including cryptographic, HTTP, replay-persistence, and startup recovery regressions.
-The four ignored live tests run through the transport runner; its recovery test executes twice.
-
-These tests validate the authorization boundary in the development transport.
-Signed attestation fixtures test cryptographic verification separately. Local transport tests do not establish real Nitro deployment readiness.
+The runner uses synthetic keys, temporary storage, three TCP enclaves, and Moto KMS.
+It tests rejected registration and signing attacks, valid signatures, and recovery after gateway and enclave restarts.
+It retains failure logs and performs no Bitcoin funding transactions.
+Real Nitro acceptance is described in the [KMS guide](KMS.md#hardware-acceptance).
 
 ## Finding inventory
 
-The supplied report contains ten findings from the `e981858` source revision.
-The table records each implemented resolution. Workspace and integrated transport regressions pass for these changes.
-Cryptographic and HTTP regressions cover the new boundaries. Real Nitro hardware acceptance remains a separate release requirement.
+The supplied report contains ten findings from source revision `e981858`.
 
 | Report finding | Report severity | Current disposition |
 | --- | --- | --- |
@@ -274,42 +251,18 @@ Cryptographic and HTTP regressions cover the new boundaries. Real Nitro hardware
 | `attestation-never-verified` | Low | Implemented: AWS-root certificate and COSE verification, fresh challenges, PCR policy, fail-closed SDK custody, and creator-signed verified enclave recipients |
 | `sdk-subset-aggregate-context` | Low | Included: shared subset encryption context and SDK aggregate verification |
 
-Do not push or publish this remediation as complete while any report finding remains unresolved.
-Record each finding's resolution, regression coverage, and review evidence before the release gate can pass.
-
-New key or session admission remains public for callers who supply their own valid credentials.
+New key and session creation accepts callers with their own valid credentials.
 A `user_id` is an application label, not a global account identity.
-An attacker can create their own records; they cannot use that label to claim another credential's slot or key.
-Applications remain responsible for admission quotas and their own identity checks.
+Applications must enforce their own identity checks and durable quotas.
+The gateway's [admission limits](SECURITY_OPERATIONS.md#limit-api-admission-and-browser-origins) bound request rates per process.
 
-### Additional issues found during remediation
+## Other enforced invariants
 
-Review also found that adaptor nonce seeds used an eight-bit configuration index.
-In release builds, the index repeats after 256 configurations within one batch item.
-The repeated seed can produce the same public nonce for distinct adaptor configurations.
-This issue was not one of the supplied ten findings.
+- Adaptor nonce derivation uses fresh randomness and complete session, participant, batch-item, and adaptor identities; configuration indices cannot wrap into reused seeds.
+- Standalone import derives authentication keys from decrypted private keys; copied keygen keys retain their original authentication context after recovery.
+- Creator-signed, attestation-verified recipient assignments bind session-secret distribution before encryption to other enclaves.
+- Startup restores missing sessions before accepting HTTP requests and preserves already completed sessions with matching recipient proofs.
+- Late registration is rejected without changing a completed keygen's participants or aggregate key.
 
-The included fix replaces byte-index offsets with HKDF-SHA256 derivation from fresh randomness and the complete signing, participant, batch-item, and adaptor identities.
-The enclave regression generates 257 adaptor-configuration public nonces and 257 regular-item public nonces in one signing round.
-All 514 public nonces must differ; this cryptographic regression passes.
-The full workspace run includes adaptor rejection and nonce uniqueness coverage.
-Track this issue alongside the original findings before approving a release.
-
-Ciphertext-transplant review also found that standalone key import trusted the requested authentication public key.
-The enclave now derives this key from the decrypted private key before accepting a standalone import.
-A captured ciphertext cannot be paired with an attacker's reservation credential.
-Copied keygen keys retain their original session authentication context, including after restoration.
-
-Session-secret distribution also needed an authenticated recipient list.
-The creator now signs the attestation-verified recipient keys and participant assignments.
-Enclaves reject a changed recipient before decrypting or distributing session secrets.
-
-Recovery review found that gateway startup could restore an already completed session into a live enclave.
-An authenticated session probe now checks the pinned recipient proof before deciding whether restoration is needed.
-The gateway restores missing sessions before accepting HTTP requests.
-Slot responses use the persisted, verified assignment proof, so a cold gateway cache cannot change participant assignments.
-
-KMS restoration now passes the provisioned key identifier to AWS Decrypt.
-A Rust HTTP fixture verifies rejection of a different key while preserving valid recovery.
-Moto 5.1.11 ignores Decrypt KeyId, so the negative check uses AWS's documented service behavior.
-See the [KMS guide](KMS.md#current-trust-boundary) for the separate IAM-based recovery trust boundary.
+Production KMS recovery requires the pinned key, Nitro `Recipient`, encrypted responses, and enclave-pinned AWS TLS.
+See [KMS configuration](KMS.md) for policy and recovery requirements.

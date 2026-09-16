@@ -7,6 +7,7 @@ use tracing::info;
 
 pub mod attestation;
 pub mod channel;
+pub mod kms_transport;
 pub mod musig;
 pub mod operations;
 pub mod operator;
@@ -28,6 +29,7 @@ pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator>
         .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {e}"))?;
     let development =
         std::env::var("KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES").as_deref() == Ok("true");
+    operator.development_mode = development;
     let config = attestation::AttestationConfig {
         enabled: !development,
         generate_attestations: !development,

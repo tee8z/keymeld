@@ -55,6 +55,10 @@ pub struct ChannelCredentials {
 }
 
 impl ChannelCredentials {
+    pub fn verifies_attestation(&self) -> bool {
+        self.attestation.is_some()
+    }
+
     pub fn new(secret: [u8; 32], attestation: AttestationPolicy) -> Result<Self, KeyMeldError> {
         secp256k1::SecretKey::from_byte_array(secret).map_err(KeyMeldError::InvalidKey)?;
         Ok(Self {

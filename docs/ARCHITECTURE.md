@@ -193,13 +193,15 @@ Signing sessions inherit same assignments from keygen.
 
 ## KMS Key Persistence
 
-KMS recovery uses IAM-authorized calls without Nitro Recipient attestation.
+Production KMS recovery requires Nitro Recipient attestation and encrypted responses opened inside the enclave.
 See the [KMS trust boundary](KMS.md#current-trust-boundary) for who can recover the stored key hierarchy.
 
 ```
 First Boot:
   Enclave ──▶ Generate keypair
-          ──▶ KMS.GenerateDataKey() ──▶ DEK (plaintext + encrypted)
+          ──▶ Attest temporary RSA public key through NSM
+          ──▶ KMS.GenerateDataKey(Recipient) ──▶ encrypted DEK + recipient CMS envelope
+          ──▶ Open recipient envelope inside enclave
           ──▶ AES-GCM encrypt private key with DEK
           ──▶ Store {encrypted_dek, encrypted_private_key} in DB
           ──▶ Retain DEK in enclave memory while keys are in use
@@ -207,7 +209,9 @@ First Boot:
 Restart:
   Gateway ──▶ Load {encrypted_dek, encrypted_private_key} from DB
           ──▶ Send to enclave
-  Enclave ──▶ KMS.Decrypt(encrypted_dek) ──▶ DEK
+  Enclave ──▶ Attest a new temporary RSA public key through NSM
+          ──▶ KMS.Decrypt(encrypted_dek, Recipient) ──▶ recipient CMS envelope
+          ──▶ Open recipient envelope inside enclave
           ──▶ AES-GCM decrypt private key
           ──▶ Retain DEK in enclave memory while keys are in use
           ──▶ Resume with same keypair

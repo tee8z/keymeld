@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+keymeld_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd -- "$keymeld_repo_root"
+source "$keymeld_repo_root/scripts/development-auth.sh"
+keymeld_setup_development_environment
+
 MODE="$1"
 COUNT="$2"
 AMOUNT="$3"
 
 # Use HAProxy port if set (for high concurrency tests), otherwise direct bitcoind
 BITCOIN_RPC_PORT="${BITCOIN_RPC_PORT:-18443}"
-echo "📡 Using Bitcoin RPC port: $BITCOIN_RPC_PORT"
+echo "Using Bitcoin RPC port: $BITCOIN_RPC_PORT"
 
 # Clean up any old demo processes (but NOT gateway/enclaves - they're managed by justfile)
 pkill -9 -f keymeld_demo 2>/dev/null || true
@@ -19,18 +24,18 @@ pkill -9 -f keymeld_demo 2>/dev/null || true
 echo ""
 DEMO_BIN="$(pwd)/target/debug/keymeld_demo"
 if [ -n "${SKIP_BUILD:-}" ] && [ -f "$DEMO_BIN" ]; then
-    echo "✅ Using pre-built binary"
+    echo "Using pre-built binary"
 else
-    echo "🔨 Building binary..."
+    echo "Building binary..."
     cargo build --bin keymeld_demo >/dev/null 2>&1
-    echo "✅ Binary ready"
+    echo "Binary ready"
 fi
 
 # Export CMAKE_LIBRARY_PATH so subshells can find libraries
 export LD_LIBRARY_PATH="${CMAKE_LIBRARY_PATH:-}"
 
 echo ""
-echo "🧹 Cleaning up old test artifacts..."
+echo "Cleaning up old test artifacts..."
 rm -f /tmp/keymeld-stress-test/exit-*.code
 rm -rf logs/stress-test
 mkdir -p logs/stress-test
@@ -51,7 +56,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "🚀 Launching $COUNT parallel tests..."
+echo "Launching $COUNT parallel tests..."
 declare -a PIDS
 START=$(date +%s)
 
@@ -97,7 +102,7 @@ done
 echo "   All $COUNT instances launched"
 
 echo ""
-echo "⏳ Waiting for completion..."
+echo "Waiting for completion..."
 echo ""
 
 # Monitor progress while tests run
@@ -171,7 +176,7 @@ while true; do
 done
 
 echo ""
-echo "📊 Results:"
+echo "Results:"
 SUCCESS=0
 FAIL=0
 for i in $(seq 0 $((COUNT - 1))); do
@@ -179,17 +184,17 @@ for i in $(seq 0 $((COUNT - 1))); do
     txid=$(grep "Transaction broadcast successfully:" "logs/stress-test/test-$i.log" 2>/dev/null | tail -1 | sed 's/.*: //' || echo "")
 
     if [[ "$code" == "0" ]] && [[ -n "$txid" ]]; then
-        echo "   ✅ Test $i: SUCCESS (tx: $txid)"
+        echo "   Test $i: SUCCESS (tx: $txid)"
         SUCCESS=$((SUCCESS + 1))
     else
         if [[ "$code" != "0" ]]; then
-            echo "   ❌ Test $i: FAILED (exit code: $code, log: logs/stress-test/test-$i.log)"
+            echo "   Test $i: FAILED (exit code: $code, log: logs/stress-test/test-$i.log)"
         elif [[ -z "$txid" ]]; then
             # Show last log line to see where it got stuck
             last_line=$(tail -1 "logs/stress-test/test-$i.log" 2>/dev/null | sed 's/^[0-9T:.Z-]* *[A-Z]* *//' | sed 's/.*keymeld[_a-z]*:://' | sed 's/.*keymeld_[a-z]*:://' || echo "no logs")
-            echo "   ❌ Test $i: FAILED (no transaction broadcast, last: $last_line)"
+            echo "   Test $i: FAILED (no transaction broadcast, last: $last_line)"
         else
-            echo "   ❌ Test $i: FAILED (unknown reason, log: logs/stress-test/test-$i.log)"
+            echo "   Test $i: FAILED (unknown reason, log: logs/stress-test/test-$i.log)"
         fi
         FAIL=$((FAIL + 1))
     fi
@@ -197,5 +202,5 @@ done
 
 DURATION=$(($(date +%s) - START))
 echo ""
-echo "📊 Summary: $SUCCESS passed, $FAIL failed (${DURATION}s)"
-[[ $FAIL -eq 0 ]] && echo "🎉 All tests passed!" || exit 1
+echo "Summary: $SUCCESS passed, $FAIL failed (${DURATION}s)"
+[[ $FAIL -eq 0 ]] && echo "All tests passed!" || exit 1

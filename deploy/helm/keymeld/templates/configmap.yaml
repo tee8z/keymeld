@@ -11,7 +11,16 @@ data:
       host: {{ .Values.config.server.host | quote }}
       port: {{ .Values.config.server.port }}
       enable_cors: {{ .Values.config.server.enableCors }}
+      cors_allowed_origins: {{ .Values.config.server.corsAllowedOrigins | toJson }}
       enable_compression: {{ .Values.config.server.enableCompression }}
+      rate_limit:
+        per_ip_burst: {{ .Values.config.server.rateLimit.perIpBurst }}
+        per_ip_requests_per_second: {{ .Values.config.server.rateLimit.perIpRequestsPerSecond }}
+        global_burst: {{ .Values.config.server.rateLimit.globalBurst }}
+        global_requests_per_second: {{ .Values.config.server.rateLimit.globalRequestsPerSecond }}
+        max_tracked_ips: {{ .Values.config.server.rateLimit.maxTrackedIps }}
+        trusted_proxy_ips: {{ .Values.config.server.rateLimit.trustedProxyIps | toJson }}
+        client_ip_header: {{ .Values.config.server.rateLimit.clientIpHeader | toJson }}
     kms:
       enabled: {{ .Values.kms.enabled }}
       {{- if .Values.kms.enabled }}

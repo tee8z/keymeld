@@ -142,13 +142,12 @@ impl HttpClient {
             Ok(())
         } else {
             let status_code = status.as_u16();
-            let body = response.text().await.unwrap_or_default();
-
             if status_code == 429 {
                 return Err(SdkError::Api(ApiError::RateLimited {
-                    retry_after_secs: 60,
+                    retry_after_secs: Self::retry_after_secs(response.headers()),
                 }));
             }
+            let body = response.text().await.unwrap_or_default();
 
             if let Ok(error_response) = serde_json::from_str::<ErrorResponse>(&body) {
                 return Err(SdkError::Api(ApiError::ServerError {
@@ -198,13 +197,12 @@ impl HttpClient {
             Ok(result)
         } else {
             let status_code = status.as_u16();
-            let body = response.text().await.unwrap_or_default();
-
             if status_code == 429 {
                 return Err(SdkError::Api(ApiError::RateLimited {
-                    retry_after_secs: 60,
+                    retry_after_secs: Self::retry_after_secs(response.headers()),
                 }));
             }
+            let body = response.text().await.unwrap_or_default();
 
             if let Ok(error_response) = serde_json::from_str::<ErrorResponse>(&body) {
                 return Err(SdkError::Api(ApiError::ServerError {
@@ -222,6 +220,14 @@ impl HttpClient {
                 },
             }))
         }
+    }
+
+    fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> u64 {
+        headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(60)
     }
 
     fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, SdkError> {
@@ -248,5 +254,43 @@ impl std::fmt::Debug for HttpClient {
         f.debug_struct("HttpClient")
             .field("config", &self.config)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limit_responses_preserve_gateway_retry_delay_for_both_response_paths() {
+        let mut server = mockito::Server::new_async().await;
+        let limited = server
+            .mock("GET", "/limited")
+            .with_status(429)
+            .with_header("retry-after", "2")
+            .expect(2)
+            .create_async()
+            .await;
+        let client = HttpClient::default();
+        for empty in [false, true] {
+            let response = reqwest::get(format!("{}/limited", server.url()))
+                .await
+                .unwrap();
+            let error = if empty {
+                client.handle_empty_response(response).await.unwrap_err()
+            } else {
+                client
+                    .handle_response::<serde_json::Value>(response)
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                SdkError::Api(ApiError::RateLimited {
+                    retry_after_secs: 2
+                })
+            ));
+        }
+        limited.assert_async().await;
     }
 }

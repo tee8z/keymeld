@@ -7,7 +7,17 @@ server:
   host: "0.0.0.0" # Server bind address - 0.0.0.0 listens on all interfaces
   port: 443 # HTTPS server port (requires TLS termination via load balancer)
   enable_cors: false # Disable CORS in production (handled by load balancer/proxy)
+  cors_allowed_origins: [] # Set exact https:// origins when gateway CORS is enabled
   enable_compression: true # Enable HTTP response compression (gzip) for bandwidth efficiency
+  rate_limit:
+    per_ip_burst: 512
+    per_ip_requests_per_second: 30
+    global_burst: 2048
+    global_requests_per_second: 120
+    max_tracked_ips: 8192
+    # Set both fields only for proxies that overwrite the header with one client IP.
+    trusted_proxy_ips: []
+    client_ip_header: null
 kms:
   enabled: true # Enable AWS KMS integration for secure key management
   endpoint_url: null # Use default AWS KMS endpoint (region-based)
@@ -71,7 +81,7 @@ logging:
   enable_file_output: true # Write logs to file for persistence and rotation
   file_path: "/var/log/keymeld/keymeld.log" # Log file path (ensure directory exists and is writable)
 security:
-  enable_attestation: true # Enable enclave attestation verification (required for production security)
+  enable_attestation: true # Requires a pinned channel policy; rejects the dangerous unattested bypass
   strict_validation: true # Enable strict security validation (required for production)
   allow_insecure_connections: false # Forbid non-TLS connections (production security requirement)
   require_tls: true # Require TLS/HTTPS connections (production security requirement)

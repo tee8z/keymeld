@@ -37,11 +37,11 @@ fi
 # Get mining address
 MINER_ADDR=$(bitcoin-cli -regtest -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
     -rpcwallet="$RPC_WALLET" getnewaddress 2>/dev/null) || {
-    echo "❌ Failed to get mining address. Is bitcoind running with wallet '$RPC_WALLET' loaded?"
+    echo "Failed to get mining address. Is bitcoind running with wallet '$RPC_WALLET' loaded?"
     exit 1
 }
 
-echo "⛏️  Background block miner starting..."
+echo "Background block miner starting..."
 echo "   Interval: ${INTERVAL}s"
 echo "   Blocks per interval: $BLOCKS"
 echo "   Mining to: $MINER_ADDR"
@@ -53,7 +53,7 @@ echo $$ > "$PID_FILE"
 # Cleanup on exit
 cleanup() {
     rm -f "$PID_FILE"
-    echo "⛏️  Background miner stopped"
+    echo "Background miner stopped"
 }
 trap cleanup EXIT
 

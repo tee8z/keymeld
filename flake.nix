@@ -178,6 +178,7 @@
           buildInputs = commonDeps ++ [
             rustToolchain
             pkgs.just
+            pkgs.bc
             pkgs.sqlx-cli
             pkgs.bitcoin
             pkgs.bitcoind
@@ -212,10 +213,10 @@
 
             # Only show welcome message if this is an interactive shell
             if [ -t 1 ] && [ -z "$KEYMELD_QUIET_SHELL" ]; then
-              echo "🚀 KeyMeld Development Environment (Rust ${rustToolchain.version})"
+              echo "KeyMeld Development Environment (Rust ${rustToolchain.version})"
               echo "Use 'just help' to see available commands"
               if [ -e /dev/vsock ]; then
-                echo "✅ VSock available for enclave simulation"
+                echo "VSock available for enclave simulation"
               fi
             fi
           '';
@@ -227,16 +228,16 @@
         setup-vsock = pkgs.writeShellScriptBin "setup-vsock" ''
           #!/usr/bin/env bash
 
-          echo "🔧 Setting up VSock for KeyMeld enclave simulation..."
+          echo "Setting up VSock for KeyMeld enclave simulation..."
 
           # Function to try loading a module
           try_load_module() {
             local module=$1
             echo "Attempting to load $module..."
             if [ "$(id -u)" = "0" ]; then
-              modprobe "$module" 2>/dev/null && echo "✅ $module loaded" || echo "⚠️  $module not available"
+              modprobe "$module" 2>/dev/null && echo "$module loaded" || echo "$module not available"
             else
-              sudo modprobe "$module" 2>/dev/null && echo "✅ $module loaded" || echo "⚠️  $module not available"
+              sudo modprobe "$module" 2>/dev/null && echo "$module loaded" || echo "$module not available"
             fi
           }
 
@@ -252,9 +253,9 @@
 
           # Check if VSock is available
           if [ -e /dev/vsock ]; then
-            echo "✅ /dev/vsock device is available"
+            echo "/dev/vsock device is available"
             ls -la /dev/vsock 2>/dev/null || true
-            echo "🎉 VSock setup complete! Starting VSock proxy services..."
+            echo "VSock setup complete! Starting VSock proxy services..."
 
             # Start VSock proxy services for each enclave
             for i in {0..2}; do
@@ -267,12 +268,12 @@
               echo $! > /tmp/keymeld-vsock-proxies/proxy-$i.pid
             done
 
-            echo "✅ VSock proxy services started"
+            echo "VSock proxy services started"
             echo "   Enclave 0: localhost:9000 → VSock CID:2 port:5000"
             echo "   Enclave 1: localhost:9001 → VSock CID:2 port:5001"
             echo "   Enclave 2: localhost:9002 → VSock CID:2 port:5002"
           else
-            echo "⚠️  /dev/vsock device not found"
+            echo "/dev/vsock device not found"
             echo "Setting up TCP-only fallback mode..."
 
             # Create TCP-to-TCP proxy as fallback
@@ -285,7 +286,7 @@
               echo $! > /tmp/keymeld-vsock-proxies/proxy-$i.pid
             done
 
-            echo "✅ TCP fallback proxy services started"
+            echo "TCP fallback proxy services started"
           fi
         '';
 
@@ -296,20 +297,20 @@
 
           case "''${1:-start}" in
             start)
-              echo "🚀 Starting VSock proxy services..."
+              echo "Starting VSock proxy services..."
 
               # Load VSock kernel modules
               echo "Loading VSock kernel modules..."
-              modprobe vhost_vsock 2>/dev/null || sudo modprobe vhost_vsock 2>/dev/null || echo "⚠️  vhost_vsock not available"
-              modprobe vsock_loopback 2>/dev/null || sudo modprobe vsock_loopback 2>/dev/null || echo "⚠️  vsock_loopback not available"
-              modprobe vsock 2>/dev/null || sudo modprobe vsock 2>/dev/null || echo "⚠️  vsock not available"
+              modprobe vhost_vsock 2>/dev/null || sudo modprobe vhost_vsock 2>/dev/null || echo "vhost_vsock not available"
+              modprobe vsock_loopback 2>/dev/null || sudo modprobe vsock_loopback 2>/dev/null || echo "vsock_loopback not available"
+              modprobe vsock 2>/dev/null || sudo modprobe vsock 2>/dev/null || echo "vsock not available"
 
               # Create VSock proxy directories
               mkdir -p "$PROXY_DIR"
 
               # Check if VSock is available and start appropriate proxies
               if [ -e /dev/vsock ]; then
-                echo "✅ VSock device available - starting VSock proxies"
+                echo "VSock device available - starting VSock proxies"
 
                 # Start VSock proxy services for each enclave
                 for i in {0..2}; do
@@ -322,12 +323,12 @@
                   echo $! > "$PROXY_DIR/proxy-$i.pid"
                 done
 
-                echo "✅ VSock proxy services started"
+                echo "VSock proxy services started"
                 echo "   Enclave 0: localhost:9000 → VSock CID:2 port:5000"
                 echo "   Enclave 1: localhost:9001 → VSock CID:2 port:5001"
                 echo "   Enclave 2: localhost:9002 → VSock CID:2 port:5002"
               else
-                echo "⚠️  VSock device not found - starting TCP fallback proxies"
+                echo "VSock device not found - starting TCP fallback proxies"
 
                 # Create TCP-to-TCP proxy as fallback
                 for i in {0..2}; do
@@ -339,11 +340,11 @@
                   echo $! > "$PROXY_DIR/proxy-$i.pid"
                 done
 
-                echo "✅ TCP fallback proxy services started"
+                echo "TCP fallback proxy services started"
               fi
               ;;
             stop)
-              echo "🛑 Stopping VSock proxy services..."
+              echo "Stopping VSock proxy services..."
               if [ -d "$PROXY_DIR" ]; then
                 for pidfile in "$PROXY_DIR"/*.pid; do
                   if [ -f "$pidfile" ]; then
@@ -353,20 +354,20 @@
                   fi
                 done
                 rm -f "$PROXY_DIR"/*.log
-                echo "✅ All VSock proxy services stopped"
+                echo "All VSock proxy services stopped"
               else
                 echo "No proxy services found"
               fi
               ;;
             status)
-              echo "📊 VSock Proxy Status:"
+              echo "VSock Proxy Status:"
               if [ -d "$PROXY_DIR" ]; then
                 for i in {0..2}; do
                   pidfile="$PROXY_DIR/proxy-$i.pid"
                   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-                    echo "  Proxy $i: ✅ Running (PID: $(cat "$pidfile"))"
+                    echo "  Proxy $i: Running (PID: $(cat "$pidfile"))"
                   else
-                    echo "  Proxy $i: ❌ Not running"
+                    echo "  Proxy $i: Not running"
                   fi
                 done
               else
@@ -394,14 +395,14 @@
 
           case "''${1:-start}" in
             start)
-              echo "🚀 Starting Bitcoin RPC proxy (HAProxy)..."
+              echo "Starting Bitcoin RPC proxy (HAProxy)..."
               echo "   Proxy port: $PROXY_PORT → Backend: 127.0.0.1:$BACKEND_PORT"
               echo "   Max concurrent connections to bitcoind: $MAX_CONN"
               echo "   Queue timeout: $QUEUE_TIMEOUT"
 
               # Check if already running
               if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
-                echo "⚠️  Bitcoin RPC proxy already running (PID: $(cat "$HAPROXY_PID"))"
+                echo "Bitcoin RPC proxy already running (PID: $(cat "$HAPROXY_PID"))"
                 exit 0
               fi
 
@@ -447,40 +448,40 @@ listen stats
     stats refresh 5s
 EOF
 
-              echo "📋 HAProxy configuration written to $HAPROXY_CFG"
+              echo "HAProxy configuration written to $HAPROXY_CFG"
 
               # Start HAProxy
               ${pkgs.haproxy}/bin/haproxy -f "$HAPROXY_CFG"
 
               sleep 1
               if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
-                echo "✅ Bitcoin RPC proxy started (PID: $(cat "$HAPROXY_PID"))"
+                echo "Bitcoin RPC proxy started (PID: $(cat "$HAPROXY_PID"))"
                 echo ""
-                echo "📊 Usage:"
+                echo "Usage:"
                 echo "   Bitcoin RPC via proxy: http://127.0.0.1:$PROXY_PORT"
                 echo "   Stats dashboard: http://127.0.0.1:18480"
                 echo ""
                 echo "   Update your Bitcoin RPC URL to use port $PROXY_PORT instead of $BACKEND_PORT"
               else
-                echo "❌ Failed to start HAProxy"
+                echo "Failed to start HAProxy"
                 cat "$PROXY_DIR/haproxy.log" 2>/dev/null || true
                 exit 1
               fi
               ;;
             stop)
-              echo "🛑 Stopping Bitcoin RPC proxy..."
+              echo "Stopping Bitcoin RPC proxy..."
               if [ -f "$HAPROXY_PID" ]; then
                 pid=$(cat "$HAPROXY_PID")
-                kill "$pid" 2>/dev/null && echo "✅ Stopped HAProxy (PID: $pid)" || echo "HAProxy already stopped"
+                kill "$pid" 2>/dev/null && echo "Stopped HAProxy (PID: $pid)" || echo "HAProxy already stopped"
                 rm -f "$HAPROXY_PID"
               else
                 echo "No HAProxy running"
               fi
               ;;
             status)
-              echo "📊 Bitcoin RPC Proxy Status:"
+              echo "Bitcoin RPC Proxy Status:"
               if [ -f "$HAPROXY_PID" ] && kill -0 "$(cat "$HAPROXY_PID")" 2>/dev/null; then
-                echo "  HAProxy: ✅ Running (PID: $(cat "$HAPROXY_PID"))"
+                echo "  HAProxy: Running (PID: $(cat "$HAPROXY_PID"))"
                 echo "  Proxy port: $PROXY_PORT → Backend: $BACKEND_PORT"
                 echo "  Stats: http://127.0.0.1:18480"
 
@@ -491,14 +492,14 @@ EOF
                   curl -s "http://127.0.0.1:18480/;csv" 2>/dev/null | grep bitcoind | awk -F',' '{print "    Queue: "$18", Current conn: "$5"/"$6", Total: "$8}' || true
                 fi
               else
-                echo "  HAProxy: ❌ Not running"
+                echo "  HAProxy: Not running"
               fi
               ;;
             reload)
-              echo "🔄 Reloading Bitcoin RPC proxy configuration..."
+              echo "Reloading Bitcoin RPC proxy configuration..."
               if [ -f "$HAPROXY_PID" ]; then
                 ${pkgs.haproxy}/bin/haproxy -f "$HAPROXY_CFG" -sf "$(cat "$HAPROXY_PID")"
-                echo "✅ Configuration reloaded"
+                echo "Configuration reloaded"
               else
                 echo "HAProxy not running, starting..."
                 $0 start
@@ -560,13 +561,13 @@ EOF
 
           mkdir -p "$DATA_DIR"
 
-          echo "🔐 Starting Moto (AWS mock server) with KMS service..."
+          echo "Starting Moto (AWS mock server) with KMS service..."
           echo "   Host: $LOCALSTACK_HOST:$MOTO_PORT"
           echo "   Services: kms, s3"
           echo "   Region: $AWS_DEFAULT_REGION"
           echo "   Data Directory: $DATA_DIR"
           echo ""
-          echo "📋 AWS Endpoint: http://$LOCALSTACK_HOST:$MOTO_PORT"
+          echo "AWS Endpoint: http://$LOCALSTACK_HOST:$MOTO_PORT"
           echo "   Use with AWS CLI: aws --endpoint-url=http://$LOCALSTACK_HOST:$MOTO_PORT kms ..."
           echo ""
 
@@ -621,7 +622,9 @@ EOF
 
         # Script to run demo
         run-demo = pkgs.writeShellScriptBin "run-demo" ''
-          set -e
+          set -euo pipefail
+          source "$PWD/scripts/development-auth.sh"
+          keymeld_setup_development_environment
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_demo=debug"}
           export GATEWAY_URL=''${GATEWAY_URL:-"http://127.0.0.1:8090"}
           export ESPLORA_URL=''${ESPLORA_URL:-"http://127.0.0.1:3002/api"}
@@ -660,7 +663,7 @@ EOF
         stop-all-nix = pkgs.writeShellScriptBin "stop-all-nix" ''
           set -e
 
-          echo "🛑 Stopping KeyMeld services..."
+          echo "Stopping KeyMeld services..."
 
           # Stop Litestream if running
           pkill -f litestream || true
@@ -673,7 +676,7 @@ EOF
           pkill -f keymeld-enclave || true
           pkill -f bitcoind || true
 
-          echo "✅ All services stopped"
+          echo "All services stopped"
         '';
 
         # Script to setup S3 bucket in Moto and start Litestream
@@ -686,25 +689,25 @@ EOF
           export LITESTREAM_CONFIG=''${LITESTREAM_CONFIG:-"$PWD/config/litestream.yml"}
           export LITESTREAM_S3_BUCKET=''${LITESTREAM_S3_BUCKET:-"keymeld-db-backups"}
 
-          echo "🗄️ Setting up Litestream for SQLite replication..."
+          echo "Setting up Litestream for SQLite replication..."
 
           # Check if Moto is running
           if ! pgrep -f moto_server > /dev/null; then
-            echo "❌ Moto is not running. Start it first with: just kms start"
+            echo "Moto is not running. Start it first with: just kms start"
             exit 1
           fi
 
           # Create S3 bucket in Moto if it doesn't exist
-          echo "📦 Creating S3 bucket in Moto: $LITESTREAM_S3_BUCKET"
+          echo "Creating S3 bucket in Moto: $LITESTREAM_S3_BUCKET"
           ${pkgs.awscli2}/bin/aws --endpoint-url=$AWS_ENDPOINT_URL s3 mb s3://$LITESTREAM_S3_BUCKET 2>/dev/null || \
             echo "   Bucket already exists"
 
           # List buckets to verify
-          echo "📋 Available S3 buckets:"
+          echo "Available S3 buckets:"
           ${pkgs.awscli2}/bin/aws --endpoint-url=$AWS_ENDPOINT_URL s3 ls
 
           # Start Litestream
-          echo "🚀 Starting Litestream replication..."
+          echo "Starting Litestream replication..."
           echo "   Config: $LITESTREAM_CONFIG"
           echo "   Database: ./data/keymeld.db"
           echo "   S3 Bucket: s3://$LITESTREAM_S3_BUCKET"
@@ -723,28 +726,28 @@ EOF
           export AWS_SECRET_ACCESS_KEY=''${AWS_SECRET_ACCESS_KEY:-"test"}
           export LITESTREAM_CONFIG=''${LITESTREAM_CONFIG:-"$PWD/config/litestream.yml"}
 
-          echo "📥 Restoring database from Litestream backup..."
+          echo "Restoring database from Litestream backup..."
           echo "   Config: $LITESTREAM_CONFIG"
           echo "   Target: ./data/keymeld.db"
           echo ""
 
           # Backup existing database if it exists
           if [ -f "./data/keymeld.db" ]; then
-            echo "⚠️  Backing up existing database to ./data/keymeld.db.bak"
+            echo "Backing up existing database to ./data/keymeld.db.bak"
             cp ./data/keymeld.db ./data/keymeld.db.bak
           fi
 
           # Restore from Litestream
           ${pkgs.litestream}/bin/litestream restore -config "$LITESTREAM_CONFIG" -o ./data/keymeld.db ./data/keymeld.db
 
-          echo "✅ Database restored successfully"
+          echo "Database restored successfully"
         '';
 
         # CI/CD Pipeline: Build Enclave EIF
         build-enclave-eif = pkgs.writeShellScriptBin "build-enclave-eif" ''
           set -euo pipefail
 
-          echo "🏗️ CI/CD: Building KeyMeld Enclave EIF for AWS Nitro"
+          echo "CI/CD: Building KeyMeld Enclave EIF for AWS Nitro"
 
           # Configuration
           EIF_NAME="''${EIF_NAME:-keymeld-enclave}"
@@ -754,12 +757,12 @@ EOF
 
           # Check prerequisites
           if ! command -v nitro-cli &> /dev/null; then
-            echo "❌ nitro-cli not found. Install AWS Nitro CLI first:"
+            echo "nitro-cli not found. Install AWS Nitro CLI first:"
             echo "   https://docs.aws.amazon.com/enclaves/latest/user/nitro-cli-install.html"
             exit 1
           fi
 
-          echo "📋 Build Configuration:"
+          echo "Build Configuration:"
           echo "   EIF Name: $EIF_NAME"
           echo "   Version: $VERSION"
           echo "   Output: $OUTPUT_FILE"
@@ -813,12 +816,26 @@ EOF
           nitro-cli build-enclave --docker-uri "$provisioned_image" \
             --output-file "$OUTPUT_FILE" "''${signing_args[@]}"
           nitro-cli describe-eif --eif-path "$OUTPUT_FILE" > "$build_context/measurements.json"
+          jq -e '.Measurements | [.PCR0, .PCR1, .PCR2] | all(.[];
+            type == "string" and test("^[0-9a-fA-F]{96}$") and test("[1-9a-fA-F]"))' \
+            "$build_context/measurements.json" >/dev/null
           artifact_hash=$(sha256sum -- "$OUTPUT_FILE")
+          source_dirty=false
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]] || source_dirty=true
           jq -n --argjson enclave_id "$ENCLAVE_ID" --arg eif_path "$OUTPUT_FILE" \
             --arg sha256 "''${artifact_hash%% *}" \
+            --arg version "$VERSION" --arg source_commit "$(git rev-parse HEAD)" \
+            --argjson source_dirty "$source_dirty" \
+            --arg kms_key_arn "$ENCLAVE_KMS_KEY_ID" --arg kms_endpoint "$ENCLAVE_KMS_ENDPOINT" \
+            --arg aws_region "$AWS_REGION" --arg gateway_public_key "$ENCLAVE_GATEWAY_PUBLIC_KEY" \
             --slurpfile description "$build_context/measurements.json" \
             '{enclave_id: $enclave_id, eif_path: $eif_path, sha256: $sha256,
+              version: $version, source_commit: $source_commit, source_dirty: $source_dirty,
+              kms_key_arn: $kms_key_arn, kms_endpoint: $kms_endpoint,
+              aws_region: $aws_region, gateway_public_key: $gateway_public_key,
               pcr0: $description[0].Measurements.PCR0,
+              pcr1: $description[0].Measurements.PCR1,
+              pcr2: $description[0].Measurements.PCR2,
               pcr8: ($description[0].Measurements.PCR8 // null)}' > "$OUTPUT_FILE.manifest.json"
           echo "Built $OUTPUT_FILE and $OUTPUT_FILE.manifest.json. Review the measurements before publishing."
           # This build helper does not publish artifacts or move mutable aliases.
@@ -834,24 +851,24 @@ EOF
         gateway-aws = pkgs.writeShellScriptBin "gateway-aws" ''
           set -e
 
-          echo "🌐 Starting KeyMeld Gateway for AWS Nitro Enclaves"
+          echo "Starting KeyMeld Gateway for AWS Nitro Enclaves"
 
           # Check if environment file exists
           if [ -f "keymeld-aws.env" ]; then
-            echo "📋 Loading AWS environment configuration..."
+            echo "Loading AWS environment configuration..."
             source keymeld-aws.env
           else
-            echo "⚠️  No keymeld-aws.env found. Using environment variables directly."
+            echo "No keymeld-aws.env found. Using environment variables directly."
             echo "   Make sure KEYMELD_ENCLAVE_*_CID variables are set."
           fi
 
           # Verify CIDs are set
           if [ -z "$KEYMELD_ENCLAVE_0_CID" ]; then
-            echo "❌ KEYMELD_ENCLAVE_0_CID not set. Run 'nix run .#deploy-aws' first."
+            echo "KEYMELD_ENCLAVE_0_CID not set. Run 'nix run .#deploy-aws' first."
             exit 1
           fi
 
-          echo "🔧 Gateway Configuration:"
+          echo "Gateway Configuration:"
           echo "   Environment: ''${KEYMELD_ENVIRONMENT:-production}"
           echo "   Config: ''${CONFIG_PATH:-config/production.yaml}"
           echo "   Enclave 0 CID: $KEYMELD_ENCLAVE_0_CID"
@@ -862,17 +879,17 @@ EOF
           export RUST_LOG=''${RUST_LOG:-"info,keymeld_gateway=debug"}
           export KEYMELD_ENVIRONMENT=''${KEYMELD_ENVIRONMENT:-production}
 
-          echo "🚀 Starting gateway..."
+          echo "Starting gateway..."
           ${keymeld-gateway}/bin/keymeld-gateway
         '';
 
         stop-aws-enclaves = pkgs.writeShellScriptBin "stop-aws-enclaves" ''
           set -e
 
-          echo "🛑 Stopping AWS Nitro Enclaves..."
+          echo "Stopping AWS Nitro Enclaves..."
 
           if ! command -v nitro-cli &> /dev/null; then
-            echo "❌ nitro-cli not found."
+            echo "nitro-cli not found."
             exit 1
           fi
 
@@ -880,7 +897,7 @@ EOF
           ENCLAVES=$(nitro-cli describe-enclaves | jq -r '.[].EnclaveId' 2>/dev/null || echo "")
 
           if [ -z "$ENCLAVES" ]; then
-            echo "ℹ️  No running enclaves found."
+            echo "No running enclaves found."
             exit 0
           fi
 
@@ -894,11 +911,11 @@ EOF
 
           # Clean up environment file
           if [ -f "keymeld-aws.env" ]; then
-            echo "🧹 Removing environment file: keymeld-aws.env"
+            echo "Removing environment file: keymeld-aws.env"
             rm keymeld-aws.env
           fi
 
-          echo "✅ All AWS Nitro Enclaves stopped"
+          echo "All AWS Nitro Enclaves stopped"
         '';
 
 
@@ -929,15 +946,23 @@ EOF
           };
         };
 
+        nitro-entrypoint = pkgs.writeShellApplication {
+          name = "keymeld-nitro-entrypoint";
+          runtimeInputs = [ pkgs.socat pkgs.iproute2 pkgs.util-linux pkgs.coreutils ];
+          text = builtins.readFile ./scripts/nitro-entrypoint.sh;
+        };
+
         docker-enclave = pkgs.dockerTools.buildLayeredImage {
           name = "keymeld-enclave";
           tag = "latest";
           contents = [
             keymeld-enclave
+            nitro-entrypoint
             pkgs.cacert
             pkgs.tzdata
           ];
           config = {
+            Entrypoint = [ "${nitro-entrypoint}/bin/keymeld-nitro-entrypoint" ];
             Cmd = [ "${keymeld-enclave}/bin/keymeld-enclave" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
@@ -962,6 +987,7 @@ EOF
           keymeld-enclave = keymeld-enclave;
           docker-gateway = docker-gateway;
           docker-enclave = docker-enclave;
+          nitro-entrypoint = nitro-entrypoint;
           keymeld-demo = keymeld-demo;
 
           # Utility scripts

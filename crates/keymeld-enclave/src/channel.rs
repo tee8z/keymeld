@@ -47,6 +47,12 @@ impl ChannelPolicy {
         );
         let kms_endpoint =
             std::env::var("ENCLAVE_KMS_ENDPOINT").unwrap_or_else(|_| "aws-kms".into());
+        crate::kms_transport::KmsTarget::validate(
+            &kms_endpoint,
+            &kms_key_id,
+            std::env::var("AWS_REGION").ok().as_deref(),
+            std::env::var("KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES").as_deref() == Ok("true"),
+        )?;
         Ok(Self {
             gateway_public_key,
             kms_endpoint,

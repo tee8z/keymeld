@@ -1,4 +1,5 @@
 use crate::{
+    admission::{limit_admission, AdmissionLimiter},
     config::{Config, GatewayLimits, TransportMode},
     coordinator::Coordinator,
     database::Database,
@@ -39,7 +40,7 @@ use utoipa::OpenApi;
 
 use tower_http::{
     compression::CompressionLayer,
-    cors::{Any, CorsLayer},
+    cors::CorsLayer,
     decompression::RequestDecompressionLayer,
     services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
@@ -342,7 +343,13 @@ impl Application {
 
         let timeout_config = TimeoutConfig::from(&config.enclaves);
 
-        let enclave_manager = EnclaveManager::new_with_config(enclave_configs, timeout_config)?;
+        let credentials = crate::enclave::channel::ChannelCredentials::from_env()?;
+        config.validate_channel_attestation(credentials.verifies_attestation())?;
+        let enclave_manager = EnclaveManager::new_with_credentials(
+            enclave_configs,
+            timeout_config,
+            Arc::new(credentials),
+        )?;
 
         info!(
             "Configured enclave manager with {} total enclaves",
@@ -406,6 +413,7 @@ impl Application {
     }
 
     fn build_router(state: AppState, config: &Config) -> Result<Router> {
+        let admission = AdmissionLimiter::new(&config.server.rate_limit)?;
         let api_routes = Router::new()
             // Keygen routes
             .route("/keygen/reserve", post(handlers::reserve_keygen_session))
@@ -475,7 +483,8 @@ impl Application {
             .route(
                 "/docs",
                 get(|| async { Html(utoipa_scalar::Scalar::new(ApiDoc::openapi()).to_html()) }),
-            );
+            )
+            .route_layer(middleware::from_fn_with_state(admission, limit_admission));
 
         // UI routes for admin portal
         let ui_routes = operator_routes(
@@ -529,11 +538,19 @@ impl Application {
         }
 
         if config.server.enable_cors {
+            use axum::http::{header, HeaderName, Method};
             app = app.layer(
                 CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_methods(Any)
-                    .allow_headers(Any),
+                    .allow_origin(config.server.cors_origins()?)
+                    .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::DELETE])
+                    .allow_headers([
+                        header::AUTHORIZATION,
+                        header::CONTENT_TYPE,
+                        header::CONTENT_ENCODING,
+                        HeaderName::from_static("x-session-signature"),
+                        HeaderName::from_static("x-user-signature"),
+                    ])
+                    .expose_headers([header::RETRY_AFTER]),
             );
         }
 
@@ -666,7 +683,12 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let task = tokio::spawn(async move {
-                axum::serve(listener, router).await.unwrap();
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .unwrap();
             });
             Self { address, task }
         }
@@ -751,6 +773,202 @@ mod tests {
             },
             pool,
         )
+    }
+
+    #[tokio::test]
+    async fn cors_allows_only_configured_origins_and_preserves_non_browser_access() {
+        let (mut config, _directory) = create_test_config();
+        config.server.cors_allowed_origins = vec!["https://wallet.example".into()];
+        let (state, _) = http_test_state(&config).await;
+        let server = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+        let (status, headers, _) = server
+            .request_with_body(
+                "OPTIONS",
+                "/api/v1/keygen/reserve",
+                "Origin: https://wallet.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type,x-session-signature\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(headers.contains("access-control-allow-origin: https://wallet.example"));
+        assert!(headers.contains("access-control-allow-methods: get,head,post,delete"));
+        assert!(headers.contains("x-session-signature"));
+        for origin in [
+            "https://attacker.example",
+            "https://wallet.example.attacker.example",
+            "null",
+        ] {
+            let (status, headers, _) = server
+                .request_with_body(
+                    "OPTIONS",
+                    "/api/v1/keygen/reserve",
+                    &format!("Origin: {origin}\r\nAccess-Control-Request-Method: POST\r\n"),
+                    "",
+                )
+                .await;
+            assert_eq!(status, 200);
+            assert!(!headers.contains("access-control-allow-origin:"));
+        }
+        let (status, headers, _) = server.request("GET", "/api/v1/version").await;
+        assert_eq!(status, 200);
+        assert!(!headers.contains("access-control-allow-origin:"));
+        let (status, headers, _) = server
+            .request_with_body(
+                "GET",
+                "/api/v1/version",
+                "Origin: https://wallet.example\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(headers.contains("access-control-allow-origin: https://wallet.example"));
+
+        config.server.enable_cors = false;
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        let (status, headers, _) = server
+            .request_with_body(
+                "GET",
+                "/api/v1/version",
+                "Origin: https://wallet.example\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(!headers.contains("access-control-allow-origin:"));
+    }
+
+    #[tokio::test]
+    async fn admission_limits_sensitive_routes_ignores_spoofed_ips_and_recovers() {
+        let (mut config, _directory) = create_test_config();
+        config.server.rate_limit.per_ip_burst = 1;
+        config.server.rate_limit.per_ip_requests_per_second = 1;
+        config.server.cors_allowed_origins = vec!["https://wallet.example".into()];
+        let (state, _) = http_test_state(&config).await;
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        assert_eq!(
+            server
+                .request_with_body("POST", "/api/v1/keygen/reserve", "", "{}")
+                .await
+                .0,
+            422
+        );
+        for (method, path) in [
+            ("POST", "/api/v1/keygen/reserve"),
+            ("POST", "/api/v1/keygen/session/initialize"),
+            ("POST", "/api/v1/keygen/session/participants"),
+            ("POST", "/api/v1/signing"),
+            ("POST", "/api/v1/signing/session/approve/user"),
+            ("POST", "/api/v1/keys/reserve"),
+            ("POST", "/api/v1/keys/import"),
+            ("POST", "/api/v1/keys/user/keygen/session"),
+            ("POST", "/api/v1/sign/single"),
+            ("DELETE", "/api/v1/keys/user/key"),
+            ("GET", "/api/v1/enclaves/1/public-key?nonce=00"),
+            ("HEAD", "/api/v1/enclaves/1/public-key"),
+        ] {
+            let (status, headers, _) = server.request_with_body(
+                method, path,
+                "Origin: https://wallet.example\r\nX-Forwarded-For: 192.0.2.1\r\nX-Real-IP: 192.0.2.2\r\n",
+                "{}",
+            ).await;
+            assert_eq!(status, 429, "{method} {path}");
+            assert!(headers.contains("retry-after: 1"));
+            assert!(headers.contains("access-control-allow-origin: https://wallet.example"));
+            assert!(headers.contains("access-control-expose-headers: retry-after"));
+        }
+        assert_eq!(server.request("GET", "/api/v1/version").await.0, 200);
+        assert_eq!(
+            server
+                .request("GET", "/api/v1/keygen/session/status")
+                .await
+                .0,
+            400
+        );
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        assert_eq!(
+            server
+                .request_with_body("POST", "/api/v1/keygen/reserve", "", "{}")
+                .await
+                .0,
+            422
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_trusts_one_client_ip_only_from_configured_proxy_peers() {
+        let (mut config, _directory) = create_test_config();
+        config.server.rate_limit.per_ip_burst = 1;
+        config.server.rate_limit.per_ip_requests_per_second = 1;
+        config.server.rate_limit.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        config.server.rate_limit.client_ip_header = Some("x-real-ip".into());
+        let (state, _) = http_test_state(&config).await;
+        let server = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+        for invalid in [
+            "",
+            "X-Real-IP: bad-ip\r\n",
+            "X-Real-IP: 192.0.2.1, 192.0.2.2\r\n",
+            "X-Real-IP: 192.0.2.1\r\nX-Real-IP: 192.0.2.2\r\n",
+        ] {
+            assert_eq!(
+                server
+                    .request_with_body("POST", "/api/v1/keygen/reserve", invalid, "{}")
+                    .await
+                    .0,
+                400
+            );
+        }
+        for (ip, expected) in [("192.0.2.1", 422), ("192.0.2.1", 429), ("192.0.2.2", 422)] {
+            assert_eq!(
+                server
+                    .request_with_body(
+                        "POST",
+                        "/api/v1/keygen/reserve",
+                        &format!("X-Real-IP: {ip}\r\n"),
+                        "{}"
+                    )
+                    .await
+                    .0,
+                expected
+            );
+        }
+        config.server.rate_limit.trusted_proxy_ips = vec!["192.0.2.254".parse().unwrap()];
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keygen/reserve",
+                    "X-Real-IP: 192.0.2.1\r\n",
+                    "{}"
+                )
+                .await
+                .0,
+            422
+        );
+        assert_eq!(
+            server
+                .request_with_body(
+                    "POST",
+                    "/api/v1/keygen/reserve",
+                    "X-Real-IP: 192.0.2.2\r\n",
+                    "{}"
+                )
+                .await
+                .0,
+            429
+        );
     }
 
     #[tokio::test]
@@ -1313,6 +1531,7 @@ mod tests {
                 enable_cors: true,
                 enable_compression: true,
                 operator_token_file: None,
+                ..ServerConfig::default()
             },
             database: DatabaseConfig {
                 path: db_path.to_string_lossy().to_string(),
@@ -1389,14 +1608,29 @@ mod tests {
             );
             return;
         }
-        let (config, _temp_dir) = create_test_config();
-        let result = Application::build(config).await;
+        let (config, temp_dir) = create_test_config();
+        let result = Application::build(config.clone()).await;
         let error = match result {
             Ok(_) => panic!("Gateway started without a provisioned channel credential"),
             Err(error) => error,
         };
         assert!(
             format!("{error:#}").contains("KEYMELD_GATEWAY_SIGNING_KEY_FILE"),
+            "Unexpected startup failure: {error:#}"
+        );
+
+        // The same isolated process also exercises the real credential loader:
+        // a development bypass cannot coexist with a claim of verified attestation.
+        let credential_path = temp_dir.path().join("channel.key");
+        std::fs::write(&credential_path, hex::encode([42; 32])).unwrap();
+        std::env::set_var("KEYMELD_GATEWAY_SIGNING_KEY_FILE", credential_path);
+        std::env::set_var("KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES", "true");
+        let error = match Application::build(config).await {
+            Ok(_) => panic!("Gateway started with contradictory channel attestation configuration"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("security.enable_attestation"),
             "Unexpected startup failure: {error:#}"
         );
     }

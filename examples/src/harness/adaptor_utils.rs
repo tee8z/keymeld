@@ -62,7 +62,7 @@ pub fn create_test_adaptor_configs(
     let mut adaptor_secrets = Vec::new();
 
     if config.test_single {
-        info!("🔑 Generating secret for single adaptor signature");
+        info!("Generating secret for single adaptor signature");
         let secret = AdaptorSecret::new();
         let point_hex = hex::encode(secret.point.serialize());
 
@@ -84,7 +84,7 @@ pub fn adapt_signatures_and_get_valid_signature(
     aggregate_pubkey: PublicKey,
     message_hash: &[u8],
 ) -> Result<Vec<u8>> {
-    info!("🔓 Adapting adaptor signatures with revealed secrets...");
+    info!("Adapting adaptor signatures with revealed secrets...");
 
     for (i, config) in configs.iter().enumerate() {
         let Some(signature) = signatures.get(&config.adaptor_id) else {
@@ -92,7 +92,7 @@ pub fn adapt_signatures_and_get_valid_signature(
         };
 
         info!(
-            "🔓 Adapting {:?} signature for config {}",
+            "Adapting {:?} signature for config {}",
             config.adaptor_type, config.adaptor_id
         );
 
@@ -123,18 +123,18 @@ pub fn adapt_signatures_and_get_valid_signature(
             }
         };
 
-        info!("🔓 Applying secret to adapt signature...");
+        info!("Applying secret to adapt signature...");
         let adapted_signature: LiftedSignature = adaptor_signature
             .adapt(secret)
             .ok_or_else(|| anyhow!("Failed to adapt signature - invalid secret or result"))?;
 
         // Verify the adapted signature
-        info!("🔍 Verifying adapted signature...");
+        info!("Verifying adapted signature...");
         musig2::verify_single(aggregate_pubkey, adapted_signature, message_hash)
             .map_err(|e| anyhow!("Adapted signature verification failed: {e}"))?;
 
         info!(
-            "✅ {:?} signature adapted and verified successfully!",
+            "{:?} signature adapted and verified successfully!",
             config.adaptor_type
         );
 
@@ -212,12 +212,12 @@ pub fn validate_adaptor_signatures(
         }
 
         info!(
-            "✅ {:?} adaptor signature validated: ID={}",
+            "{:?} adaptor signature validated: ID={}",
             signature.adaptor_type, signature.adaptor_id
         );
     }
 
-    info!("✅ All adaptor signatures validated successfully");
+    info!("All adaptor signatures validated successfully");
     Ok(())
 }
 
@@ -227,13 +227,13 @@ pub fn print_success_summary(
     signatures: &BTreeMap<Uuid, AdaptorSignatureResult>,
     aggregate_key: &str,
 ) {
-    println!("\n🎉 All Adaptor Signature Tests Completed Successfully!");
+    println!("\nAll Adaptor Signature Tests Completed Successfully!");
     println!("===============================================");
-    println!("✅ Aggregate key: {aggregate_key}");
+    println!("Aggregate key: {aggregate_key}");
 
     for (i, config) in configs.iter().enumerate() {
         if let Some(signature) = signatures.get(&config.adaptor_id) {
-            println!("📋 Adaptor Signature {} Details:", i + 1);
+            println!("Adaptor Signature {} Details:", i + 1);
             println!("   Type: {:?}", signature.adaptor_type);
             println!("   ID: {}", signature.adaptor_id);
             println!(

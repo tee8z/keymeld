@@ -1094,6 +1094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cms"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730"
+dependencies = [
+ "const-oid",
+ "der",
+ "spki",
+ "x509-cert",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2513,12 +2525,17 @@ dependencies = [
  "aws-nitro-enclaves-cose",
  "aws-nitro-enclaves-nsm-api",
  "aws-sdk-kms",
+ "aws-smithy-http-client",
  "axum",
  "base64 0.22.1",
+ "cms",
  "dashmap",
+ "der",
  "hex",
  "keymeld-core",
  "musig2",
+ "openssl",
+ "pkcs1",
  "rand 0.9.2",
  "secp256k1 0.31.1",
  "serde",
@@ -2526,6 +2543,7 @@ dependencies = [
  "serde_cbor",
  "serde_json",
  "sha2",
+ "spki",
  "thiserror 2.0.18",
  "time",
  "tokio",

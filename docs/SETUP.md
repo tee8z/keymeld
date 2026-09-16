@@ -2,7 +2,7 @@
 
 This guide explains how to set up and develop KeyMeld, a distributed MuSig2 Bitcoin signing system using AWS Nitro Enclaves.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Install Nix
 ```bash
@@ -34,7 +34,7 @@ just quickstart
 
 That's it! Nix handles all dependencies and provides fast incremental builds.
 
-## 🎯 Development Environment
+## Development Environment
 
 KeyMeld uses a **Nix + Cargo hybrid approach** that gives you the best of both worlds:
 
@@ -61,7 +61,7 @@ Compare to alternatives:
 - Docker containers:  3-5 minutes per change (layer invalidation)
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 keymeld/
@@ -77,7 +77,7 @@ keymeld/
 └── data/              # Runtime data (created automatically)
 ```
 
-## 🔧 Common Commands
+## Common Commands
 
 ### Service Management
 ```bash
@@ -106,7 +106,7 @@ just mine 10        # Mine 10 regtest blocks
 just setup-regtest  # Setup Bitcoin regtest environment
 ```
 
-## 🏃‍♂️ Development Workflow
+## Development Workflow
 
 ### Option 1: Let justfile handle everything (easiest)
 ```bash
@@ -149,7 +149,7 @@ direnv allow
 cd keymeld  # Automatically loads Nix environment
 ```
 
-## ⚡ Why Nix for KeyMeld?
+## Why Nix for KeyMeld?
 
 ### Perfect for Distributed Cryptography
 - **Reproducible builds**: Critical for AWS Nitro Enclave attestation
@@ -168,7 +168,7 @@ cd keymeld  # Automatically loads Nix environment
 - **No dependency surprises**: What builds in dev works in production
 - **Minimal containers**: Only essential runtime dependencies included
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Nix Issues
 
@@ -182,8 +182,8 @@ sudo systemctl restart nix-daemon.service
 #### Slow builds or missing incremental compilation
 Make sure you're using Cargo builds, not pure Nix:
 ```bash
-just build            # ✅ Uses Cargo (fast, incremental)
-nix build             # ❌ Pure Nix (slow, full rebuild)
+just build            # Uses Cargo (fast, incremental)
+nix build             # Pure Nix (slow, full rebuild)
 
 # Verify target/ directory exists and persists
 ls -la target/        # Should see Cargo build artifacts
@@ -204,10 +204,10 @@ just reset-cache
 This is usually caused by incorrect VSock CID configuration in development:
 
 ```bash
-# ❌ This fails in local development:
+# This fails in local development:
 # CID 3, 4, 5 don't exist without real VMs
 
-# ✅ Check your config uses host CID (2):
+# Check your config uses host CID (2):
 grep -A 10 "enclaves:" config/development.yaml
 
 # Should show:
@@ -300,7 +300,7 @@ just status           # Check service health
 nix develop -c env    # Show all environment variables
 ```
 
-## 🎨 Configuration
+## Configuration
 
 ### Environment Variables
 Create a `.envrc` file (or set in your shell):
@@ -325,7 +325,7 @@ enclaves:
   max_users_per_enclave: 50
 ```
 
-## 📋 Command Reference
+## Command Reference
 
 ### Quick Actions
 ```bash
@@ -376,7 +376,7 @@ nix develop            # Enter dev shell manually
 nix build .#keymeld-gateway  # Build specific package
 ```
 
-## 🎯 Best Practices
+## Best Practices
 
 1. **Use `just quickstart`** for initial setup and demos
 2. **Use `just dev`** to enter the development shell for extended work
@@ -385,7 +385,7 @@ nix build .#keymeld-gateway  # Build specific package
 5. **Set up direnv** for seamless environment loading
 6. **Keep `target/` directory** - it contains your incremental build cache
 
-## 🤝 Contributing
+## Contributing
 
 When contributing to KeyMeld:
 
@@ -394,7 +394,7 @@ When contributing to KeyMeld:
 3. **Use `just quickstart`** to verify your changes work end-to-end
 4. **Update documentation** if you add new justfile commands
 
-## 📞 Getting Help
+## Getting Help
 
 - `just help` - Show all available commands
 - `just info` - Check system status and versions
@@ -402,7 +402,7 @@ When contributing to KeyMeld:
 - Check the main README for architecture details
 - Review `flake.nix` for the complete development environment definition
 
-## 🚀 Next Steps
+## Next Steps
 
 After setup, try these to understand KeyMeld:
 

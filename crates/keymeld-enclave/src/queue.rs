@@ -161,6 +161,14 @@ impl Queue {
                 current_session
             );
 
+            // A rejected late registration must not turn a completed keygen into
+            // Failed. Validate before dispatch consumes the state, and before
+            // command history could treat a repeated registration as success.
+            if let Err(error) = current_session.validate_command(&command.command) {
+                processing_result = Some(Err(error));
+                return current_session;
+            }
+
             // Check command idempotency using the proper MuSig rules
             // - Once-only commands: Check kind() (don't process same command type twice per session)
             // - Repeatable commands: Check command_id (don't process exact same command twice)

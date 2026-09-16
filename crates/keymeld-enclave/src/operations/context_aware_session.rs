@@ -36,6 +36,12 @@ impl ContextAwareSession {
     }
 
     pub fn process(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
+        self.validate_command(cmd)?;
+        self.process_validated(cmd)
+    }
+
+    /// Reject commands that cannot change this state before consuming it.
+    pub(crate) fn validate_command(&self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
         if matches!(
             self.status,
             OperatorStatus::Keygen(KeygenStatus::Completed(_))
@@ -51,6 +57,10 @@ impl ContextAwareSession {
                 ),
             ));
         }
+        Ok(())
+    }
+
+    fn process_validated(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
         debug!(
             "Processing command {:?} for session {}",
             cmd,

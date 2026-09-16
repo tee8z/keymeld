@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MuSig2](https://img.shields.io/badge/MuSig2-BIP--327-green.svg)](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki)
 
+> **Releases through `v0.3.5` are unsupported and must not be used for key custody or signing.**
 > **Upgrade to 0.4.0** for the authorization and security fixes.
 > Upgrade the SDK, gateway, and enclaves together and create fresh session state.
 > See the [migration guide](docs/AUTHORIZATION.md) and [security configuration](docs/SECURITY_OPERATIONS.md).

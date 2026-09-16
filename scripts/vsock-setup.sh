@@ -63,7 +63,7 @@ try_load_module() {
     # Check if module is already loaded
     if lsmod | grep -q "^$module "; then
         if [[ "$QUIET" != "true" ]]; then
-            log_info "✅ $module: Already loaded"
+            log_info "$module: Already loaded"
         fi
         return 0
     fi
@@ -71,30 +71,30 @@ try_load_module() {
     # Try loading as root first
     if [[ $EUID -eq 0 ]]; then
         if modprobe "$module" 2>/dev/null; then
-            log_success "✅ $module: Loaded as root"
+            log_success "$module: Loaded as root"
             loaded=true
         fi
     else
         # Try passwordless sudo first
         if sudo -n modprobe "$module" 2>/dev/null; then
             if [[ "$QUIET" != "true" ]]; then
-                log_success "✅ $module: Loaded with passwordless sudo"
+                log_success "$module: Loaded with passwordless sudo"
             fi
             loaded=true
         elif can_load_modules_passwordless; then
             # We have passwordless sudo for modprobe
             if sudo modprobe "$module" 2>/dev/null; then
                 if [[ "$QUIET" != "true" ]]; then
-                    log_success "✅ $module: Loaded with sudo"
+                    log_success "$module: Loaded with sudo"
                 fi
                 loaded=true
             fi
         elif ! is_ci; then
             # In interactive mode, ask for password
-            log_warn "🔑 $module: Requires password (run 'scripts/setup-vsock-sudoers.sh' to fix this)"
+            log_warn "$module: Requires password (run 'scripts/setup-vsock-sudoers.sh' to fix this)"
             if sudo modprobe "$module" 2>/dev/null; then
                 if [[ "$QUIET" != "true" ]]; then
-                    log_success "✅ $module: Loaded with password"
+                    log_success "$module: Loaded with password"
                 fi
                 loaded=true
             fi
@@ -102,7 +102,7 @@ try_load_module() {
     fi
 
     if ! $loaded; then
-        log_warn "⚠️  $module: Not available or failed to load (will use fallback mode)"
+        log_warn "$module: Not available or failed to load (will use fallback mode)"
         return 1
     fi
 
@@ -137,12 +137,12 @@ load_vsock_modules() {
 check_vsock_available() {
     if [[ -e "$VSOCK_DEVICE" ]]; then
         if [[ "$QUIET" != "true" ]]; then
-            log_success "✅ VSock device available at $VSOCK_DEVICE"
+            log_success "VSock device available at $VSOCK_DEVICE"
             ls -la "$VSOCK_DEVICE" 2>/dev/null || true
         fi
         return 0
     else
-        log_warn "⚠️  VSock device not found at $VSOCK_DEVICE"
+        log_warn "VSock device not found at $VSOCK_DEVICE"
         return 1
     fi
 }
@@ -174,14 +174,14 @@ start_vsock_proxies() {
             echo $! > "$PROXY_DIR/vsock-proxy-$i.pid"
 
             if [[ "$QUIET" != "true" ]]; then
-                log_success "✅ VSock proxy $i started (PID: $!)"
+                log_success "VSock proxy $i started (PID: $!)"
             fi
         done
 
         if [[ "$QUIET" == "true" ]]; then
-            log_quiet "🎉 VSock setup complete with hardware VSock!"
+            log_quiet "VSock setup complete with hardware VSock!"
         else
-            log_success "🎉 All VSock proxies started"
+            log_success "All VSock proxies started"
             echo "   Access enclaves via:"
             echo "   - Enclave 0: localhost:9000 → VSock CID:2:5000"
             echo "   - Enclave 1: localhost:9001 → VSock CID:2:5001"
@@ -214,10 +214,10 @@ start_tcp_fallback_proxies() {
             > "$PROXY_DIR/tcp-proxy-$i.log" 2>&1 &
         echo $! > "$PROXY_DIR/tcp-proxy-$i.pid"
 
-        log_success "✅ TCP proxy $i started (PID: $!)"
+        log_success "TCP proxy $i started (PID: $!)"
     done
 
-    log_success "🎉 All TCP fallback proxies started"
+    log_success "All TCP fallback proxies started"
     echo "   Access enclaves via:"
     echo "   - Enclave 0: localhost:9000 → localhost:5000"
     echo "   - Enclave 1: localhost:9001 → localhost:5001"
@@ -235,7 +235,7 @@ stop_proxies() {
             if [[ -f "$pidfile" ]]; then
                 local pid=$(cat "$pidfile")
                 if kill "$pid" 2>/dev/null; then
-                    log_success "✅ Stopped proxy (PID: $pid)"
+                    log_success "Stopped proxy (PID: $pid)"
                     ((stopped++))
                 fi
                 rm -f "$pidfile"
@@ -260,14 +260,14 @@ stop_proxies() {
 
 # Show status of proxy services
 show_status() {
-    echo "📊 VSock Proxy Status:"
+    echo "VSock Proxy Status:"
     echo ""
 
     # Check VSock availability
     if check_vsock_available; then
-        echo "VSock Mode: ✅ Hardware VSock available"
+        echo "VSock Mode: Hardware VSock available"
     else
-        echo "VSock Mode: ⚠️  TCP fallback mode"
+        echo "VSock Mode: TCP fallback mode"
     fi
 
     echo ""
@@ -283,35 +283,35 @@ show_status() {
             if [[ -f "$pidfile" ]]; then
                 local pid=$(cat "$pidfile" 2>/dev/null)
                 if kill -0 "$pid" 2>/dev/null; then
-                    echo "  ✅ VSock Proxy $i (PID: $pid) - localhost:$((9000 + i))"
+                    echo "  VSock Proxy $i (PID: $pid) - localhost:$((9000 + i))"
                     ((running++))
                 else
-                    echo "  ❌ VSock Proxy $i (dead)"
+                    echo "  VSock Proxy $i (dead)"
                 fi
             elif [[ -f "$tcp_pidfile" ]]; then
                 local pid=$(cat "$tcp_pidfile" 2>/dev/null)
                 if kill -0 "$pid" 2>/dev/null; then
-                    echo "  ✅ TCP Proxy $i (PID: $pid) - localhost:$((9000 + i))"
+                    echo "  TCP Proxy $i (PID: $pid) - localhost:$((9000 + i))"
                     ((running++))
                 else
-                    echo "  ❌ TCP Proxy $i (dead)"
+                    echo "  TCP Proxy $i (dead)"
                 fi
             else
-                echo "  ⚪ Proxy $i: Not running"
+                echo "  Proxy $i: Not running"
             fi
         done
 
         echo ""
         echo "Total running: $running/3"
     else
-        echo "  ⚪ No proxy services configured"
+        echo "  No proxy services configured"
     fi
 }
 
 # Setup VSock with intelligent fallbacks
 setup_vsock() {
     if [[ "$QUIET" != "true" ]]; then
-        log_info "🔧 Setting up VSock for KeyMeld enclave simulation..."
+        log_info "Setting up VSock for KeyMeld enclave simulation..."
     fi
 
     # Try to load kernel modules
@@ -319,19 +319,19 @@ setup_vsock() {
         # Modules loaded, try VSock proxies
         if start_vsock_proxies; then
             if [[ "$QUIET" != "true" ]]; then
-                log_success "🎉 VSock setup complete with hardware VSock!"
+                log_success "VSock setup complete with hardware VSock!"
             fi
             return 0
         fi
     fi
 
     # Fallback to TCP mode
-    log_warn "🔄 Falling back to TCP-only mode..."
+    log_warn "Falling back to TCP-only mode..."
     start_tcp_fallback_proxies
     if [[ "$QUIET" == "true" ]]; then
-        log_quiet "🎉 VSock setup complete with TCP fallback mode!"
+        log_quiet "VSock setup complete with TCP fallback mode!"
     else
-        log_success "🎉 VSock setup complete with TCP fallback mode!"
+        log_success "VSock setup complete with TCP fallback mode!"
     fi
 }
 

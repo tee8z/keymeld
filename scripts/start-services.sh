@@ -10,20 +10,20 @@ source "$keymeld_repo_root/scripts/development-auth.sh"
 # Gateway needs many FDs for concurrent HTTP connections
 ulimit -n 65536 2>/dev/null || true
 
-echo "🚀 Starting KeyMeld services..."
+echo "Starting KeyMeld services..."
 mkdir -p data logs
 LD_LIBRARY_PATH=${CMAKE_LIBRARY_PATH:-} \
     keymeld_setup_development_auth "$keymeld_repo_root" "$keymeld_repo_root/target/debug/keymeld-gateway"
 
 # Start LocalStack (if not already running)
 if ! pgrep -f moto_server > /dev/null; then
-    echo "🔐 Starting Moto (KMS)..."
-    nix run .#localstack > logs/localstack.log 2>&1 &
+    echo "Starting Moto (KMS)..."
+    env -u LD_LIBRARY_PATH nix run .#localstack > logs/localstack.log 2>&1 &
     sleep 5
-    echo "✅ Moto started on port 4566"
+    echo "Moto started on port 4566"
 
     # Create KMS key in Moto with alias
-    echo "🔑 Creating KMS key in Moto..."
+    echo "Creating KMS key in Moto..."
     KEY_OUTPUT=$(env -u LD_LIBRARY_PATH AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
         aws --endpoint-url=http://localhost:4566 kms create-key \
         --description "KeyMeld Enclave Master Key" \
@@ -38,12 +38,12 @@ if ! pgrep -f moto_server > /dev/null; then
             aws --endpoint-url=http://localhost:4566 kms create-alias \
             --alias-name alias/keymeld-enclave-master-key \
             --target-key-id "$KEY_ID" 2>&1 || echo "   Alias might already exist"
-        echo "   ✅ KMS key ready: alias/keymeld-enclave-master-key"
+        echo "   KMS key ready: alias/keymeld-enclave-master-key"
     else
-        echo "   ⚠️  KMS key might already exist"
+        echo "   KMS key might already exist"
     fi
 else
-    echo "✅ Moto already running"
+    echo "Moto already running"
 fi
 
 # Set AWS credentials for LocalStack
@@ -68,19 +68,19 @@ RUST_LOG=info CONFIG_PATH="$keymeld_repo_root/config/development.yaml" \
     AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
     ./target/debug/keymeld-gateway > logs/gateway.log 2>&1 &
 
-echo "✅ Services started! Logs available in logs/ directory"
-echo "🌐 Gateway: http://localhost:8090"
+echo "Services started! Logs available in logs/ directory"
+echo "Gateway: http://localhost:8090"
 
 # Wait for gateway to be ready
-echo "⏳ Waiting for gateway to be ready..."
+echo "Waiting for gateway to be ready..."
 for i in {1..30}; do
     if curl --max-time 2 -fsS http://localhost:8090/api/v1/health > /dev/null 2>&1; then
-        echo "✅ Gateway is ready!"
+        echo "Gateway is ready!"
         break
     fi
     if [ $i -eq 30 ]; then
-        echo "❌ Gateway failed to start within 30 seconds"
-        echo "📋 Gateway logs:"
+        echo "Gateway failed to start within 30 seconds"
+        echo "Gateway logs:"
         tail -20 logs/gateway.log
         exit 1
     fi
@@ -88,5 +88,5 @@ for i in {1..30}; do
 done
 
 # Wait for enclaves to be ready
-echo "⏳ Waiting for enclaves to initialize..."
+echo "Waiting for enclaves to initialize..."
 sleep 3
