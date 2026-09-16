@@ -9,15 +9,15 @@ AMOUNT="${3:-50000}"
 
 # Increase file descriptor limit for high concurrency tests (100+ instances)
 if [[ "$COUNT" -ge 100 ]]; then
-    ulimit -n 65536 2>/dev/null || echo "⚠️  Could not increase file descriptor limit (may need sudo)"
+    ulimit -n 65536 2>/dev/null || echo "Could not increase file descriptor limit (may need sudo)"
 fi
 
 if [[ "$MODE" != "plain" && "$MODE" != "adaptor" ]]; then
-    echo "❌ Error: mode must be 'plain' or 'adaptor'"
+    echo "Error: mode must be 'plain' or 'adaptor'"
     exit 1
 fi
 
-echo "🔥 KeyMeld Stress Test"
+echo "KeyMeld Stress Test"
 echo "======================"
 echo "Mode: $MODE"
 echo "Parallel instances: $COUNT"
@@ -25,7 +25,7 @@ echo "Amount per tx: $AMOUNT sats"
 echo ""
 
 # Partial clean (preserve bitcoin data)
-echo "🧹 Cleaning database and logs..."
+echo "Cleaning database and logs..."
 rm -rf data/keymeld.db* logs/stress-test
 mkdir -p /tmp/keymeld-stress-test
 pkill -9 -f keymeld-gateway 2>/dev/null || true
@@ -33,38 +33,38 @@ pkill -9 -f keymeld-enclave 2>/dev/null || true
 pkill -9 -f keymeld_demo 2>/dev/null || true
 sleep 1
 
-echo "🚀 Starting VSock proxy..."
+echo "Starting VSock proxy..."
 vsock-proxy start > /dev/null 2>&1
 sleep 1
 
-echo "🏦 Setting up Bitcoin regtest..."
+echo "Setting up Bitcoin regtest..."
 ./scripts/setup-regtest.sh > /dev/null 2>&1
 
 # Start Bitcoin RPC proxy and batcher for high concurrency tests (100+ instances)
 if [[ "$COUNT" -ge 100 ]]; then
-    echo "🔀 Starting Bitcoin RPC proxy (HAProxy) for high concurrency..."
+    echo "Starting Bitcoin RPC proxy (HAProxy) for high concurrency..."
     bitcoin-rpc-proxy stop > /dev/null 2>&1 || true
     # Keep maxconn well below bitcoind's rpcworkqueue (512) to let HAProxy queue instead of getting 503s
     BITCOIN_MAX_CONN=32 BITCOIN_QUEUE_TIMEOUT=120s bitcoin-rpc-proxy start
     export BITCOIN_RPC_PORT=18550  # Use proxy port instead of direct bitcoind
     echo "   Tests will use HAProxy on port 18550 (queuing requests to bitcoind:18443)"
 
-    echo "📦 Starting Bitcoin RPC batcher for batched funding/broadcast..."
+    echo "Starting Bitcoin RPC batcher for batched funding/broadcast..."
     ./scripts/bitcoin-rpc-batcher.sh stop > /dev/null 2>&1 || true
     ./scripts/bitcoin-rpc-batcher.sh start
     export USE_RPC_BATCHER=true
 fi
 
 if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld-gateway" ]; then
-    echo "✅ Using pre-built binaries"
+    echo "Using pre-built binaries"
 else
-    echo "🔨 Building project..."
+    echo "Building project..."
     cargo build > /dev/null 2>&1
 fi
 
-echo "🚀 Starting services..."
+echo "Starting services..."
 if ! ./scripts/start-services.sh; then
-    echo "❌ Failed to start services"
+    echo "Failed to start services"
     echo "Gateway logs:"
     tail -50 logs/gateway.log 2>/dev/null || echo "No gateway log"
     echo "Enclave 0 logs:"
@@ -74,15 +74,15 @@ fi
 sleep 3
 
 # Wait for gateway to be ready
-echo "⏳ Waiting for gateway to be ready..."
+echo "Waiting for gateway to be ready..."
 for i in {1..30}; do
     # Check if gateway process is running and try a simple connection
     if pgrep -f keymeld-gateway >/dev/null && nc -z localhost 8090 2>/dev/null; then
-        echo "✅ Services ready"
+        echo "Services ready"
         break
     fi
     if [ $i -eq 30 ]; then
-        echo "❌ Gateway failed to start after 30 seconds"
+        echo "Gateway failed to start after 30 seconds"
         echo "Gateway process status:"
         pgrep -f keymeld-gateway || echo "No gateway process found"
         echo "Port 8090 status:"
@@ -97,5 +97,5 @@ for i in {1..30}; do
 done
 echo ""
 
-echo "🧪 Running stress test..."
+echo "Running stress test..."
 bash scripts/stress-test.sh "$MODE" "$COUNT" "$AMOUNT"

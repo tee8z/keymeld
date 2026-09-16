@@ -6,10 +6,10 @@ use keymeld_core::{
     managed_socket::ServerCommandHandler,
     protocol::{
         AggregatePublicKeyResponse, AttestationError, Command, ConfigureCommand,
-        ConfiguredResponse, EnclaveCommand, EnclaveError, EnclaveOutcome, ErrorResponse,
-        FinalSignatureResponse, InitKeygenSessionCommand, InitSigningSessionCommand, InternalError,
-        KeygenCommand, KeygenInitializedResponse, KeygenOutcome, MusigCommand, MusigOutcome,
-        NonceError, NoncesResponse, Outcome, PartialSignatureResponse,
+        ConfiguredResponse, CryptoError, EnclaveCommand, EnclaveError, EnclaveOutcome,
+        ErrorResponse, FinalSignatureResponse, InitKeygenSessionCommand, InitSigningSessionCommand,
+        InternalError, KeygenCommand, KeygenInitializedResponse, KeygenOutcome, MusigCommand,
+        MusigOutcome, NonceError, NoncesResponse, Outcome, PartialSignatureResponse,
         ParticipantsAddedBatchResponse, PublicInfoResponse, SessionError, SignatureData,
         SigningCommand, SigningOutcome, SystemCommand, SystemOutcome,
     },
@@ -101,6 +101,7 @@ pub struct EnclaveOperator {
     key_epoch: AtomicU32,
     keys_initialized: AtomicBool,
     configure_lock: tokio::sync::Mutex<()>,
+    pub(crate) development_mode: bool,
 }
 
 impl EnclaveOperator {
@@ -827,6 +828,7 @@ impl EnclaveOperator {
             key_epoch: AtomicU32::new(1),
             keys_initialized: AtomicBool::new(false),
             configure_lock: tokio::sync::Mutex::new(()),
+            development_mode: false,
         })
     }
 
@@ -883,16 +885,17 @@ impl EnclaveOperator {
         {
             info!("Initializing enclave keys via KMS");
 
-            // Configure AWS SDK with endpoint
-            let loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-            let loader = if kms_endpoint == "aws-kms" {
-                loader
-            } else {
-                loader.endpoint_url(&kms_endpoint)
-            };
-            let aws_config = loader.load().await;
-
-            let kms_client = aws_sdk_kms::Client::new(&aws_config);
+            let target = crate::kms_transport::KmsTarget::validate(
+                &kms_endpoint,
+                &kms_key_id,
+                std::env::var("AWS_REGION").ok().as_deref(),
+                self.development_mode,
+            )
+            .map_err(|e| EnclaveError::Crypto(CryptoError::Other(e.to_string())))?;
+            let kms_client = target
+                .client()
+                .await
+                .map_err(|e| EnclaveError::Crypto(CryptoError::Other(e.to_string())))?;
 
             let mut temp_context = EnclaveSharedContext::new(
                 self.enclave_id,
@@ -903,14 +906,25 @@ impl EnclaveOperator {
             );
 
             let (encrypted_dek, encrypted_private_key, public_key): (Vec<u8>, Vec<u8>, Vec<u8>) =
-                temp_context
-                    .init_keys_with_kms(
-                        &kms_client,
-                        &kms_key_id,
-                        cmd.encrypted_dek.clone(),
-                        cmd.encrypted_private_key.clone(),
-                    )
-                    .await?;
+                if self.development_mode {
+                    temp_context
+                        .init_keys_with_kms_development(
+                            &kms_client,
+                            &kms_key_id,
+                            cmd.encrypted_dek.clone(),
+                            cmd.encrypted_private_key.clone(),
+                        )
+                        .await?
+                } else {
+                    temp_context
+                        .init_keys_with_kms(
+                            &kms_client,
+                            &kms_key_id,
+                            cmd.encrypted_dek.clone(),
+                            cmd.encrypted_private_key.clone(),
+                        )
+                        .await?
+                };
 
             *self.public_key.write().unwrap() = public_key.clone();
             *self.private_key.write().unwrap() = temp_context.private_key.clone();

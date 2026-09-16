@@ -2,7 +2,7 @@
 # Setup Bitcoin regtest environment
 set -euo pipefail
 
-echo "🏦 Setting up Bitcoin regtest environment..."
+echo "Setting up Bitcoin regtest environment..."
 mkdir -p data/bitcoin logs
 
 # Bitcoin RPC port - use HAProxy port if available, otherwise direct
@@ -48,4 +48,4 @@ fi
 echo "Generating initial blocks..."
 addr=$(bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcwallet=keymeld_coordinator getnewaddress)
 bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 generatetoaddress 101 $addr > /dev/null
-echo "✅ Bitcoin regtest ready with funded coordinator wallet"
+echo "Bitcoin regtest ready with funded coordinator wallet"

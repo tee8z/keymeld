@@ -141,6 +141,15 @@ config:
     host: "0.0.0.0"
     port: 8080
     enableCors: false
+    corsAllowedOrigins: []
+    rateLimit:
+      perIpBurst: 512
+      perIpRequestsPerSecond: 30
+      globalBurst: 2048
+      globalRequestsPerSecond: 120
+      maxTrackedIps: 8192
+      trustedProxyIps: []
+      clientIpHeader: null
     enableCompression: true
   database:
     maxConnections: 50

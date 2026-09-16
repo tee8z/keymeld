@@ -21,6 +21,11 @@ aws-nitro-enclaves-nsm-api = "0.4"
 aws-nitro-enclaves-cose = "0.5"
 aws-config = { workspace = true }
 aws-sdk-kms = "1.98.0"
+aws-smithy-http-client = { version = "=1.1.5", features = ["rustls-aws-lc"] }
+openssl = "0.10.75"
+cms = "0.2.3"
+der = { version = "0.7.10", features = ["alloc"] }
+pkcs1 = "0.7.5"
 hex = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
@@ -39,6 +44,7 @@ default = []
 [dev-dependencies]
 axum = { workspace = true }
 base64 = "0.22"
+spki = "0.7.3"
 
 [[bin]]
 name = "keymeld-enclave"

@@ -48,7 +48,7 @@ TESTS_FAILED=0
 # Cleanup function to stop services on exit
 cleanup() {
     echo ""
-    echo "🧹 Cleaning up services..."
+    echo "Cleaning up services..."
     # Use pgrep -x to match exact process names, avoiding parent shell matches
     for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
         pgrep -x "$proc" 2>/dev/null | xargs -r kill 2>/dev/null || true
@@ -58,53 +58,58 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "🧪 KeyMeld KMS End-to-End Test Suite"
+echo "KeyMeld KMS End-to-End Test Suite"
 echo "====================================="
 echo ""
 
 # ===========================================
 # Phase 0: Build and Start All Services
 # ===========================================
-echo "📦 Phase 0: Building and Starting Services"
+echo "Phase 0: Building and Starting Services"
 echo "==========================================="
 
 # Clean previous state
-echo "🧹 Cleaning previous state..."
+echo "Cleaning previous state..."
 ./scripts/clean.sh >/dev/null 2>&1 || true
 mkdir -p data logs
 
 # Start VSock proxies
-echo "🔌 Starting VSock proxies..."
+echo "Starting VSock proxies..."
 QUIET=true ./scripts/vsock-setup.sh start >/dev/null 2>&1 || true
 
 # Build the project (skip if SKIP_BUILD is set and binaries exist)
 if [ -n "${SKIP_BUILD:-}" ] && [ -f "target/debug/keymeld-gateway" ] && [ -f "target/debug/keymeld-enclave" ]; then
-    echo "✅ Using pre-built binaries"
+    echo "Using pre-built binaries"
 else
-    echo "🔨 Building KeyMeld..."
-    cargo build --quiet 2>&1 || { echo "❌ Build failed"; exit 1; }
-    echo "✅ Build complete"
+    echo "Building KeyMeld..."
+    cargo build --quiet 2>&1 || { echo "Build failed"; exit 1; }
+    echo "Build complete"
 fi
 
+# This test launches simulated enclaves and must pass the same authenticated
+# channel configuration to the gateway, enclaves, and SDK demo processes.
+source ./scripts/development-auth.sh
+keymeld_setup_development_auth "$PWD" "$PWD/target/debug/keymeld-gateway"
+
 # Start Moto (KMS mock)
-echo "🔐 Starting Moto (KMS mock)..."
+echo "Starting Moto (KMS mock)..."
 if ! pgrep -f moto_server > /dev/null; then
-    nix run .#localstack > logs/localstack.log 2>&1 &
+    env -u LD_LIBRARY_PATH nix run .#localstack > logs/localstack.log 2>&1 &
     sleep 5
 
     # Create KMS key
-    KEY_OUTPUT=$(AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+    KEY_OUTPUT=$(env -u LD_LIBRARY_PATH AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
         aws --endpoint-url=http://localhost:4566 kms create-key \
         --description "KeyMeld Enclave Master Key" \
         --key-usage ENCRYPT_DECRYPT 2>&1)
 
     if echo "$KEY_OUTPUT" | grep -q "KeyId"; then
         KEY_ID=$(echo "$KEY_OUTPUT" | grep -o '"KeyId": "[^"]*"' | cut -d'"' -f4)
-        AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
+        env -u LD_LIBRARY_PATH AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
             aws --endpoint-url=http://localhost:4566 kms create-alias \
             --alias-name alias/keymeld-enclave-master-key \
             --target-key-id "$KEY_ID" 2>&1 || true
-        echo "✅ KMS key created: $KEY_ID"
+        echo "KMS key created: $KEY_ID"
     fi
 fi
 
@@ -113,14 +118,8 @@ export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-west-2
 
-# Start Gateway
-echo "🌐 Starting Gateway..."
-RUST_LOG=info KEYMELD_ENVIRONMENT=development LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
-    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 \
-    ./target/debug/keymeld-gateway > logs/gateway.log 2>&1 &
-
 # Start Enclaves
-echo "🔒 Starting Enclaves..."
+echo "Starting Enclaves..."
 for i in {0..2}; do
     port=$((5000 + i))
     cid=2
@@ -130,33 +129,40 @@ for i in {0..2}; do
         ./target/debug/keymeld-enclave > logs/enclave-${i}.log 2>&1 &
 done
 
+# Startup authenticates each enclave before the gateway accepts requests.
+sleep 1
+echo "Starting Gateway..."
+RUST_LOG=info CONFIG_PATH="$PWD/config/development.yaml" KEYMELD_HOST=127.0.0.1 \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
+    ./target/debug/keymeld-gateway > logs/gateway.log 2>&1 &
+
 echo ""
 
 # Helper functions
 # Log a step success (does not count as a test)
 log_step() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo -e "${GREEN}OK${NC} $1"
 }
 
 # Log a step failure (does not count as a test)
 log_step_error() {
-    echo -e "${RED}✗${NC} $1"
+    echo -e "${RED}FAIL${NC} $1"
 }
 
 # Log info
 log_info() {
-    echo -e "${YELLOW}ℹ${NC} $1"
+    echo -e "${YELLOW}INFO${NC} $1"
 }
 
 # Mark a test phase as passed
 test_passed() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo -e "${GREEN}OK${NC} $1"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 # Mark a test phase as failed
 test_failed() {
-    echo -e "${RED}✗${NC} $1"
+    echo -e "${RED}FAIL${NC} $1"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
@@ -220,7 +226,7 @@ check_enclave_initialized() {
 }
 
 # Test 1: Initial KMS Setup
-echo "📋 Test 1: Initial KMS Setup and Key Generation"
+echo "Test 1: Initial KMS Setup and Key Generation"
 echo "------------------------------------------------"
 
 if wait_for_service "Gateway" "$GATEWAY_URL/health"; then
@@ -289,7 +295,7 @@ test_passed "Test 1: Initial KMS Setup and Key Generation"
 echo ""
 
 # Test 2: Setup Bitcoin and perform a signing operation
-echo "📋 Test 2: MuSig2 Signing Operation with KMS Keys"
+echo "Test 2: MuSig2 Signing Operation with KMS Keys"
 echo "---------------------------------------------------"
 
 log_info "Setting up Bitcoin regtest environment..."
@@ -322,7 +328,7 @@ fi
 echo ""
 
 # Test 3: Restart enclaves and verify they come back healthy
-echo "📋 Test 3: Enclave Restart and Recovery"
+echo "Test 3: Enclave Restart and Recovery"
 echo "----------------------------------------------"
 
 log_info "Stopping all enclaves..."
@@ -372,7 +378,7 @@ fi
 echo ""
 
 # Test 4: Signing after restart
-echo "📋 Test 4: MuSig2 Signing After Restart"
+echo "Test 4: MuSig2 Signing After Restart"
 echo "----------------------------------------"
 
 # Enclaves are up, but we need to ensure gateway has refreshed all public key caches
@@ -396,7 +402,7 @@ fi
 echo ""
 
 # Test 5: Session Restoration After Restart (Using keymeld_session_test)
-echo "📋 Test 5: Session Restoration + Full Signing After Restart"
+echo "Test 5: Session Restoration + Full Signing After Restart"
 echo "------------------------------------------------------------"
 
 # This test uses the keymeld_session_test binary to:
@@ -537,7 +543,7 @@ test_passed "Test 5: Session Restoration + Full Signing After Restart"
 echo ""
 
 # Test 6: Check database integrity
-echo "📋 Test 6: Database Integrity Checks"
+echo "Test 6: Database Integrity Checks"
 echo "------------------------------------"
 
 log_info "Verifying database schema and session data..."
@@ -589,7 +595,7 @@ fi
 echo ""
 
 # Test Summary
-echo "📊 Test Summary"
+echo "Test Summary"
 echo "==============="
 echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
 echo -e "Tests failed: ${RED}$TESTS_FAILED${NC}"
@@ -600,9 +606,9 @@ rm -f /tmp/keymeld_test_epoch_*.txt
 rm -f /tmp/keymeld_test_signing*.log
 
 if [ $TESTS_FAILED -eq 0 ]; then
-    echo -e "${GREEN}✅ All KMS E2E tests passed!${NC}"
+    echo -e "${GREEN}All KMS E2E tests passed!${NC}"
     exit 0
 else
-    echo -e "${RED}❌ Some KMS E2E tests failed${NC}"
+    echo -e "${RED}Some KMS E2E tests failed${NC}"
     exit 1
 fi

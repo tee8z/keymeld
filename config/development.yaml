@@ -37,7 +37,17 @@ server:
   host: "0.0.0.0" # Server bind address - 0.0.0.0 listens on all interfaces
   port: 8090 # HTTP server port
   enable_cors: true # Enable Cross-Origin Resource Sharing for web clients
+  cors_allowed_origins: ["http://localhost:8090", "http://127.0.0.1:8090"]
   enable_compression: true # Enable HTTP response compression (gzip)
+  rate_limit:
+    # Concurrent stress clients share the loopback IP. Keep admission bounded.
+    per_ip_burst: 4096
+    per_ip_requests_per_second: 1000
+    global_burst: 8192
+    global_requests_per_second: 2000
+    max_tracked_ips: 8192
+    trusted_proxy_ips: []
+    client_ip_header: null
 kms:
   enabled: true # Enable AWS KMS integration for key management
   endpoint_url: "http://127.0.0.1:4566" # KMS endpoint URL (LocalStack for development)
@@ -149,7 +159,7 @@ logging:
   enable_file_output: false # Write logs to file in addition to stdout
   file_path: null # Log file path (if enable_file_output is true)
 security:
-  enable_attestation: false # Enable enclave attestation verification (disabled for development)
+  enable_attestation: false # Requires KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=true for local simulation
   strict_validation: false # Enable strict security validation (disabled for development)
   allow_insecure_connections: true # Allow non-TLS connections (development only)
   require_tls: false # Require TLS/HTTPS connections (disabled for development)

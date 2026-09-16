@@ -23,7 +23,7 @@ BITCOIN_RPC_PORT="${BITCOIN_RPC_PORT:-18443}"
 # Build common bitcoin-cli args
 BTC_CLI="bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 -rpcport=$BITCOIN_RPC_PORT"
 
-echo "📊 Funding $COUNT Bitcoin wallets with $AMOUNT BTC each..."
+echo "Funding $COUNT Bitcoin wallets with $AMOUNT BTC each..."
 echo "   Using Bitcoin RPC port: $BITCOIN_RPC_PORT"
 
 # Ensure coordinator wallet exists
@@ -35,8 +35,8 @@ balance=$($BTC_CLI -rpcwallet=keymeld_coordinator getbalance 2>/dev/null || echo
 required=$(echo "$COUNT * $AMOUNT + 0.1" | bc -l)
 
 if (( $(echo "$balance < $required" | bc -l) )); then
-    echo "   ⚠️  Coordinator wallet balance ($balance BTC) insufficient for funding."
-    echo "   ⚠️  Required: $required BTC. Generating initial funds..."
+    echo "   Coordinator wallet balance ($balance BTC) insufficient for funding."
+    echo "   Required: $required BTC. Generating initial funds..."
 
     # Check current block height to determine if halvings have depleted block rewards
     # Regtest halves every 150 blocks, so after ~3000 blocks the reward is negligible
@@ -44,9 +44,9 @@ if (( $(echo "$balance < $required" | bc -l) )); then
     halvings=$((block_height / 150))
 
     if [[ $halvings -ge 20 ]]; then
-        echo "   ❌ ERROR: Block reward has halved $halvings times (height: $block_height)"
-        echo "   ❌ Current block reward is too small to fund wallets."
-        echo "   ❌ Please run 'just clean' to reset the regtest chain, then retry."
+        echo "   ERROR: Block reward has halved $halvings times (height: $block_height)"
+        echo "   Current block reward is too small to fund wallets."
+        echo "   Please run 'just clean' to reset the regtest chain, then retry."
         exit 1
     fi
 
@@ -61,7 +61,7 @@ if (( $(echo "$balance < $required" | bc -l) )); then
     # Verify balance is now sufficient
     new_balance=$($BTC_CLI -rpcwallet=keymeld_coordinator getbalance 2>/dev/null || echo "0")
     if (( $(echo "$new_balance < $required" | bc -l) )); then
-        echo "   ⚠️  Balance still insufficient ($new_balance BTC), generating more blocks..."
+        echo "   Balance still insufficient ($new_balance BTC), generating more blocks..."
         $BTC_CLI generatetoaddress 50 $addr >/dev/null
         sleep 1
         new_balance=$($BTC_CLI -rpcwallet=keymeld_coordinator getbalance 2>/dev/null || echo "0")
@@ -69,12 +69,12 @@ if (( $(echo "$balance < $required" | bc -l) )); then
 
     # Final check - if still not enough, the chain needs reset
     if (( $(echo "$new_balance < $required" | bc -l) )); then
-        echo "   ❌ ERROR: Could not generate sufficient funds ($new_balance BTC < $required BTC)"
-        echo "   ❌ Block rewards may be depleted. Run 'just clean' to reset the regtest chain."
+        echo "   ERROR: Could not generate sufficient funds ($new_balance BTC < $required BTC)"
+        echo "   Block rewards may be depleted. Run 'just clean' to reset the regtest chain."
         exit 1
     fi
 
-    echo "   ✓ Generated initial funds for coordinator wallet (balance: $new_balance BTC)"
+    echo "   Generated initial funds for coordinator wallet (balance: $new_balance BTC)"
 fi
 
 CREATION_PARALLELISM="${4:-10}"
@@ -171,21 +171,21 @@ rm -f "$PROGRESS_FILE"
 missing=0
 for i in $(seq 0 $((COUNT - 1))); do
     if [[ ! -f "/tmp/keymeld-wallet-addr-$i" ]]; then
-        echo "   ⚠️  Missing address file for wallet $i" >&2
+        echo "   Missing address file for wallet $i" >&2
         missing=$((missing + 1))
     fi
 done
 
 if [[ $missing -gt 0 ]]; then
-    echo "   ❌ Failed to create $missing wallets" >&2
+    echo "   Failed to create $missing wallets" >&2
     exit 1
 fi
 
-echo "   ✓ Created $COUNT wallets..."
+echo "   Created $COUNT wallets..."
 
 creation_time=$(date +%s.%3N)
 creation_duration=$(echo "scale=2; $creation_time - $start_time" | bc)
-echo "   ✓ Created $COUNT wallets in ${creation_duration}s"
+echo "   Created $COUNT wallets in ${creation_duration}s"
 
 # Collect addresses
 for i in $(seq 0 $((COUNT - 1))); do
@@ -226,7 +226,7 @@ for batch_num in $(seq 0 $((BATCH_COUNT - 1))); do
     batch_fund_time=$(date +%s.%3N)
     fund_duration=$(echo "scale=2; $batch_fund_time - $batch_start_time" | bc)
 
-    echo "   ✓ Batch $((batch_num + 1))/$BATCH_COUNT: Funded $batch_size wallets in ${fund_duration}s (tx: ${txid:0:16}...)"
+    echo "   Batch $((batch_num + 1))/$BATCH_COUNT: Funded $batch_size wallets in ${fund_duration}s (tx: ${txid:0:16}...)"
 
     # Confirm this batch before funding the next (except for the last batch)
     if [[ $batch_num -lt $((BATCH_COUNT - 1)) ]]; then
@@ -235,7 +235,7 @@ for batch_num in $(seq 0 $((BATCH_COUNT - 1))); do
         $BTC_CLI generatetoaddress 6 $addr >/dev/null
         confirm_end_time=$(date +%s.%3N)
         confirm_duration=$(echo "scale=2; $confirm_end_time - $confirm_start_time" | bc)
-        echo "   ✓ Batch $((batch_num + 1)) confirmed in ${confirm_duration}s"
+        echo "   Batch $((batch_num + 1)) confirmed in ${confirm_duration}s"
     fi
 done
 
@@ -257,7 +257,7 @@ end_time=$(date +%s.%3N)
 total_duration=$(echo "scale=2; $end_time - $start_time" | bc)
 funding_duration=$(echo "scale=2; $end_time - $funding_start_time" | bc)
 
-echo "   ✓ Final confirmation completed in ${final_confirm_duration}s"
-echo "   ✓ All $COUNT wallets funded and confirmed in ${total_duration}s"
+echo "   Final confirmation completed in ${final_confirm_duration}s"
+echo "   All $COUNT wallets funded and confirmed in ${total_duration}s"
 echo "     - Wallet creation: ${creation_duration}s"
 echo "     - Funding + confirmations: ${funding_duration}s"

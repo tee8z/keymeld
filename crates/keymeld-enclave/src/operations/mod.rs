@@ -2,6 +2,7 @@ pub mod context;
 pub mod context_aware_session;
 pub mod enclave_context;
 pub mod keygen_data;
+mod kms_recipient;
 pub mod registration;
 pub mod session_context;
 pub mod states;

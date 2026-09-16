@@ -150,6 +150,34 @@ impl AttestationManager {
         nsm_client.get_random(num_bytes).map_err(Into::into)
     }
 
+    /// Request fresh NSM evidence for the separate KMS RSA recipient key.
+    /// PCRs come from NSM, never from the configured encryption context.
+    pub fn get_kms_recipient_attestation(
+        &self,
+        public_key_spki: &[u8],
+    ) -> Result<AttestationDocument> {
+        if !self.config.enabled || !self.config.generate_attestations {
+            return Err(EnclaveError::Attestation(AttestationError::Other(
+                "KMS recipient attestation is disabled".into(),
+            )));
+        }
+        let nsm_client = self
+            .nsm_client
+            .as_ref()
+            .ok_or(EnclaveError::Internal(InternalError::NsmNotInitialized))?;
+        let nonce: [u8; 32] = rand::random();
+        let document =
+            nsm_client.get_attestation_document(None, Some(&nonce), Some(public_key_spki))?;
+        if document.raw_document.is_empty()
+            || document.public_key.as_deref() != Some(public_key_spki)
+        {
+            return Err(EnclaveError::Attestation(AttestationError::Other(
+                "NSM did not attest the KMS recipient public key".into(),
+            )));
+        }
+        Ok(document)
+    }
+
     pub fn is_debug_mode(&self) -> bool {
         self.is_debug_mode
     }

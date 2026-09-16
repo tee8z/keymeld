@@ -16,7 +16,7 @@ use keymeld_core::authorization::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct KeygenOptions {
     pub(crate) timeout_secs: Option<u64>,
     pub(crate) max_signing_sessions: Option<u32>,
@@ -24,6 +24,19 @@ pub struct KeygenOptions {
     pub(crate) require_signing_approval: bool,
     pub(crate) authority: Option<AuthorizationCredentials>,
     pub(crate) participant_verifiers: BTreeMap<UserId, Vec<u8>>,
+}
+
+impl Default for KeygenOptions {
+    fn default() -> Self {
+        Self {
+            timeout_secs: None,
+            max_signing_sessions: None,
+            taproot_tweak: TaprootTweak::default(),
+            require_signing_approval: true,
+            authority: None,
+            participant_verifiers: BTreeMap::new(),
+        }
+    }
 }
 
 impl KeygenOptions {
@@ -57,17 +70,31 @@ impl KeygenOptions {
         self
     }
 
+    /// Set this participant's default approval policy for registration.
+    ///
+    /// Approvals are required by default. Passing `false` delegates signing to
+    /// the session's signing authority without a fresh participant approval.
     pub fn approval(mut self, required: bool) -> Self {
         self.require_signing_approval = required;
         self
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct JoinOptions {
     pub(crate) require_signing_approval: bool,
     registration_credentials: Option<AuthorizationCredentials>,
     authorization_manifest: Option<SignedSessionManifest>,
+}
+
+impl Default for JoinOptions {
+    fn default() -> Self {
+        Self {
+            require_signing_approval: true,
+            registration_credentials: None,
+            authorization_manifest: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +124,8 @@ impl JoinOptions {
         self
     }
 
+    /// Require participant approval, or explicitly delegate to the session's
+    /// signing authority by passing `false`. Defaults to `true`.
     pub fn approval(mut self, required: bool) -> Self {
         self.require_signing_approval = required;
         self
@@ -105,7 +134,7 @@ impl JoinOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct RegisterOptions {
-    pub(crate) require_signing_approval: bool,
+    require_signing_approval: Option<bool>,
     registration_credentials: Option<AuthorizationCredentials>,
 }
 
@@ -116,13 +145,22 @@ impl RegisterOptions {
     }
 
     pub fn require_approval(mut self) -> Self {
-        self.require_signing_approval = true;
+        self.require_signing_approval = Some(true);
         self
     }
 
+    /// Override the session's registration approval policy for this participant.
+    ///
+    /// Without an override, registration inherits `KeygenOptions` (which defaults
+    /// to requiring approval). Passing `false` explicitly delegates signing to
+    /// the session's signing authority without a fresh participant approval.
     pub fn approval(mut self, required: bool) -> Self {
-        self.require_signing_approval = required;
+        self.require_signing_approval = Some(required);
         self
+    }
+
+    fn approval_required(&self, session_default: bool) -> bool {
+        self.require_signing_approval.unwrap_or(session_default)
     }
 }
 
@@ -449,7 +487,7 @@ impl<'a> KeygenManager<'a> {
             registration_credentials: BTreeMap::new(),
             encrypted_roster: None,
             own_registration: None,
-            require_signing_approval: false,
+            require_signing_approval: true,
             roster_enclave_pubkey: coordinator_key.public_key,
             status: KeygenStatusKind::CollectingParticipants,
             aggregate_key: None,
@@ -623,6 +661,7 @@ impl<'a> KeygenSession<'a> {
             .credentials
             .sign_session_request(&self.session_id.to_string())?;
 
+        let require_signing_approval = options.approval_required(self.require_signing_approval);
         let context = RegistrationContext {
             keygen_session_id: self.session_id.clone(),
             manifest_hash: self.authorization_manifest.digest()?,
@@ -632,8 +671,7 @@ impl<'a> KeygenSession<'a> {
             public_key: user_credentials.public_key_bytes(),
             auth_pubkey: user_credentials
                 .derive_session_auth_pubkey(&self.session_id.to_string())?,
-            require_signing_approval: options.require_signing_approval
-                || self.require_signing_approval,
+            require_signing_approval,
         };
         let encrypted_private_key =
             user_credentials.prepare_registration(context.clone(), enclave_pubkey)?;
@@ -671,8 +709,7 @@ impl<'a> KeygenSession<'a> {
             encrypted_session_data,
             enclave_public_key: enclave_pubkey.clone(),
             enclave_key_epoch,
-            require_signing_approval: options.require_signing_approval
-                || self.require_signing_approval,
+            require_signing_approval,
             auth_pubkey,
         };
 
@@ -950,4 +987,34 @@ struct KeygenSessionData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeygenParticipantSessionData {
     participant_public_keys: BTreeMap<UserId, Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JoinOptions, KeygenOptions, RegisterOptions};
+
+    #[test]
+    fn registration_requires_approval_by_default() {
+        let creation = KeygenOptions::default();
+        assert!(creation.require_signing_approval);
+        assert!(JoinOptions::default().require_signing_approval);
+        assert!(RegisterOptions::default().approval_required(creation.require_signing_approval));
+    }
+
+    #[test]
+    fn explicit_delegation_survives_registration_defaults() {
+        let creation = KeygenOptions::default().approval(false);
+        assert!(!RegisterOptions::default().approval_required(creation.require_signing_approval));
+        assert!(
+            !JoinOptions::default()
+                .approval(false)
+                .require_signing_approval
+        );
+        assert!(!RegisterOptions::default()
+            .approval(false)
+            .approval_required(true));
+        assert!(RegisterOptions::default()
+            .require_approval()
+            .approval_required(false));
+    }
 }

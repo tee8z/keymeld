@@ -55,7 +55,7 @@ pub async fn run_with_args(
         result = run_adaptor_signatures_test(&mut test, adaptor_config) => {
             match result {
                 Ok(()) => {
-                    println!("\n✅ KeyMeld adaptor signatures test completed successfully!");
+                    println!("\nKeyMeld adaptor signatures test completed successfully!");
                 }
                 Err(e) => {
                     error!("Adaptor signatures test failed: {e}");
@@ -64,7 +64,7 @@ pub async fn run_with_args(
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("\n🛑 Received Ctrl+C, shutting down gracefully...");
+            println!("\nReceived Ctrl+C, shutting down gracefully...");
             std::process::exit(0);
         }
     }
@@ -76,7 +76,7 @@ async fn run_adaptor_signatures_test(
     test: &mut KeyMeldE2ETest,
     adaptor_config: AdaptorTestConfig,
 ) -> Result<()> {
-    info!("🔧 KeyMeld Adaptor Signatures E2E Test (SDK)");
+    info!("KeyMeld Adaptor Signatures E2E Test (SDK)");
     info!("=============================================");
     info!("Network: {}", test.config.network);
     info!("Gateway: {}", test.config.gateway_url);
@@ -115,7 +115,7 @@ async fn run_adaptor_signatures_test(
     }
 
     // Phase 1: Keygen using SDK
-    info!("🔑 Starting Phase 1: Keygen Session (SDK)");
+    info!("Starting Phase 1: Keygen Session (SDK)");
 
     let all_participants: Vec<UserId> = std::iter::once(coordinator_client.user_id().clone())
         .chain(participant_clients.iter().map(|c| c.user_id().clone()))
@@ -166,7 +166,7 @@ async fn run_adaptor_signatures_test(
     keygen_session.wait_for_completion().await?;
     let aggregate_key = keygen_session.decrypt_aggregate_key()?;
     let aggregate_key_hex = hex::encode(&aggregate_key);
-    info!("✅ Keygen complete: {}", aggregate_key_hex);
+    info!("Keygen complete: {}", aggregate_key_hex);
 
     // Fund the aggregate key address and create PSBT
     let aggregate_utxo = test
@@ -177,10 +177,10 @@ async fn run_adaptor_signatures_test(
         .await?;
 
     // Create adaptor configurations
-    info!("🔧 Starting Adaptor Signatures Test");
+    info!("Starting Adaptor Signatures Test");
     let (adaptor_configs, adaptor_secrets) = create_test_adaptor_configs(&adaptor_config)?;
     info!(
-        "📝 Created {} adaptor configurations with {} secrets",
+        "Created {} adaptor configurations with {} secrets",
         adaptor_configs.len(),
         adaptor_secrets.len()
     );
@@ -195,7 +195,7 @@ async fn run_adaptor_signatures_test(
     }
 
     // Phase 2: Signing with adaptor signatures using SDK
-    info!("✍️ Starting Phase 2: Signing Session with Adaptor Signatures (SDK)");
+    info!("Starting Phase 2: Signing Session with Adaptor Signatures (SDK)");
 
     let message_hash = test.calculate_taproot_sighash(&psbt)?;
     let expected_message = message_hash;
@@ -227,19 +227,19 @@ async fn run_adaptor_signatures_test(
 
     let signing_session_id = signing_session.session_id().clone();
     info!(
-        "✅ Signing session {} created with adaptor configurations",
+        "Signing session {} created with adaptor configurations",
         signing_session_id
     );
 
     // Validate: Before approving, verify the message matches what we expect to sign
     info!(
-        "🔍 Validating message before approval: {}",
+        "Validating message before approval: {}",
         hex::encode(expected_message)
     );
 
     // Approve using SDK
     signing_session.approve(&expected_batch).await?;
-    info!("✅ Coordinator approved");
+    info!("Coordinator approved");
 
     // Approve for first participant (requires approval)
     if !participant_clients.is_empty() {
@@ -259,15 +259,15 @@ async fn run_adaptor_signatures_test(
             .restore_session(signing_session_id.clone(), &participant_keygen)
             .await?;
 
-        info!("🔍 Participant 0 validating message before approval");
+        info!("Participant 0 validating message before approval");
         participant_signing.approve(&expected_batch).await?;
-        info!("✅ Participant 0 approved");
+        info!("Participant 0 approved");
     }
 
-    info!("✅ All required approvals completed - signing can now proceed");
+    info!("All required approvals completed - signing can now proceed");
 
     // Wait for signing completion using SDK
-    info!("⏳ Waiting for signing completion with adaptor processing...");
+    info!("Waiting for signing completion with adaptor processing...");
     let signature_results = signing_session.wait_for_completion().await?;
 
     // Get adaptor signatures from results
@@ -281,7 +281,7 @@ async fn run_adaptor_signatures_test(
         .ok_or(anyhow!("Signing completed but no adaptor signatures found"))?;
 
     info!(
-        "✅ Adaptor signing completed! Received {} adaptor signatures",
+        "Adaptor signing completed! Received {} adaptor signatures",
         adaptor_signatures.len()
     );
 
@@ -289,14 +289,14 @@ async fn run_adaptor_signatures_test(
 
     // Demonstrate the complete adaptor signature flow
     if !adaptor_config.skip_regular_signing {
-        info!("🎭 Demonstrating complete adaptor signature flow...");
-        info!("🔑 Step 1: Revealing adaptor secrets (in real scenarios, this happens through external events)");
+        info!("Demonstrating complete adaptor signature flow...");
+        info!("Step 1: Revealing adaptor secrets (in real scenarios, this happens through external events)");
 
         // Parse the aggregate key for verification
         let aggregate_pubkey = musig2::secp256k1::PublicKey::from_slice(&aggregate_key)
             .map_err(|e| anyhow::anyhow!("Invalid aggregate key: {e}"))?;
 
-        info!("🔑 Step 2: Adapting signatures using revealed secrets...");
+        info!("Step 2: Adapting signatures using revealed secrets...");
         let adapted_signature = adapt_signatures_and_get_valid_signature(
             &adaptor_configs,
             adaptor_signatures,
@@ -314,21 +314,19 @@ async fn run_adaptor_signatures_test(
                 hex::encode(verified_message)
             ));
         }
-        info!("✅ Message verified before broadcast");
+        info!("Message verified before broadcast");
 
-        info!("🔑 Step 3: Broadcasting transaction with adapted signature...");
+        info!("Step 3: Broadcasting transaction with adapted signature...");
         let signed_tx = test
             .apply_signature_and_broadcast(psbt, &adapted_signature)
             .await?;
         info!(
-            "✅ Transaction broadcast with adapted signature: {}",
+            "Transaction broadcast with adapted signature: {}",
             signed_tx.compute_txid()
         );
     } else {
-        info!("✅ Skipping transaction broadcast as configured");
-        info!(
-            "💡 In real scenarios, adaptor signatures would be adapted when secrets are revealed"
-        );
+        info!("Skipping transaction broadcast as configured");
+        info!("In real scenarios, adaptor signatures would be adapted when secrets are revealed");
     }
 
     print_success_summary(&adaptor_configs, adaptor_signatures, &aggregate_key_hex);

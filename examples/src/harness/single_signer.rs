@@ -55,7 +55,7 @@ where
                     let jitter = rand::random::<u64>() % (delay_ms / 2 + 1);
                     let sleep_ms = delay_ms + jitter;
                     warn!(
-                        "⚠️  Bitcoin RPC {} failed (attempt {}/{}): {}. Retrying in {}ms...",
+                        "Bitcoin RPC {} failed (attempt {}/{}): {}. Retrying in {}ms...",
                         operation_name, attempt, MAX_RETRIES, error_str, sleep_ms
                     );
                     sleep(Duration::from_millis(sleep_ms)).await;

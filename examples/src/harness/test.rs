@@ -84,7 +84,7 @@ where
                     let total_delay = delay + jitter;
 
                     warn!(
-                        "⚠️  Bitcoin RPC {} failed (attempt {}/{}): {}. Retrying in {}ms...",
+                        "Bitcoin RPC {} failed (attempt {}/{}): {}. Retrying in {}ms...",
                         operation_name, attempt, BITCOIN_RPC_MAX_RETRIES, error_str, total_delay
                     );
                     sleep(Duration::from_millis(total_delay)).await;
@@ -303,7 +303,7 @@ impl KeyMeldE2ETest {
         amount: u64,
         destination: Option<String>,
     ) -> Result<Self> {
-        info!("🔧 Initializing KeyMeld E2E Test");
+        info!("Initializing KeyMeld E2E Test");
         info!("Network: {}", config.network);
         info!("Participants: {}", config.num_signers);
         info!("Amount: {} sats", amount);
@@ -326,7 +326,7 @@ impl KeyMeldE2ETest {
 
         let coordinator_mnemonic = Self::load_or_create_coordinator_private_key(&config)?;
         let coordinator_user_id: UserId = Uuid::now_v7().into();
-        info!("👤 Coordinator user ID: {}", coordinator_user_id);
+        info!("Coordinator user ID: {}", coordinator_user_id);
 
         let coordinator = Participant::new(coordinator_mnemonic, config.network, 0)?;
 
@@ -339,7 +339,7 @@ impl KeyMeldE2ETest {
                     .peek_address(KeychainKind::External, 1)
                     .address;
                 info!(
-                    "📍 Generated destination address from coordinator wallet: {}",
+                    "Generated destination address from coordinator wallet: {}",
                     dest_addr
                 );
                 dest_addr.to_string()
@@ -350,7 +350,7 @@ impl KeyMeldE2ETest {
 
         // Initialize RPC batcher if enabled for high-concurrency tests
         let rpc_batcher = if config.use_rpc_batcher {
-            info!("📦 RPC batcher enabled - using queue-based Bitcoin RPC");
+            info!("RPC batcher enabled - using queue-based Bitcoin RPC");
             Some(rpc_batcher::RpcBatcher::new(&config.rpc_queue_dir))
         } else {
             None
@@ -406,10 +406,7 @@ impl KeyMeldE2ETest {
         let key_file = format!("{}/coordinator.key", config.key_files_dir);
 
         if Path::new(&key_file).exists() {
-            info!(
-                "📁 Loading existing coordinator private key from {}",
-                key_file
-            );
+            info!("Loading existing coordinator private key from {}", key_file);
             let key_content = read_to_string(&key_file)
                 .map_err(|e| anyhow!("Failed to read key file {key_file}: {e}"))?;
 
@@ -419,7 +416,7 @@ impl KeyMeldE2ETest {
 
             Ok(mnemonic)
         } else {
-            info!("🔑 Generating new coordinator private key");
+            info!("Generating new coordinator private key");
 
             if let Some(parent) = Path::new(&key_file).parent() {
                 fs::create_dir_all(parent)
@@ -435,13 +432,13 @@ impl KeyMeldE2ETest {
             fs::write(&key_file, mnemonic.to_string())
                 .map_err(|e| anyhow!("Failed to write key file: {e}"))?;
 
-            info!("💾 Coordinator private key saved to {}", key_file);
+            info!("Coordinator private key saved to {}", key_file);
             Ok(mnemonic)
         }
     }
 
     pub async fn load_participants(&mut self) -> Result<()> {
-        info!("👥 Loading participant keys...");
+        info!("Loading participant keys...");
         self.participants.clear();
         self.participant_user_ids.clear();
         self.sdk_participant_clients.clear();
@@ -449,13 +446,13 @@ impl KeyMeldE2ETest {
         for i in 1..self.config.num_signers as usize {
             let key_file = format!("{}/participant_{}.key", self.config.key_files_dir, i);
             let mnemonic = if Path::new(&key_file).exists() {
-                info!("📁 Loading participant {} key from {}", i, key_file);
+                info!("Loading participant {} key from {}", i, key_file);
                 let key_content = read_to_string(&key_file)
                     .map_err(|e| anyhow!("Failed to read key file {key_file}: {e}"))?;
                 Mnemonic::from_str(key_content.trim())
                     .map_err(|e| anyhow!("Invalid mnemonic in key file: {e}"))?
             } else {
-                info!("🔑 Generating new participant {} key", i);
+                info!("Generating new participant {} key", i);
                 if let Some(parent) = Path::new(&key_file).parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| anyhow!("Failed to create key directory: {e}"))?;
@@ -469,7 +466,7 @@ impl KeyMeldE2ETest {
                 fs::write(&key_file, mnemonic.to_string())
                     .map_err(|e| anyhow!("Failed to write key file: {e}"))?;
 
-                info!("💾 Participant {} key saved to {}", i, key_file);
+                info!("Participant {} key saved to {}", i, key_file);
                 mnemonic
             };
             let participant = Participant::new(mnemonic, self.config.network, i as u32)?;
@@ -489,32 +486,32 @@ impl KeyMeldE2ETest {
             self.sdk_participant_clients.push(sdk_client);
         }
 
-        info!("✅ Loaded {} participants", self.participants.len());
+        info!("Loaded {} participants", self.participants.len());
         Ok(())
     }
 
     pub async fn fund_coordinator_from_master(&mut self) -> Result<()> {
-        info!("💰 Funding coordinator from master wallet...");
+        info!("Funding coordinator from master wallet...");
 
         let coordinator_address = self
             .coordinator_wallet
             .peek_address(KeychainKind::External, 0)
             .address;
-        info!("📍 Coordinator address: {}", coordinator_address);
+        info!("Coordinator address: {}", coordinator_address);
 
         let current_balance = self.coordinator_wallet.balance().total();
         let required_amount = self.amount + 10_000;
 
         if current_balance.to_sat() >= required_amount {
             info!(
-                "✅ Coordinator already has sufficient funds: {} sats",
+                "Coordinator already has sufficient funds: {} sats",
                 current_balance.to_sat()
             );
             return Ok(());
         }
 
         let funding_amount = required_amount - current_balance.to_sat() + 50_000; // Extra buffer
-        info!("💸 Sending {} sats to coordinator", funding_amount);
+        info!("Sending {} sats to coordinator", funding_amount);
 
         let funding_txid = if let Some(ref batcher) = self.rpc_batcher {
             // Use batcher for high concurrency - avoids overwhelming bitcoind
@@ -542,20 +539,20 @@ impl KeyMeldE2ETest {
             .await?
         };
 
-        info!("📡 Funding transaction: {}", funding_txid);
+        info!("Funding transaction: {}", funding_txid);
 
         // Wait for confirmation
         if let Some(ref batcher) = self.rpc_batcher {
             // High concurrency mode: use batcher for confirmation polling
             // Background miner handles block generation
-            info!("⏳ Waiting for background miner to confirm transaction...");
+            info!("Waiting for background miner to confirm transaction...");
             let confirmations = batcher
                 .wait_for_confirmation(&funding_txid.to_string(), 1)
                 .await?;
-            info!("✅ Funding confirmed with {} confirmations", confirmations);
+            info!("Funding confirmed with {} confirmations", confirmations);
         } else {
             // Low concurrency mode: generate blocks ourselves
-            info!("⛏️ Mining block to confirm transaction...");
+            info!("Mining block to confirm transaction...");
             let addr = self
                 .coordinator_wallet
                 .peek_address(KeychainKind::External, 1)
@@ -564,7 +561,7 @@ impl KeyMeldE2ETest {
                 self.rpc_client.generate_to_address(1, &addr)
             })
             .await?;
-            info!("✅ Funding confirmed");
+            info!("Funding confirmed");
         }
 
         Ok(())
@@ -575,7 +572,7 @@ impl KeyMeldE2ETest {
         aggregate_key_hex: &str,
         _keygen_session_id: &SessionId,
     ) -> Result<OutPoint> {
-        info!("💰 Funding aggregate key address...");
+        info!("Funding aggregate key address...");
 
         // Parse the aggregate public key (already decrypted by SDK)
         let key_bytes = hex::decode(aggregate_key_hex)
@@ -586,7 +583,7 @@ impl KeyMeldE2ETest {
         let aggregate_pubkey = TweakedPublicKey::dangerous_assume_tweaked(x_only);
 
         let aggregate_address = Address::p2tr_tweaked(aggregate_pubkey, self.config.network);
-        info!("📍 Aggregate key address: {}", aggregate_address);
+        info!("Aggregate key address: {}", aggregate_address);
 
         let coordinator_address = self
             .coordinator_wallet
@@ -620,7 +617,7 @@ impl KeyMeldE2ETest {
             .await?
         };
 
-        info!("📡 Funding transaction: {}", funding_txid);
+        info!("Funding transaction: {}", funding_txid);
 
         // Skip generate_to_address when using batcher - background miner handles it
         if self.rpc_batcher.is_none() {
@@ -635,7 +632,7 @@ impl KeyMeldE2ETest {
             batcher
                 .wait_for_confirmation(&funding_txid.to_string(), 1)
                 .await?;
-            info!("✅ Aggregate funding confirmed");
+            info!("Aggregate funding confirmed");
         } else {
             loop {
                 sleep(Duration::from_secs(1)).await;
@@ -647,7 +644,7 @@ impl KeyMeldE2ETest {
                 .await
                 {
                     if info.info.confirmations >= 1 {
-                        info!("✅ Aggregate funding confirmed");
+                        info!("Aggregate funding confirmed");
                         break;
                     }
                 }
@@ -669,7 +666,7 @@ impl KeyMeldE2ETest {
         for (vout, output) in funding_tx.output.iter().enumerate() {
             if output.script_pubkey == aggregate_script_pubkey {
                 found_vout = Some(vout as u32);
-                info!("✅ Found aggregate key output at index {}", vout);
+                info!("Found aggregate key output at index {}", vout);
                 break;
             }
         }
@@ -692,7 +689,7 @@ impl KeyMeldE2ETest {
         &mut self,
         funding_output: &dlctix::bitcoin::TxOut,
     ) -> Result<dlctix::bitcoin::OutPoint> {
-        info!("💰 Funding dlctix output...");
+        info!("Funding dlctix output...");
 
         // Convert dlctix script_pubkey to bitcoin Address
         let script_pubkey_bytes = funding_output.script_pubkey.as_bytes();
@@ -700,7 +697,7 @@ impl KeyMeldE2ETest {
         let address = bitcoin::Address::from_script(&script_pubkey, self.config.network)
             .map_err(|e| anyhow!("Failed to derive address from script: {}", e))?;
 
-        info!("📍 DLC funding address: {}", address);
+        info!("DLC funding address: {}", address);
 
         let coordinator_address = self
             .coordinator_wallet
@@ -733,7 +730,7 @@ impl KeyMeldE2ETest {
             .await?
         };
 
-        info!("📡 Funding transaction: {}", funding_txid);
+        info!("Funding transaction: {}", funding_txid);
 
         // Skip generate_to_address when using batcher - background miner handles it
         if self.rpc_batcher.is_none() {
@@ -748,7 +745,7 @@ impl KeyMeldE2ETest {
             batcher
                 .wait_for_confirmation(&funding_txid.to_string(), 1)
                 .await?;
-            info!("✅ DLC funding confirmed");
+            info!("DLC funding confirmed");
         } else {
             loop {
                 sleep(Duration::from_secs(1)).await;
@@ -760,7 +757,7 @@ impl KeyMeldE2ETest {
                 .await
                 {
                     if info.info.confirmations >= 1 {
-                        info!("✅ DLC funding confirmed");
+                        info!("DLC funding confirmed");
                         break;
                     }
                 }
@@ -781,7 +778,7 @@ impl KeyMeldE2ETest {
         for (vout, output) in funding_tx.output.iter().enumerate() {
             if output.script_pubkey == target_script_pubkey {
                 found_vout = Some(vout as u32);
-                info!("✅ Found DLC funding output at index {}", vout);
+                info!("Found DLC funding output at index {}", vout);
                 break;
             }
         }
@@ -806,7 +803,7 @@ impl KeyMeldE2ETest {
         _keygen_session_id: &SessionId,
         aggregate_utxo: &OutPoint,
     ) -> Result<Psbt> {
-        info!("📝 Creating MuSig2 transaction...");
+        info!("Creating MuSig2 transaction...");
 
         // Parse the aggregate public key (already decrypted by SDK)
         let key_bytes = hex::decode(aggregate_key_hex)
@@ -820,7 +817,7 @@ impl KeyMeldE2ETest {
         // So we use it directly without applying another tweak
         let aggregate_pubkey = TweakedPublicKey::dangerous_assume_tweaked(x_only_key);
 
-        info!("🔍 Key details for transaction:");
+        info!("Key details for transaction:");
         info!("  - Aggregate key hex: {}", aggregate_key_hex);
         info!(
             "  - Aggregate key (compressed): {}",
@@ -857,7 +854,7 @@ impl KeyMeldE2ETest {
             ));
         }
 
-        info!("✅ UTXO scriptPubKey verification passed - matches current aggregate key");
+        info!("UTXO scriptPubKey verification passed - matches current aggregate key");
 
         if input_amount.to_sat() < self.amount {
             return Err(anyhow!(
@@ -904,7 +901,7 @@ impl KeyMeldE2ETest {
         // psbt.inputs[0].tap_internal_key = Some(x_only_key);
 
         info!(
-            "✅ Transaction created with {} inputs and {} outputs",
+            "Transaction created with {} inputs and {} outputs",
             psbt.unsigned_tx.input.len(),
             psbt.unsigned_tx.output.len()
         );
@@ -1019,7 +1016,7 @@ impl KeyMeldE2ETest {
             match status.status {
                 KeygenStatusKind::CollectingParticipants => {
                     info!(
-                        "✅ Session {} is now accepting participants (attempt {})",
+                        "Session {} is now accepting participants (attempt {})",
                         keygen_session_id, attempt
                     );
                     return Ok(());
@@ -1060,7 +1057,7 @@ impl KeyMeldE2ETest {
         &mut self,
         keygen_session_id: &SessionId,
     ) -> Result<()> {
-        info!("📝 Registering keygen participants...");
+        info!("Registering keygen participants...");
 
         // Wait for all enclaves to be healthy before proceeding
         self.wait_for_all_enclaves_healthy().await?;
@@ -1101,7 +1098,7 @@ impl KeyMeldE2ETest {
                 // Retry on race condition errors (session not yet initialized)
                 if Self::is_race_condition_error(&error_text) && attempt < MAX_SLOTS_RETRIES {
                     warn!(
-                        "⚠️  Slots request race condition (attempt {}/{}): {}. Retrying in {}ms...",
+                        "Slots request race condition (attempt {}/{}): {}. Retrying in {}ms...",
                         attempt, MAX_SLOTS_RETRIES, error_text, SLOTS_RETRY_DELAY_MS
                     );
                     tokio::time::sleep(Duration::from_millis(SLOTS_RETRY_DELAY_MS)).await;
@@ -1130,17 +1127,17 @@ impl KeyMeldE2ETest {
         );
 
         // Try participant registration - individual methods now handle race condition retries
-        info!("🚀 Starting participant registration with race condition protection...");
+        info!("Starting participant registration with race condition protection...");
         match self
             .try_register_all_participants(keygen_session_id, &slots_response)
             .await
         {
             Ok(_) => {
-                info!("✅ Successfully registered all participants (race condition fix working)");
+                info!("Successfully registered all participants (race condition fix working)");
             }
             Err(e) => {
                 error!(
-                    "❌ Failed to register participants despite race condition fixes: {}",
+                    "Failed to register participants despite race condition fixes: {}",
                     e
                 );
                 return Err(e);
@@ -1151,7 +1148,7 @@ impl KeyMeldE2ETest {
     }
 
     async fn wait_for_all_enclaves_healthy(&self) -> Result<()> {
-        info!("🏥 Waiting for all enclaves to be healthy...");
+        info!("Waiting for all enclaves to be healthy...");
 
         let mut retry_count = 0;
         const MAX_HEALTH_RETRIES: u32 = 30;
@@ -1171,13 +1168,13 @@ impl KeyMeldE2ETest {
                             let total_enclaves = health_data.total_enclaves as u64;
 
                             info!(
-                                "🏥 Health check: {}/{} enclaves healthy",
+                                "Health check: {}/{} enclaves healthy",
                                 healthy_enclaves, total_enclaves
                             );
 
                             if total_enclaves > 0 && healthy_enclaves == total_enclaves {
                                 info!(
-                                    "✅ All {} enclaves are healthy, proceeding with registration",
+                                    "All {} enclaves are healthy, proceeding with registration",
                                     total_enclaves
                                 );
                                 return Ok(());
@@ -1469,14 +1466,14 @@ impl KeyMeldE2ETest {
 
             if status.registered_participants >= self.config.num_signers as usize {
                 info!(
-                    "✅ All {} participants registered",
+                    "All {} participants registered",
                     status.registered_participants
                 );
                 break;
             }
 
             info!(
-                "⏳ Waiting for participants: {}/{}",
+                "Waiting for participants: {}/{}",
                 status.registered_participants, self.config.num_signers
             );
             sleep(Duration::from_secs(1)).await;
@@ -1489,7 +1486,7 @@ impl KeyMeldE2ETest {
         &mut self,
         keygen_session_id: &SessionId,
     ) -> Result<String> {
-        info!("⏳ Waiting for keygen completion...");
+        info!("Waiting for keygen completion...");
 
         loop {
             let session_signature = self.generate_session_signature(keygen_session_id)?;
@@ -1615,7 +1612,7 @@ impl KeyMeldE2ETest {
             ));
         }
 
-        info!("✅ Signing session {} created", signing_session_id);
+        info!("Signing session {} created", signing_session_id);
         Ok(signing_session_id)
     }
 
@@ -1624,7 +1621,7 @@ impl KeyMeldE2ETest {
         signing_session_id: &SessionId,
         keygen_session_id: &SessionId,
     ) -> Result<Vec<u8>> {
-        info!("⏳ Waiting for signing completion...");
+        info!("Waiting for signing completion...");
 
         loop {
             let user_signature = self.generate_user_signature(
@@ -1683,16 +1680,16 @@ impl KeyMeldE2ETest {
                     return Err(anyhow!("Signing session failed"));
                 }
                 SigningStatusKind::CollectingParticipants => {
-                    info!("⏳ Signing still collecting participants...");
+                    info!("Signing still collecting participants...");
                 }
                 SigningStatusKind::InitializingSession => {
-                    info!("🔧 Initializing signing session and generating nonces...");
+                    info!("Initializing signing session and generating nonces...");
                 }
                 SigningStatusKind::DistributingNonces => {
-                    info!("📤 Distributing nonces and generating partial signatures...");
+                    info!("Distributing nonces and generating partial signatures...");
                 }
                 SigningStatusKind::FinalizingSignature => {
-                    info!("✍️  Finalizing signature...");
+                    info!("Finalizing signature...");
                 }
             }
 
@@ -1705,7 +1702,7 @@ impl KeyMeldE2ETest {
         mut psbt: Psbt,
         signature: &[u8],
     ) -> Result<Transaction> {
-        info!("📝 Applying signature to transaction...");
+        info!("Applying signature to transaction...");
 
         if signature.len() != 64 {
             return Err(anyhow!(
@@ -1729,9 +1726,9 @@ impl KeyMeldE2ETest {
 
         let signed_tx = psbt.extract_tx()?;
 
-        info!("🔍 Transaction being broadcast:");
+        info!("Transaction being broadcast:");
         info!("  - Transaction ID: {}", signed_tx.compute_txid());
-        info!("✅ Transaction signed successfully");
+        info!("Transaction signed successfully");
 
         // Use batcher if enabled, otherwise direct RPC
         let txid = if let Some(ref batcher) = self.rpc_batcher {
@@ -1745,7 +1742,7 @@ impl KeyMeldE2ETest {
             .await?
         };
 
-        info!("📡 Transaction broadcast successfully: {}", txid);
+        info!("Transaction broadcast successfully: {}", txid);
 
         Ok(signed_tx)
     }
@@ -1975,7 +1972,7 @@ impl KeyMeldE2ETest {
         keygen_session_id: &SessionId,
         message_hash: [u8; 32],
     ) -> Result<Vec<u8>> {
-        info!("✍️ Running complete signing flow using SDK...");
+        info!("Running complete signing flow using SDK...");
 
         // Get the session secret stored during keygen
         let session_secret_hex = self
@@ -2022,20 +2019,20 @@ impl KeyMeldE2ETest {
             .map_err(|e| anyhow!("Failed to create signing session: {e}"))?;
 
         let signing_session_id = signing_session.session_id().clone();
-        info!("✅ Signing session created: {}", signing_session_id);
+        info!("Signing session created: {}", signing_session_id);
 
         // Coordinator approves
-        info!("👤 Coordinator approving...");
+        info!("Coordinator approving...");
         signing_session
             .approve(&expected_batch)
             .await
             .map_err(|e| anyhow!("Coordinator approval failed: {e}"))?;
-        info!("✅ Coordinator approved");
+        info!("Coordinator approved");
 
         // Participants requiring approval
         for idx in &self.participants_requiring_approval {
             if *idx < self.sdk_participant_clients.len() {
-                info!("👤 Participant {} approving...", idx);
+                info!("Participant {} approving...", idx);
 
                 let client = &self.sdk_participant_clients[*idx];
 
@@ -2075,14 +2072,14 @@ impl KeyMeldE2ETest {
                     .await
                     .map_err(|e| anyhow!("Participant {} approval failed: {e}", idx))?;
 
-                info!("✅ Participant {} approved", idx);
+                info!("Participant {} approved", idx);
             }
         }
 
-        info!("✅ All required approvals completed");
+        info!("All required approvals completed");
 
         // Wait for completion
-        info!("⏳ Waiting for signing completion...");
+        info!("Waiting for signing completion...");
         let results = signing_session
             .wait_for_completion()
             .await
@@ -2098,10 +2095,7 @@ impl KeyMeldE2ETest {
             .ok_or_else(|| anyhow!("Signature not available"))?
             .clone();
 
-        info!(
-            "✅ Signing complete, signature: {}",
-            hex::encode(&signature)
-        );
+        info!("Signing complete, signature: {}", hex::encode(&signature));
         Ok(signature)
     }
 }

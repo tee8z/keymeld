@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use anyhow::{Context, Result};
 use keymeld_core::managed_socket::config::{RetryConfig, TimeoutConfig};
@@ -49,10 +49,90 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub enable_cors: bool,
+    /// Exact browser origins permitted by CORS. An empty list permits no cross-origin access.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
     pub enable_compression: bool,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
     /// File containing a 32-byte hex bearer credential. Without it the admin UI is disabled.
     #[serde(default)]
     pub operator_token_file: Option<String>,
+}
+
+/// Process-local admission limits for API mutations and enclave attestation requests.
+/// Client IPs are network identities, not authenticated users or account quotas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    pub per_ip_burst: u32,
+    pub per_ip_requests_per_second: u32,
+    pub global_burst: u32,
+    pub global_requests_per_second: u32,
+    pub max_tracked_ips: usize,
+    /// Only these direct peers may supply the configured client IP header.
+    pub trusted_proxy_ips: Vec<IpAddr>,
+    /// A proxy must overwrite this header with one IP address, never append a chain.
+    pub client_ip_header: Option<String>,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_ip_burst: 512,
+            per_ip_requests_per_second: 30,
+            global_burst: 2048,
+            global_requests_per_second: 120,
+            max_tracked_ips: 8192,
+            trusted_proxy_ips: Vec::new(),
+            client_ip_header: None,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.per_ip_burst == 0
+            || self.per_ip_requests_per_second == 0
+            || self.global_burst == 0
+            || self.global_requests_per_second == 0
+            || self.max_tracked_ips == 0
+        {
+            anyhow::bail!("Rate limit bursts, refill rates, and max_tracked_ips must be positive");
+        }
+        if self.trusted_proxy_ips.is_empty() != self.client_ip_header.is_none() {
+            anyhow::bail!(
+                "Configure both rate_limit.trusted_proxy_ips and client_ip_header, or neither"
+            );
+        }
+        if let Some(header) = &self.client_ip_header {
+            axum::http::HeaderName::from_bytes(header.as_bytes())
+                .context("Invalid rate_limit.client_ip_header")?;
+        }
+        Ok(())
+    }
+}
+
+impl ServerConfig {
+    pub(crate) fn cors_origins(&self) -> Result<Vec<axum::http::HeaderValue>> {
+        self.cors_allowed_origins
+            .iter()
+            .map(|origin| {
+                let uri: axum::http::Uri = origin.parse().context("Invalid CORS origin")?;
+                if !matches!(uri.scheme_str(), Some("https" | "http"))
+                    || uri.authority().is_none()
+                    || uri.host().is_none_or(|host| host.is_empty() || host.contains('*'))
+                    || uri.authority().is_some_and(|authority| authority.as_str().contains('@'))
+                    || uri.path_and_query().is_some_and(|path| path.as_str() != "/")
+                    || origin.ends_with('/')
+                    || origin.contains('#')
+                {
+                    anyhow::bail!("CORS origins must be exact http(s) origins without paths, credentials, or wildcards");
+                }
+                origin.parse().context("Invalid CORS origin header")
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +355,7 @@ pub use keymeld_core::logging::LoggingConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
+    /// Must match the enclave channel credential's actual attestation verification mode.
     pub enable_attestation: bool,
     pub strict_validation: bool,
     pub allow_insecure_connections: bool,
@@ -418,6 +499,14 @@ impl Config {
         if let Ok(cors) = std::env::var("KEYMELD_ENABLE_CORS") {
             self.server.enable_cors = cors.parse().unwrap_or(true);
         }
+        if let Ok(origins) = std::env::var("KEYMELD_CORS_ALLOWED_ORIGINS") {
+            self.server.cors_allowed_origins = origins
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         if let Ok(path) = std::env::var("KEYMELD_OPERATOR_TOKEN_FILE") {
             self.server.operator_token_file = Some(path);
         }
@@ -477,6 +566,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.server.cors_origins()?;
+        self.server.rate_limit.validate()?;
         if self.server.port == 0 {
             anyhow::bail!("Server port cannot be 0");
         }
@@ -550,6 +641,20 @@ impl Config {
             anyhow::bail!("Attestation is required in production environment for security");
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn validate_channel_attestation(&self, verification_enabled: bool) -> Result<()> {
+        if self.security.enable_attestation != verification_enabled {
+            anyhow::bail!(
+                "security.enable_attestation must match the enclave channel verification policy; \
+                 enable verification with pinned KEYMELD_ENCLAVE_PCR0 or PCR8, or explicitly set \
+                 both enable_attestation=false and KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=true for development"
+            );
+        }
+        if self.environment.is_production() && !verification_enabled {
+            anyhow::bail!("Enclave channel attestation verification is required in production");
+        }
         Ok(())
     }
 
@@ -652,7 +757,9 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8090,
             enable_cors: true,
+            cors_allowed_origins: Vec::new(),
             enable_compression: true,
+            rate_limit: RateLimitConfig::default(),
             operator_token_file: None,
         }
     }
@@ -815,6 +922,60 @@ require_tls = false
         config.server.port = 8090;
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cors_requires_exact_origins_and_rate_limits_require_valid_proxy_configuration() {
+        let mut config = Config::default();
+        for invalid in [
+            "*",
+            "null",
+            "https://*.example",
+            "https://wallet.example/",
+            "https://wallet.example/path",
+            "https://user@wallet.example",
+            "https://wallet.example?query",
+            "https://wallet.example#fragment",
+        ] {
+            config.server.cors_allowed_origins = vec![invalid.into()];
+            assert!(config.validate().is_err(), "{invalid}");
+        }
+        config.server.cors_allowed_origins = vec![
+            "https://wallet.example".into(),
+            "http://localhost:8090".into(),
+        ];
+        assert!(config.validate().is_ok());
+        config.server.rate_limit.client_ip_header = Some("x-real-ip".into());
+        assert!(config.validate().is_err());
+        config.server.rate_limit.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        assert!(config.validate().is_ok());
+        config.server.rate_limit.per_ip_burst = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn attestation_setting_must_match_channel_verification_and_production_cannot_bypass_it() {
+        let credentials =
+            crate::enclave::channel::ChannelCredentials::dangerous_trust_unattested_enclaves(
+                [42; 32],
+            )
+            .unwrap();
+        let mut config = Config::default();
+        assert!(config
+            .validate_channel_attestation(credentials.verifies_attestation())
+            .is_err());
+        config.security.enable_attestation = false;
+        assert!(config
+            .validate_channel_attestation(credentials.verifies_attestation())
+            .is_ok());
+        assert!(config.validate_channel_attestation(true).is_err());
+
+        let mut production = Config::default_for_environment(Environment::Production);
+        assert!(production.validate().is_ok());
+        assert!(production.validate_channel_attestation(true).is_ok());
+        assert!(production.validate_channel_attestation(false).is_err());
+        production.security.enable_attestation = false;
+        assert!(production.validate_channel_attestation(false).is_err());
     }
 
     #[test]

@@ -9,7 +9,7 @@ mkdir -p "${PWD}/logs"
 
 # Check if Bitcoin Core is already running
 if pgrep -f "bitcoind.*regtest" >/dev/null 2>&1; then
-    echo "⚠️  Bitcoin Core already running"
+    echo "Bitcoin Core already running"
     echo "PID: $(pgrep -f "bitcoind.*regtest")"
     echo "To stop: pkill -f bitcoind"
     exit 0
@@ -65,7 +65,7 @@ elif command -v bitcoind >/dev/null 2>&1; then
         -maxconnections=20 \
         -assumevalid=0
 else
-    echo "❌ Bitcoin Core not found!"
+    echo "Bitcoin Core not found!"
     echo "Install with:"
     echo "  - Nix: nix-shell -p bitcoin"
     echo "  - apt: sudo apt install bitcoin-core"
@@ -92,7 +92,7 @@ if pgrep -f "bitcoind.*regtest" >/dev/null 2>&1; then
         fi
 
         if [ $i -eq 15 ]; then
-            echo "❌ Bitcoin RPC failed"
+            echo "Bitcoin RPC failed"
             exit 1
         fi
         sleep 2
@@ -101,12 +101,12 @@ if pgrep -f "bitcoind.*regtest" >/dev/null 2>&1; then
     # Final stability check
     sleep 2
     if ! bitcoin-cli -regtest -rpcuser=keymeld -rpcpassword=keymeldpass123 -datadir="$BITCOIN_DATA_DIR" getblockchaininfo >/dev/null 2>&1; then
-        echo "❌ Bitcoin RPC unstable"
+        echo "Bitcoin RPC unstable"
         exit 1
     fi
 
 else
-    echo "❌ Bitcoin Core failed to start"
+    echo "Bitcoin Core failed to start"
     echo "Check logs in: $BITCOIN_DATA_DIR/regtest/debug.log"
     exit 1
 fi

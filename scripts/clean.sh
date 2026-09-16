@@ -2,8 +2,8 @@
 # Clean all KeyMeld data and stop services
 set -euo pipefail
 
-echo "🧹 Cleaning all data..."
-echo "🛑 Stopping services..."
+echo "Cleaning all data..."
+echo "Stopping services..."
 # Kill keymeld processes - use pgrep to find PIDs then kill individually
 # This avoids pkill -f which can match parent shell command lines
 for proc in keymeld-gateway keymeld-enclave keymeld_demo keymeld_session_test; do
@@ -28,11 +28,11 @@ if pgrep -x bitcoind >/dev/null 2>&1; then
     pkill -9 -x bitcoind 2>/dev/null || true
     sleep 1
 fi
-echo "✅ All services stopped"
+echo "All services stopped"
 rm -rf data logs result
 # Only clean binaries if not using pre-built (CI sets SKIP_BUILD)
 if [ -z "${SKIP_BUILD:-}" ]; then
     rm -rf target/debug/keymeld-* target/debug/keymeld_*
 fi
 mkdir -p data logs
-echo "✅ Clean complete"
+echo "Clean complete"

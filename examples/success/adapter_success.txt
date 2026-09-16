@@ -1,56 +1,56 @@
-🚀 Starting KeyMeld adaptor signatures quickstart...
-🔧 Setting up VSock (CI-friendly, no password prompts)...
-[WARN] ⚠️  Passwordless sudo not available (this is OK, will use fallback mode)
-🧹 Cleaning all data...
-🛑 Stopping services...
-✅ All services stopped
-✅ Clean complete
+Starting KeyMeld adaptor signatures quickstart...
+Setting up VSock (CI-friendly, no password prompts)...
+[WARN] Passwordless sudo not available (this is OK, will use fallback mode)
+Cleaning all data...
+Stopping services...
+All services stopped
+Clean complete
 Building binaries...
 warning: Git tree '/home/teebz/repos/keymeld' is dirty
-🚀 KeyMeld Development Environment (Rust 1.88.0)
+KeyMeld Development Environment (Rust 1.88.0)
 Use 'just help' to see available commands
-✅ VSock available for enclave simulation
+VSock available for enclave simulation
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.88s
 warning: Git tree '/home/teebz/repos/keymeld' is dirty
-🚀 KeyMeld Development Environment (Rust 1.88.0)
+KeyMeld Development Environment (Rust 1.88.0)
 Use 'just help' to see available commands
-✅ VSock available for enclave simulation
-[WARN] ⚠️  vhost_vsock: Not available or failed to load (will use fallback mode)
-[WARN] ⚠️  vmw_vsock_loopback: Not available or failed to load (will use fallback mode)
-[WARN] ⚠️  vsock: Not available or failed to load (will use fallback mode)
-[WARN] ⚠️  vsock_loopback: Not available or failed to load (will use fallback mode)
+VSock available for enclave simulation
+[WARN] vhost_vsock: Not available or failed to load (will use fallback mode)
+[WARN] vmw_vsock_loopback: Not available or failed to load (will use fallback mode)
+[WARN] vsock: Not available or failed to load (will use fallback mode)
+[WARN] vsock_loopback: Not available or failed to load (will use fallback mode)
 [WARN] No VSock modules loaded - will use TCP fallback
-[WARN] 🔄 Falling back to TCP-only mode...
+[WARN] Falling back to TCP-only mode...
    Access enclaves via:
    - Enclave 0: localhost:9000 → localhost:5000
    - Enclave 1: localhost:9001 → localhost:5001
    - Enclave 2: localhost:9002 → localhost:5002
-[SUCCESS] 🎉 VSock setup complete with TCP fallback mode!
-🏦 Setting up Bitcoin regtest environment...
+[SUCCESS] VSock setup complete with TCP fallback mode!
+Setting up Bitcoin regtest environment...
 Starting Bitcoin Core...
 Bitcoin Core starting
 Waiting for Bitcoin Core to start...
 Bitcoin Core RPC ready
 Generating initial blocks...
-✅ Bitcoin regtest ready with funded coordinator wallet
-🚀 Starting KeyMeld services...
-✅ Moto already running
-✅ Services started! Logs available in logs/ directory
-🌐 Gateway: http://localhost:8080
-⏳ Waiting for gateway to be ready...
-✅ Gateway is ready!
-⏳ Waiting for enclaves to initialize...
-🎮 Running KeyMeld adaptor demo...
+Bitcoin regtest ready with funded coordinator wallet
+Starting KeyMeld services...
+Moto already running
+Services started! Logs available in logs/ directory
+Gateway: http://localhost:8080
+Waiting for gateway to be ready...
+Gateway is ready!
+Waiting for enclaves to initialize...
+Running KeyMeld adaptor demo...
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
      Running `target/debug/keymeld_demo adaptor --config config/example-nix.yaml --amount 50000 --destination bcrt1qf0p0zqynlcq7c4j6vm53qaxapm3chufwfgge80`
 2026-01-10T22:23:40.867115Z  INFO keymeld_demo::adaptor: Loaded configuration for adaptor signatures test
-2026-01-10T22:23:40.867175Z  INFO keymeld_examples::harness::test: 🔧 Initializing KeyMeld E2E Test
+2026-01-10T22:23:40.867175Z  INFO keymeld_examples::harness::test: Initializing KeyMeld E2E Test
 2026-01-10T22:23:40.867197Z  INFO keymeld_examples::harness::test: Network: regtest
 2026-01-10T22:23:40.867232Z  INFO keymeld_examples::harness::test: Participants: 2
 2026-01-10T22:23:40.867241Z  INFO keymeld_examples::harness::test: Amount: 50000 sats
-2026-01-10T22:23:40.867613Z  INFO keymeld_examples::harness::test: 📁 Loading existing coordinator private key from /tmp/keymeld-keys/coordinator.key
-2026-01-10T22:23:40.867798Z  INFO keymeld_examples::harness::test: 👤 Coordinator user ID: 019baa02-1143-7980-b2b7-8ac9fa283a64
-2026-01-10T22:23:40.956216Z  INFO keymeld_demo::adaptor: 🔧 KeyMeld Adaptor Signatures E2E Test (SDK)
+2026-01-10T22:23:40.867613Z  INFO keymeld_examples::harness::test: Loading existing coordinator private key from /tmp/keymeld-keys/coordinator.key
+2026-01-10T22:23:40.867798Z  INFO keymeld_examples::harness::test: Coordinator user ID: 019baa02-1143-7980-b2b7-8ac9fa283a64
+2026-01-10T22:23:40.956216Z  INFO keymeld_demo::adaptor: KeyMeld Adaptor Signatures E2E Test (SDK)
 2026-01-10T22:23:40.956257Z  INFO keymeld_demo::adaptor: =============================================
 2026-01-10T22:23:40.956273Z  INFO keymeld_demo::adaptor: Network: regtest
 2026-01-10T22:23:40.956286Z  INFO keymeld_demo::adaptor: Gateway: http://127.0.0.1:8080
@@ -60,99 +60,99 @@ Generating initial blocks...
 2026-01-10T22:23:40.956337Z  INFO keymeld_demo::adaptor:   - And adaptor: true
 2026-01-10T22:23:40.956350Z  INFO keymeld_demo::adaptor:   - Or adaptor: true
 2026-01-10T22:23:40.956362Z  INFO keymeld_demo::adaptor:   - Skip regular signing: false
-2026-01-10T22:23:40.956377Z  INFO keymeld_examples::harness::test: 👥 Loading participant keys...
-2026-01-10T22:23:40.956406Z  INFO keymeld_examples::harness::test: 📁 Loading participant 1 key from /tmp/keymeld-keys/participant_1.key
-2026-01-10T22:23:41.044502Z  INFO keymeld_examples::harness::test: ✅ Loaded 1 participants
-2026-01-10T22:23:41.044555Z  INFO keymeld_examples::harness::test: 💰 Funding coordinator from master wallet...
-2026-01-10T22:23:41.046024Z  INFO keymeld_examples::harness::test: 📍 Coordinator address: bcrt1p9zkwzyk7xqrm9gs77uezdnm8jayx940rlxfjtu4zs0tmdpum4gqqgy7cyx
-2026-01-10T22:23:41.046093Z  INFO keymeld_examples::harness::test: 💸 Sending 110000 sats to coordinator
-2026-01-10T22:23:41.069809Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: 4bf6cd108ed4764e9e9ef4da9c4cf90550bc20d1d6f6f49ab164dd443dd6d3d5
-2026-01-10T22:23:41.069870Z  INFO keymeld_examples::harness::test: ⛏️ Mining block to confirm transaction...
-2026-01-10T22:23:41.072637Z  INFO keymeld_examples::harness::test: ✅ Funding confirmed
-2026-01-10T22:23:41.072684Z  INFO keymeld_demo::adaptor: 🔑 Starting Phase 1: Keygen Session (SDK)
-2026-01-10T22:23:41.072701Z  INFO keymeld_examples::harness::test: 🔑 Running complete keygen flow using SDK...
-2026-01-10T22:23:41.072749Z  INFO keymeld_examples::harness::test: 🏥 Waiting for all enclaves to be healthy...
-2026-01-10T22:23:41.081676Z  INFO keymeld_examples::harness::test: 🏥 Health check: 3/3 enclaves healthy
-2026-01-10T22:23:41.081717Z  INFO keymeld_examples::harness::test: ✅ All 3 enclaves are healthy, proceeding with registration
-2026-01-10T22:23:41.101655Z  INFO keymeld_examples::harness::test: ✅ Keygen session created: 019baa02-121a-7ea3-831b-1da6d611414c
-2026-01-10T22:23:41.101752Z  INFO keymeld_examples::harness::test: 👤 Registering coordinator...
-2026-01-10T22:23:41.114558Z  INFO keymeld_examples::harness::test: ✅ Coordinator registered
-2026-01-10T22:23:41.114628Z  INFO keymeld_examples::harness::test: 👤 Registering participant 0...
-2026-01-10T22:23:41.134578Z  INFO keymeld_examples::harness::test: ✅ Participant 0 registered
-2026-01-10T22:23:41.134653Z  INFO keymeld_examples::harness::test: ⏳ Waiting for keygen completion...
-2026-01-10T22:23:41.400213Z  INFO keymeld_examples::harness::test: ✅ Keygen complete, aggregate key: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-2026-01-10T22:23:41.400261Z  INFO keymeld_demo::adaptor: ✅ Keygen complete: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-2026-01-10T22:23:41.400289Z  INFO keymeld_examples::harness::test: 💰 Funding aggregate key address...
-2026-01-10T22:23:41.400359Z  INFO keymeld_examples::harness::test: 📍 Aggregate key address: bcrt1puutpz6ahr4e43kw6p4khzvw0gnkzdnk4h826w34aul0v2r4snvmqg08qkz
-2026-01-10T22:23:41.426854Z  INFO keymeld_examples::harness::test: 📡 Funding transaction: 17adf249f6c8518b288ba88ca6d9fb46c4f7bbe043fabc9d9aecceaa44852f00
-2026-01-10T22:23:42.432869Z  INFO keymeld_examples::harness::test: ✅ Aggregate funding confirmed
-2026-01-10T22:23:42.434241Z  INFO keymeld_examples::harness::test: ✅ Found aggregate key output at index 1
-2026-01-10T22:23:42.434273Z  INFO keymeld_examples::harness::test: 📝 Creating MuSig2 transaction...
-2026-01-10T22:23:42.434347Z  INFO keymeld_examples::harness::test: 🔍 Key details for transaction:
+2026-01-10T22:23:40.956377Z  INFO keymeld_examples::harness::test: Loading participant keys...
+2026-01-10T22:23:40.956406Z  INFO keymeld_examples::harness::test: Loading participant 1 key from /tmp/keymeld-keys/participant_1.key
+2026-01-10T22:23:41.044502Z  INFO keymeld_examples::harness::test: Loaded 1 participants
+2026-01-10T22:23:41.044555Z  INFO keymeld_examples::harness::test: Funding coordinator from master wallet...
+2026-01-10T22:23:41.046024Z  INFO keymeld_examples::harness::test: Coordinator address: bcrt1p9zkwzyk7xqrm9gs77uezdnm8jayx940rlxfjtu4zs0tmdpum4gqqgy7cyx
+2026-01-10T22:23:41.046093Z  INFO keymeld_examples::harness::test: Sending 110000 sats to coordinator
+2026-01-10T22:23:41.069809Z  INFO keymeld_examples::harness::test: Funding transaction: 4bf6cd108ed4764e9e9ef4da9c4cf90550bc20d1d6f6f49ab164dd443dd6d3d5
+2026-01-10T22:23:41.069870Z  INFO keymeld_examples::harness::test: Mining block to confirm transaction...
+2026-01-10T22:23:41.072637Z  INFO keymeld_examples::harness::test: Funding confirmed
+2026-01-10T22:23:41.072684Z  INFO keymeld_demo::adaptor: Starting Phase 1: Keygen Session (SDK)
+2026-01-10T22:23:41.072701Z  INFO keymeld_examples::harness::test: Running complete keygen flow using SDK...
+2026-01-10T22:23:41.072749Z  INFO keymeld_examples::harness::test: Waiting for all enclaves to be healthy...
+2026-01-10T22:23:41.081676Z  INFO keymeld_examples::harness::test: Health check: 3/3 enclaves healthy
+2026-01-10T22:23:41.081717Z  INFO keymeld_examples::harness::test: All 3 enclaves are healthy, proceeding with registration
+2026-01-10T22:23:41.101655Z  INFO keymeld_examples::harness::test: Keygen session created: 019baa02-121a-7ea3-831b-1da6d611414c
+2026-01-10T22:23:41.101752Z  INFO keymeld_examples::harness::test: Registering coordinator...
+2026-01-10T22:23:41.114558Z  INFO keymeld_examples::harness::test: Coordinator registered
+2026-01-10T22:23:41.114628Z  INFO keymeld_examples::harness::test: Registering participant 0...
+2026-01-10T22:23:41.134578Z  INFO keymeld_examples::harness::test: Participant 0 registered
+2026-01-10T22:23:41.134653Z  INFO keymeld_examples::harness::test: Waiting for keygen completion...
+2026-01-10T22:23:41.400213Z  INFO keymeld_examples::harness::test: Keygen complete, aggregate key: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:23:41.400261Z  INFO keymeld_demo::adaptor: Keygen complete: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+2026-01-10T22:23:41.400289Z  INFO keymeld_examples::harness::test: Funding aggregate key address...
+2026-01-10T22:23:41.400359Z  INFO keymeld_examples::harness::test: Aggregate key address: bcrt1puutpz6ahr4e43kw6p4khzvw0gnkzdnk4h826w34aul0v2r4snvmqg08qkz
+2026-01-10T22:23:41.426854Z  INFO keymeld_examples::harness::test: Funding transaction: 17adf249f6c8518b288ba88ca6d9fb46c4f7bbe043fabc9d9aecceaa44852f00
+2026-01-10T22:23:42.432869Z  INFO keymeld_examples::harness::test: Aggregate funding confirmed
+2026-01-10T22:23:42.434241Z  INFO keymeld_examples::harness::test: Found aggregate key output at index 1
+2026-01-10T22:23:42.434273Z  INFO keymeld_examples::harness::test: Creating MuSig2 transaction...
+2026-01-10T22:23:42.434347Z  INFO keymeld_examples::harness::test: Key details for transaction:
 2026-01-10T22:23:42.434358Z  INFO keymeld_examples::harness::test:   - Aggregate key hex: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
 2026-01-10T22:23:42.434374Z  INFO keymeld_examples::harness::test:   - Aggregate key (compressed): 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
 2026-01-10T22:23:42.434390Z  INFO keymeld_examples::harness::test:   - Aggregate key (x-only): e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
 2026-01-10T22:23:42.434403Z  INFO keymeld_examples::harness::test:   - Parity: Odd
-2026-01-10T22:23:42.435597Z  INFO keymeld_examples::harness::test: ✅ UTXO scriptPubKey verification passed - matches current aggregate key
-2026-01-10T22:23:42.435650Z  INFO keymeld_examples::harness::test: ✅ Transaction created with 1 inputs and 2 outputs
-2026-01-10T22:23:42.435665Z  INFO keymeld_demo::adaptor: 🔧 Starting Adaptor Signatures Test
-2026-01-10T22:23:42.435676Z  INFO keymeld_examples::harness::adaptor_utils: 🔑 Generating secret for single adaptor signature
-2026-01-10T22:23:42.436085Z  INFO keymeld_examples::harness::adaptor_utils: 🔑 Generating secrets for AND adaptor signature
-2026-01-10T22:23:42.436841Z  INFO keymeld_examples::harness::adaptor_utils: 🔑 Generating secrets for OR adaptor signature
-2026-01-10T22:23:42.437574Z  INFO keymeld_demo::adaptor: 📝 Created 3 adaptor configurations with 5 secrets
+2026-01-10T22:23:42.435597Z  INFO keymeld_examples::harness::test: UTXO scriptPubKey verification passed - matches current aggregate key
+2026-01-10T22:23:42.435650Z  INFO keymeld_examples::harness::test: Transaction created with 1 inputs and 2 outputs
+2026-01-10T22:23:42.435665Z  INFO keymeld_demo::adaptor: Starting Adaptor Signatures Test
+2026-01-10T22:23:42.435676Z  INFO keymeld_examples::harness::adaptor_utils: Generating secret for single adaptor signature
+2026-01-10T22:23:42.436085Z  INFO keymeld_examples::harness::adaptor_utils: Generating secrets for AND adaptor signature
+2026-01-10T22:23:42.436841Z  INFO keymeld_examples::harness::adaptor_utils: Generating secrets for OR adaptor signature
+2026-01-10T22:23:42.437574Z  INFO keymeld_demo::adaptor: Created 3 adaptor configurations with 5 secrets
 2026-01-10T22:23:42.437589Z  INFO keymeld_demo::adaptor:   Config 1: Single with 1 points
 2026-01-10T22:23:42.437597Z  INFO keymeld_demo::adaptor:   Config 2: And with 2 points
 2026-01-10T22:23:42.437605Z  INFO keymeld_demo::adaptor:   Config 3: Or with 2 points
-2026-01-10T22:23:42.437614Z  INFO keymeld_demo::adaptor: ✍️ Starting Phase 2: Signing Session with Adaptor Signatures
+2026-01-10T22:23:42.437614Z  INFO keymeld_demo::adaptor: Starting Phase 2: Signing Session with Adaptor Signatures
 2026-01-10T22:23:42.437746Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
 2026-01-10T22:23:42.437771Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
 2026-01-10T22:23:42.437887Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
 2026-01-10T22:23:42.437901Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-2026-01-10T22:23:42.437975Z  INFO keymeld_demo::adaptor: 🔒 Encrypting 3 adaptor configurations on client side
-2026-01-10T22:23:42.438516Z  INFO keymeld_demo::adaptor: ✅ Verified zero-knowledge privacy: gateway cannot see adaptor IDs or business logic
-2026-01-10T22:23:42.467775Z  INFO keymeld_demo::adaptor: ✅ Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 created with adaptor configurations
-2026-01-10T22:23:42.467880Z  INFO keymeld_demo::adaptor: 🔍 Validating message before approval: cae7084ca97e1db8efe967220eac71a5916f20ca1354c6ac8a36c3ab8ea01d08
-2026-01-10T22:23:42.467901Z  INFO keymeld_examples::harness::test: 📝 Starting approval process for signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 and user: 019baa02-1143-7980-b2b7-8ac9fa283a64
-2026-01-10T22:23:42.472576Z  INFO keymeld_examples::harness::test: ✅ Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 successfully approved for user: 019baa02-1143-7980-b2b7-8ac9fa283a64
-2026-01-10T22:23:42.472639Z  INFO keymeld_demo::adaptor: 🔍 Participant 0 validating message before approval
-2026-01-10T22:23:42.472653Z  INFO keymeld_examples::harness::test: 📝 Starting approval process for signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 and user: 019baa02-11f3-7d70-b239-8cebded68edb
-2026-01-10T22:23:42.476971Z  INFO keymeld_examples::harness::test: ✅ Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 successfully approved for user: 019baa02-11f3-7d70-b239-8cebded68edb
-2026-01-10T22:23:42.477043Z  INFO keymeld_demo::adaptor: ✅ All required approvals completed - signing can now proceed
-2026-01-10T22:23:42.477059Z  INFO keymeld_demo::adaptor: ⏳ Waiting for signing completion with adaptor processing...
-2026-01-10T22:23:42.484450Z  INFO keymeld_demo::adaptor: ⏳ Signing still collecting participants...
+2026-01-10T22:23:42.437975Z  INFO keymeld_demo::adaptor: Encrypting 3 adaptor configurations on client side
+2026-01-10T22:23:42.438516Z  INFO keymeld_demo::adaptor: Verified zero-knowledge privacy: gateway cannot see adaptor IDs or business logic
+2026-01-10T22:23:42.467775Z  INFO keymeld_demo::adaptor: Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 created with adaptor configurations
+2026-01-10T22:23:42.467880Z  INFO keymeld_demo::adaptor: Validating message before approval: cae7084ca97e1db8efe967220eac71a5916f20ca1354c6ac8a36c3ab8ea01d08
+2026-01-10T22:23:42.467901Z  INFO keymeld_examples::harness::test: Starting approval process for signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 and user: 019baa02-1143-7980-b2b7-8ac9fa283a64
+2026-01-10T22:23:42.472576Z  INFO keymeld_examples::harness::test: Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 successfully approved for user: 019baa02-1143-7980-b2b7-8ac9fa283a64
+2026-01-10T22:23:42.472639Z  INFO keymeld_demo::adaptor: Participant 0 validating message before approval
+2026-01-10T22:23:42.472653Z  INFO keymeld_examples::harness::test: Starting approval process for signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 and user: 019baa02-11f3-7d70-b239-8cebded68edb
+2026-01-10T22:23:42.476971Z  INFO keymeld_examples::harness::test: Signing session 019baa02-1765-7eb3-9f01-3bec4f3cb066 successfully approved for user: 019baa02-11f3-7d70-b239-8cebded68edb
+2026-01-10T22:23:42.477043Z  INFO keymeld_demo::adaptor: All required approvals completed - signing can now proceed
+2026-01-10T22:23:42.477059Z  INFO keymeld_demo::adaptor: Waiting for signing completion with adaptor processing...
+2026-01-10T22:23:42.484450Z  INFO keymeld_demo::adaptor: Signing still collecting participants...
 2026-01-10T22:23:44.510750Z  INFO keymeld_demo::adaptor: Decrypting adaptor signatures on client side
 2026-01-10T22:23:44.513100Z  INFO keymeld_demo::adaptor: Adaptor signing completed!
 2026-01-10T22:23:44.513117Z  INFO keymeld_demo::adaptor: Successfully decrypted 3 adaptor signatures
 2026-01-10T22:23:44.513130Z  INFO keymeld_examples::harness::adaptor_utils: Validating adaptor signatures...
-2026-01-10T22:23:44.513160Z  INFO keymeld_examples::harness::adaptor_utils: ✅ Single adaptor signature validated: ID=019baa02-1764-7ce0-93e6-f0b8094b03f0
-2026-01-10T22:23:44.513194Z  INFO keymeld_examples::harness::adaptor_utils: ✅ And adaptor signature validated: ID=019baa02-1764-7ce0-93e6-f0c5db599aa2
-2026-01-10T22:23:44.513224Z  INFO keymeld_examples::harness::adaptor_utils: ✅ Or adaptor signature validated: ID=019baa02-1765-7eb3-9f01-3bd977ce4d9e
-2026-01-10T22:23:44.513237Z  INFO keymeld_examples::harness::adaptor_utils: ✅ All adaptor signatures validated successfully
-2026-01-10T22:23:44.513248Z  INFO keymeld_demo::adaptor: 🎭 Demonstrating complete adaptor signature flow...
-2026-01-10T22:23:44.513259Z  INFO keymeld_demo::adaptor: 🔑 Step 1: Revealing adaptor secrets (in real scenarios, this happens through external events)
+2026-01-10T22:23:44.513160Z  INFO keymeld_examples::harness::adaptor_utils: Single adaptor signature validated: ID=019baa02-1764-7ce0-93e6-f0b8094b03f0
+2026-01-10T22:23:44.513194Z  INFO keymeld_examples::harness::adaptor_utils: And adaptor signature validated: ID=019baa02-1764-7ce0-93e6-f0c5db599aa2
+2026-01-10T22:23:44.513224Z  INFO keymeld_examples::harness::adaptor_utils: Or adaptor signature validated: ID=019baa02-1765-7eb3-9f01-3bd977ce4d9e
+2026-01-10T22:23:44.513237Z  INFO keymeld_examples::harness::adaptor_utils: All adaptor signatures validated successfully
+2026-01-10T22:23:44.513248Z  INFO keymeld_demo::adaptor: Demonstrating complete adaptor signature flow...
+2026-01-10T22:23:44.513259Z  INFO keymeld_demo::adaptor: Step 1: Revealing adaptor secrets (in real scenarios, this happens through external events)
 2026-01-10T22:23:44.513363Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
 2026-01-10T22:23:44.513378Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-2026-01-10T22:23:44.513447Z  INFO keymeld_demo::adaptor: 🔑 Step 2: Adapting signatures using revealed secrets...
-2026-01-10T22:23:44.513459Z  INFO keymeld_examples::harness::adaptor_utils: 🔓 Adapting adaptor signatures with revealed secrets...
-2026-01-10T22:23:44.513471Z  INFO keymeld_examples::harness::adaptor_utils: 🔓 Adapting Single signature for config 019baa02-1764-7ce0-93e6-f0b8094b03f0
-2026-01-10T22:23:44.513536Z  INFO keymeld_examples::harness::adaptor_utils: 🔓 Applying secret to adapt signature...
-2026-01-10T22:23:44.514113Z  INFO keymeld_examples::harness::adaptor_utils: 🔍 Verifying adapted signature...
-2026-01-10T22:23:44.514753Z  INFO keymeld_examples::harness::adaptor_utils: ✅ Single signature adapted and verified successfully!
+2026-01-10T22:23:44.513447Z  INFO keymeld_demo::adaptor: Step 2: Adapting signatures using revealed secrets...
+2026-01-10T22:23:44.513459Z  INFO keymeld_examples::harness::adaptor_utils: Adapting adaptor signatures with revealed secrets...
+2026-01-10T22:23:44.513471Z  INFO keymeld_examples::harness::adaptor_utils: Adapting Single signature for config 019baa02-1764-7ce0-93e6-f0b8094b03f0
+2026-01-10T22:23:44.513536Z  INFO keymeld_examples::harness::adaptor_utils: Applying secret to adapt signature...
+2026-01-10T22:23:44.514113Z  INFO keymeld_examples::harness::adaptor_utils: Verifying adapted signature...
+2026-01-10T22:23:44.514753Z  INFO keymeld_examples::harness::adaptor_utils: Single signature adapted and verified successfully!
 2026-01-10T22:23:44.514799Z  INFO keymeld_examples::harness::test:   - Input 0 value: 55000 sats
 2026-01-10T22:23:44.514811Z  INFO keymeld_examples::harness::test:   - Input 0 scriptPubKey: 5120e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-2026-01-10T22:23:44.514866Z  INFO keymeld_demo::adaptor: ✅ Message verified before broadcast
-2026-01-10T22:23:44.514880Z  INFO keymeld_demo::adaptor: 🔑 Step 3: Broadcasting transaction with adapted signature...
-2026-01-10T22:23:44.514892Z  INFO keymeld_examples::harness::test: 📝 Applying signature to transaction...
-2026-01-10T22:23:44.514940Z  INFO keymeld_examples::harness::test: 🔍 Transaction being broadcast:
+2026-01-10T22:23:44.514866Z  INFO keymeld_demo::adaptor: Message verified before broadcast
+2026-01-10T22:23:44.514880Z  INFO keymeld_demo::adaptor: Step 3: Broadcasting transaction with adapted signature...
+2026-01-10T22:23:44.514892Z  INFO keymeld_examples::harness::test: Applying signature to transaction...
+2026-01-10T22:23:44.514940Z  INFO keymeld_examples::harness::test: Transaction being broadcast:
 2026-01-10T22:23:44.514967Z  INFO keymeld_examples::harness::test:   - Transaction ID: 89802a7cf101e1632dda4cda35552e3f0321c356c0d27f29d428eda5154fbb26
-2026-01-10T22:23:44.514993Z  INFO keymeld_examples::harness::test: ✅ Transaction signed successfully
-2026-01-10T22:23:44.516148Z  INFO keymeld_examples::harness::test: 📡 Transaction broadcast successfully: 89802a7cf101e1632dda4cda35552e3f0321c356c0d27f29d428eda5154fbb26
-2026-01-10T22:23:44.516210Z  INFO keymeld_demo::adaptor: ✅ Transaction broadcast with adapted signature: 89802a7cf101e1632dda4cda35552e3f0321c356c0d27f29d428eda5154fbb26
+2026-01-10T22:23:44.514993Z  INFO keymeld_examples::harness::test: Transaction signed successfully
+2026-01-10T22:23:44.516148Z  INFO keymeld_examples::harness::test: Transaction broadcast successfully: 89802a7cf101e1632dda4cda35552e3f0321c356c0d27f29d428eda5154fbb26
+2026-01-10T22:23:44.516210Z  INFO keymeld_demo::adaptor: Transaction broadcast with adapted signature: 89802a7cf101e1632dda4cda35552e3f0321c356c0d27f29d428eda5154fbb26
 
-🎉 All Adaptor Signature Tests Completed Successfully!
+All Adaptor Signature Tests Completed Successfully!
 ===============================================
-✅ Aggregate key: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
-📋 Adaptor Signature 1 Details:
+Aggregate key: 03e716116bb71d7358d9da0d6d7131cf44ec26ced5b9d5a746bde7dec50eb09b36
+Adaptor Signature 1 Details:
    Type: Single
    ID: 019baa02-1764-7ce0-93e6-f0b8094b03f0
    Points: 1 adaptor points
@@ -160,7 +160,7 @@ Generating initial blocks...
    Nonce point: 03a7aeb59ecb4a6b...
    Aggregate adaptor point: 0326f971ced3da16...
 
-📋 Adaptor Signature 2 Details:
+Adaptor Signature 2 Details:
    Type: And
    ID: 019baa02-1764-7ce0-93e6-f0c5db599aa2
    Points: 2 adaptor points
@@ -168,7 +168,7 @@ Generating initial blocks...
    Nonce point: 03d2ab40b7bd08cf...
    Aggregate adaptor point: 027ac6b732e8ce27...
 
-📋 Adaptor Signature 3 Details:
+Adaptor Signature 3 Details:
    Type: Or
    ID: 019baa02-1765-7eb3-9f01-3bd977ce4d9e
    Points: 2 adaptor points
@@ -178,4 +178,4 @@ Generating initial blocks...
    Aggregate adaptor point: 03f6f30defceffa2...
 
 
-✅ KeyMeld adaptor signatures test completed successfully!
+KeyMeld adaptor signatures test completed successfully!

@@ -471,8 +471,8 @@ mod registration_tests {
     use keymeld_core::protocol::{AddParticipantsBatchCommand, InitKeygenSessionCommand};
     use std::collections::BTreeMap;
 
-    #[test]
-    fn validated_slot_cannot_be_registered_twice_or_after_completion() {
+    #[tokio::test]
+    async fn validated_slot_cannot_be_registered_twice_or_after_completion() {
         let f = fixture();
         let session_id = f.manifest.manifest.keygen_session_id.clone();
         let user_id = f.participant.user_id.clone();
@@ -562,7 +562,7 @@ mod registration_tests {
             keymeld_core::protocol::MusigCommand::Keygen(
                 keymeld_core::protocol::KeygenCommand::AddParticipantsBatch(
                     AddParticipantsBatchCommand {
-                        keygen_session_id: session_id,
+                        keygen_session_id: session_id.clone(),
                         participants: vec![f.participant],
                     },
                 ),
@@ -573,5 +573,32 @@ mod registration_tests {
             session.status,
             crate::operations::OperatorStatus::Keygen(KeygenStatus::Completed(_))
         ));
+
+        // Exercise the real queue too: its error handling previously converted
+        // this harmless rejection into a failed session and destroyed signing.
+        let aggregate = session.extract_keygen_data().unwrap().aggregate_public_key;
+        assert!(!aggregate.is_empty());
+        let saved_command = keymeld_core::protocol::Command::new(registration.clone());
+        session
+            .session_context
+            .add_processed_command(saved_command.clone());
+        let sessions = Arc::new(dashmap::DashMap::new());
+        sessions.insert(session_id.clone(), session);
+        let queue = crate::queue::Queue::new(sessions.clone());
+        for command in [
+            saved_command,
+            keymeld_core::protocol::Command::new(registration),
+        ] {
+            assert!(queue
+                .process_command(session_id.clone(), command)
+                .await
+                .is_err());
+            let preserved = sessions.get(&session_id).unwrap();
+            let data = preserved
+                .extract_keygen_data()
+                .expect("late registration poisoned keygen");
+            assert_eq!(data.aggregate_public_key, aggregate);
+            assert_eq!(data.participants, vec![user_id.clone()]);
+        }
     }
 }

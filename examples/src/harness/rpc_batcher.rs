@@ -110,7 +110,7 @@ impl RpcBatcher {
         fs::write(&req_file, &req_json)?;
 
         info!(
-            "📝 Queued funding request {} for {} BTC to {}",
+            "Queued funding request {} for {} BTC to {}",
             &request_id[..8],
             amount_btc,
             &address[..20]
@@ -140,7 +140,7 @@ impl RpcBatcher {
         let req_json = serde_json::to_string(&request)?;
         fs::write(&req_file, &req_json)?;
 
-        info!("📝 Queued broadcast request {}", &request_id[..8]);
+        info!("Queued broadcast request {}", &request_id[..8]);
 
         // Wait for response
         self.wait_for_response(&resp_dir, &request_id).await
@@ -206,7 +206,7 @@ impl RpcBatcher {
             if elapsed > 0 && elapsed.is_multiple_of(10) && elapsed != last_log_secs {
                 last_log_secs = elapsed;
                 warn!(
-                    "⏳ Still waiting for confirmation of {} ({}s)...",
+                    "Still waiting for confirmation of {} ({}s)...",
                     &txid[..16.min(txid.len())],
                     elapsed
                 );
@@ -247,7 +247,7 @@ impl RpcBatcher {
         fs::write(&req_file, &req_json)?;
 
         info!(
-            "📝 Queued generate request {} for {} blocks to {}",
+            "Queued generate request {} for {} blocks to {}",
             &request_id[..8],
             num_blocks,
             &address[..20.min(address.len())]
@@ -290,7 +290,7 @@ impl RpcBatcher {
             // Log progress every 10 seconds
             if attempt > 0 && attempt % (10000 / self.poll_interval_ms) == 0 {
                 warn!(
-                    "⏳ Still waiting for generate response {} ({}s)...",
+                    "Still waiting for generate response {} ({}s)...",
                     &request_id[..8],
                     (attempt * self.poll_interval_ms) / 1000
                 );
@@ -334,7 +334,7 @@ impl RpcBatcher {
             // Log progress every 10 seconds
             if attempt > 0 && attempt % (10000 / self.poll_interval_ms) == 0 {
                 warn!(
-                    "⏳ Still waiting for batcher response {} ({}s)...",
+                    "Still waiting for batcher response {} ({}s)...",
                     &request_id[..8],
                     (attempt * self.poll_interval_ms) / 1000
                 );

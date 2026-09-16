@@ -22,8 +22,9 @@ Keep this credential independent of participant, signing, and session credential
 Provision the public key inside the measured enclave image before starting the enclave.
 The enclave must not learn its trusted gateway key from its first network caller.
 Also provision `ENCLAVE_KMS_KEY_ID` and `ENCLAVE_KMS_ENDPOINT` inside that image.
-Use `aws-kms` for the default AWS endpoint, or the intended proxy URL for a configured KMS proxy.
-Set `AWS_REGION` in the image for the default AWS endpoint.
+Use `aws-kms` or the exact regional AWS HTTPS endpoint.
+Set `AWS_REGION` and a complete KMS key ARN in the image; production rejects aliases and alternate endpoints.
+The enclave uses bundled AWS TLS roots and requires encrypted, attested KMS responses.
 
 Every command requires the pinned gateway signature, a fresh timestamp, and the current enclave boot identifier.
 The enclave caches an identical command's outcome and rejects changed content under the same command identifier.
@@ -86,8 +87,9 @@ nix run .#build-eif
 ```
 
 Each build writes an EIF and a sibling `.manifest.json` file.
-The manifest records its enclave ID, file path, SHA-256 checksum, PCR0, and PCR8.
+The manifest records its enclave ID, checksum, source revision, version, PCR0/1/2/8, and pinned gateway and KMS configuration.
 Review these outputs against the intended configuration before deployment.
+Start the [parent KMS and credential relays](KMS.md#nitro-network-and-credentials) before launching enclaves.
 
 Combine the reviewed per-enclave manifests into an array:
 
@@ -140,6 +142,30 @@ Explicitly select development configuration and `channel.dangerousTrustUnatteste
 The chart mounts the private credential only in gateway containers.
 Enclave containers receive the public verifier and KMS policy.
 
+## Limit API admission and browser origins
+
+The gateway limits API mutations and attestation requests before body parsing and enclave work.
+Ordinary status polling and CORS preflight requests remain available.
+Production defaults allow a per-IP burst of 512 requests and refill 30 requests per second.
+The process-wide burst is 2048, refilling 120 requests per second.
+At most 8192 depleted client buckets are retained.
+Configure these bounds under `server.rate_limit`; all bounds must remain positive.
+Limits apply per gateway process, so replicated deployments need an additional shared ingress limit.
+
+Rejected requests return HTTP 429 and `Retry-After`.
+The SDK exposes that delay as `ApiError::RateLimited.retry_after_secs`.
+Callers must apply bounded retries and obtain fresh request proofs.
+The default client identity comes from the socket peer, ignoring forwarded headers.
+Behind a proxy, configure both `trusted_proxy_ips` and `client_ip_header` under `server.rate_limit`.
+The proxy must overwrite that header with one client IP.
+Trusted proxies with missing, duplicate, chained, or invalid address headers are rejected.
+
+When `server.enable_cors` is true, set exact origins in `server.cors_allowed_origins`.
+An empty list permits no cross-origin browser clients; wildcard origins are rejected.
+`KEYMELD_CORS_ALLOWED_ORIGINS` accepts the same origins as a comma-separated list.
+For example, allow the coordinator's exact `https://` origin when its browser client calls KeyMeld directly.
+CORS does not authenticate requests; participant and signing credentials remain required.
+
 ## Acceptance before release
 
 Run workspace tests, Clippy, WASM compilation, SQLx checks, and the isolated security regressions on the reviewed commit.
@@ -149,6 +175,6 @@ Run the release workflow as a dry run before tagging.
 Real Nitro deployment requires an additional hardware acceptance run with the final measured image and KMS policy.
 Verify signed attestation, rejected debug mode, gateway credential rejection, KMS recovery, and signing after restart on that deployment.
 Local TCP tests and signed attestation fixtures cannot establish hardware deployment readiness.
-KMS recovery currently trusts IAM-authorized callers and does not use Nitro `Recipient` attestation.
-See the [KMS trust boundary](KMS.md#current-trust-boundary) before choosing a custody deployment.
-See the [release process](../.github/RELEASE.md) for publication and affected-version notices.
+KMS recovery requires Nitro `Recipient` in production; ordinary IAM credentials alone must fail under the deployed locked policy.
+Follow the [KMS hardware acceptance procedure](KMS.md#hardware-acceptance) with the final image and policy.
+See the [0.4.0 upgrade notes](releases/0.4.0.md).

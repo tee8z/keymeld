@@ -102,10 +102,10 @@ async fn restoration_rejects_ciphertext_from_another_kms_key() -> Result<()> {
     let other_key = "key-b";
 
     let pinned_hierarchy = fresh_context()
-        .init_keys_with_kms(&client, pinned_key, None, None)
+        .init_keys_with_kms_development(&client, pinned_key, None, None)
         .await?;
     let other_hierarchy = fresh_context()
-        .init_keys_with_kms(&client, other_key, None, None)
+        .init_keys_with_kms_development(&client, other_key, None, None)
         .await?;
 
     // Control: the old request without KeyId selects the ciphertext's own key.
@@ -119,7 +119,7 @@ async fn restoration_rejects_ciphertext_from_another_kms_key() -> Result<()> {
     ensure!(old_request.plaintext().is_some());
 
     let restored = fresh_context()
-        .init_keys_with_kms(
+        .init_keys_with_kms_development(
             &client,
             pinned_key,
             Some(pinned_hierarchy.0),
@@ -133,7 +133,7 @@ async fn restoration_rejects_ciphertext_from_another_kms_key() -> Result<()> {
 
     let mut rejected_context = fresh_context();
     let rejected = rejected_context
-        .init_keys_with_kms(
+        .init_keys_with_kms_development(
             &client,
             pinned_key,
             Some(other_hierarchy.0.clone()),
@@ -154,7 +154,7 @@ async fn restoration_rejects_ciphertext_from_another_kms_key() -> Result<()> {
 
     // The rejected blobs remain valid under their own KMS key.
     let restored_other = fresh_context()
-        .init_keys_with_kms(
+        .init_keys_with_kms_development(
             &client,
             other_key,
             Some(other_hierarchy.0),

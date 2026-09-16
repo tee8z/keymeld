@@ -29,6 +29,35 @@ use tracing::{debug, error, info, warn};
 struct DbWriteRequest {
     session_id: keymeld_core::SessionId,
     session: Session,
+    completed: Sender<Result<Session, ApiError>>,
+    // The writer owns the lease after enqueueing, even if the processing task
+    // times out or is canceled while the database operation is still pending.
+    _lease: SessionLease,
+}
+
+struct SessionLease {
+    session_id: SessionId,
+    processing_sessions: Arc<DashSet<SessionId>>,
+}
+
+impl SessionLease {
+    fn acquire(
+        session_id: SessionId,
+        processing_sessions: &Arc<DashSet<SessionId>>,
+    ) -> Option<Self> {
+        processing_sessions
+            .insert(session_id.clone())
+            .then(|| Self {
+                session_id,
+                processing_sessions: Arc::clone(processing_sessions),
+            })
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        self.processing_sessions.remove(&self.session_id);
+    }
 }
 
 /// Circuit breaker for coordinator database operations
@@ -171,7 +200,7 @@ impl Coordinator {
                 }
             };
 
-            if let Err(e) = result {
+            if let Err(e) = &result {
                 let kind = match &request.session {
                     Session::Keygen(_) => "keygen",
                     Session::Signing(_) => "signing",
@@ -182,6 +211,7 @@ impl Coordinator {
                 );
                 metrics.record_session_error(kind, "db_write_failed");
             }
+            let _ = request.completed.send(result.map(|()| request.session));
         }
 
         info!("Database writer task stopped");
@@ -379,19 +409,18 @@ impl Coordinator {
         // Filter out sessions that are already being processed by another batch
         let sessions_to_process: Vec<_> = sessions
             .into_iter()
-            .filter(|session_record| {
-                // Atomically try to insert the session into the processing set
-                if self
-                    .processing_sessions
-                    .insert(session_record.session_id.clone())
-                {
-                    true
+            .filter_map(|session_record| {
+                if let Some(lease) = SessionLease::acquire(
+                    session_record.session_id.clone(),
+                    &self.processing_sessions,
+                ) {
+                    Some((session_record, lease))
                 } else {
                     debug!(
                         "Session {} already being processed, skipping",
                         session_record.session_id
                     );
-                    false
+                    None
                 }
             })
             .collect();
@@ -404,9 +433,8 @@ impl Coordinator {
         let session_timeout = Duration::from_secs(10 * 60); // 10 minutes default
         let mut session_futures: FuturesUnordered<_> = sessions_to_process
             .into_iter()
-            .map(|session_record| {
+            .map(|(session_record, lease)| {
                 let session_id = session_record.session_id.clone();
-                let processing_sessions = Arc::clone(&self.processing_sessions);
                 let coordinator = self.clone();
 
                 async move {
@@ -425,7 +453,7 @@ impl Coordinator {
 
                     let result = match tokio::time::timeout(
                         session_timeout,
-                        coordinator.advance_session(session_record, kind)
+                        coordinator.advance_session(session_record, kind, lease)
                     ).await {
                         Ok(result) => result,
                         Err(_) => {
@@ -435,7 +463,6 @@ impl Coordinator {
                     };
 
                     warning_task.abort();
-                    processing_sessions.remove(&session_id);
                     (session_id, result)
                 }
             })
@@ -514,6 +541,7 @@ impl Coordinator {
         &self,
         session_record: ProcessableSessionRecord,
         kind: SessionKind,
+        lease: SessionLease,
     ) -> Result<bool, ApiError> {
         let session_id = session_record.session_id.clone();
         let kind_str = kind.to_string();
@@ -560,7 +588,14 @@ impl Coordinator {
         );
 
         // Process session with enclave (this involves network calls, not DB operations)
-        match current_session.process(&self.enclave_manager).await {
+        match self
+            .process_and_persist(
+                session_id.clone(),
+                lease,
+                current_session.process(&self.enclave_manager),
+            )
+            .await
+        {
             Ok(next_session) => {
                 let next_state_name = next_session.as_ref();
                 let advanced = current_state_name != next_state_name;
@@ -587,19 +622,6 @@ impl Coordinator {
                     self.check_stuck_session(&next_session);
                 }
 
-                // Send session update to database writer (non-blocking)
-                if let Err(e) = self.db_write_tx.try_send(DbWriteRequest {
-                    session_id: session_id.clone(),
-                    session: next_session,
-                }) {
-                    error!(
-                        "Failed to queue {} session {} for database update: {}",
-                        kind_str, session_id, e
-                    );
-                    self.metrics
-                        .record_session_error(&kind_str, "db_queue_full");
-                }
-
                 timer.finish();
                 Ok(advanced)
             }
@@ -617,9 +639,37 @@ impl Coordinator {
                     false,
                 );
                 timer.finish();
-                Ok(false)
+                Err(e)
             }
         }
+    }
+
+    async fn process_and_persist(
+        &self,
+        session_id: SessionId,
+        lease: SessionLease,
+        process: impl std::future::Future<Output = Result<Session, keymeld_core::KeyMeldError>> + Send,
+    ) -> Result<Session, ApiError> {
+        // Reserve writer capacity before polling any enclave work. Cancellation
+        // under backpressure is safe because that work has not started yet.
+        let write_permit = self
+            .db_write_tx
+            .reserve()
+            .await
+            .map_err(|_| ApiError::Internal("Session database writer is unavailable".into()))?;
+        let next_session = process.await?;
+        let (completed, persisted) = tokio::sync::oneshot::channel();
+        // No await between receiving a transition and transferring its lease to
+        // the writer. A canceled caller cannot release a queued transition's lease.
+        write_permit.send(DbWriteRequest {
+            session_id,
+            session: next_session,
+            completed,
+            _lease: lease,
+        });
+        persisted.await.map_err(|_| {
+            ApiError::Internal("Session database writer did not acknowledge persistence".into())
+        })?
     }
 
     async fn load_session(
@@ -1855,5 +1905,252 @@ impl Coordinator {
         }
 
         Ok(processed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::DatabaseConfig, enclave::channel::ChannelCredentials, session::KeygenFailed,
+    };
+    use keymeld_core::managed_socket::{config::TimeoutConfig, SocketConnector};
+
+    struct Fixture {
+        coordinator: Coordinator,
+        pool: sqlx::SqlitePool,
+        receiver: mpsc::Receiver<DbWriteRequest>,
+        record: ProcessableSessionRecord,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("coordinator.sqlite");
+            let db = Arc::new(
+                Database::new(&DatabaseConfig {
+                    path: path.to_string_lossy().into_owned(),
+                    ..DatabaseConfig::default()
+                })
+                .await
+                .unwrap(),
+            );
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+                .await
+                .unwrap();
+            let session_id = SessionId::new_v7();
+            // A terminal fixture exercises dispatch/persistence without needing a
+            // live enclave. Its unchanged state is still persisted by advance_session.
+            let status = KeygenSessionStatus::Failed(KeygenFailed {
+                keygen_session_id: session_id.clone(),
+                coordinator_pubkey: None,
+                coordinator_encrypted_private_key: None,
+                session_public_key: None,
+                coordinator_enclave_id: None,
+                expected_participants: Vec::new(),
+                registered_participants: Default::default(),
+                created_at: 0,
+                failed_at: 0,
+                error: "fixture".into(),
+                failed_due_to_enclave_restart: None,
+            });
+            sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status, updated_at) VALUES (?, 'failed', 0, 1, '[]', ?, 0)")
+                .bind(&session_id).bind(serde_json::to_string(&status).unwrap())
+                .execute(&pool).await.unwrap();
+            let manager = EnclaveManager::new_with_credentials(
+                vec![crate::enclave::EnclaveConfig {
+                    id: 1,
+                    cid: 3,
+                    port: 9,
+                    connector: SocketConnector::tcp("127.0.0.1", 9),
+                }],
+                TimeoutConfig::default(),
+                Arc::new(
+                    ChannelCredentials::dangerous_trust_unattested_enclaves([42; 32]).unwrap(),
+                ),
+            )
+            .unwrap();
+            let mut coordinator = Coordinator::new(
+                db,
+                Arc::new(manager),
+                None,
+                KmsConfig::default(),
+                Arc::new(Metrics),
+            );
+            // Keep writes queued until the test deliberately starts the real writer.
+            let (sender, receiver) = mpsc::channel(1);
+            coordinator.db_write_tx = sender;
+            Self {
+                coordinator,
+                pool,
+                receiver,
+                record: ProcessableSessionRecord {
+                    session_id,
+                    session_kind: SessionKind::Keygen,
+                },
+                _directory: directory,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_lease_blocks_duplicate_dispatch_until_persisted_even_after_cancellation() {
+        let mut fixture = Fixture::new().await;
+        let coordinator = fixture.coordinator.clone();
+        let record = fixture.record.clone();
+        let processing =
+            tokio::spawn(async move { coordinator.process_batch_sessions(vec![record]).await });
+        let request = tokio::time::timeout(Duration::from_secs(5), fixture.receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !processing.is_finished(),
+            "dispatch returned before the writer acknowledged persistence"
+        );
+        assert!(fixture
+            .coordinator
+            .processing_sessions
+            .contains(&fixture.record.session_id));
+        assert_eq!(
+            fixture
+                .coordinator
+                .process_batch_sessions(vec![fixture.record.clone()])
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            fixture.receiver.try_recv().is_err(),
+            "stale state was dispatched a second time"
+        );
+
+        processing.abort();
+        assert!(processing.await.unwrap_err().is_cancelled());
+        assert!(
+            fixture
+                .coordinator
+                .processing_sessions
+                .contains(&fixture.record.session_id),
+            "canceling the caller released a queued write's lease"
+        );
+
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(request)
+            .await
+            .unwrap_or_else(|_| panic!("writer receiver dropped"));
+        drop(sender);
+        Coordinator::run_db_writer(
+            fixture.coordinator.db.clone(),
+            fixture.coordinator.metrics.clone(),
+            receiver,
+        )
+        .await;
+        let updated_at: i64 = sqlx::query_scalar(
+            "SELECT updated_at FROM keygen_sessions WHERE keygen_session_id = ?",
+        )
+        .bind(&fixture.record.session_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(
+            updated_at > 0,
+            "lease was released without persisting the transition"
+        );
+        assert!(SessionLease::acquire(
+            fixture.record.session_id.clone(),
+            &fixture.coordinator.processing_sessions
+        )
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn cancellation_under_writer_backpressure_does_not_start_enclave_work() {
+        let fixture = Fixture::new().await;
+        let occupied_capacity = fixture.coordinator.db_write_tx.reserve().await.unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_process = calls.clone();
+        let lease = SessionLease::acquire(
+            fixture.record.session_id.clone(),
+            &fixture.coordinator.processing_sessions,
+        )
+        .unwrap();
+        let next = fixture
+            .coordinator
+            .db
+            .get_keygen_session_by_id(&fixture.record.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut waiting = Box::pin(fixture.coordinator.process_and_persist(
+            fixture.record.session_id.clone(),
+            lease,
+            async move {
+                calls_for_process.fetch_add(1, Ordering::SeqCst);
+                Ok(Session::Keygen(next))
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(waiting);
+        assert!(!fixture
+            .coordinator
+            .processing_sessions
+            .contains(&fixture.record.session_id));
+        drop(occupied_capacity);
+        assert!(
+            fixture.receiver.is_empty(),
+            "a canceled operation queued a transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_and_unavailable_writes_are_reported_to_session_processing() {
+        let fixture = Fixture::new().await;
+        sqlx::query("CREATE TRIGGER reject_session_update BEFORE UPDATE ON keygen_sessions BEGIN SELECT RAISE(FAIL, 'write rejected'); END")
+            .execute(&fixture.pool).await.unwrap();
+        let writer = tokio::spawn(Coordinator::run_db_writer(
+            fixture.coordinator.db.clone(),
+            fixture.coordinator.metrics.clone(),
+            fixture.receiver,
+        ));
+        let lease = SessionLease::acquire(
+            fixture.record.session_id.clone(),
+            &fixture.coordinator.processing_sessions,
+        )
+        .unwrap();
+        let error = fixture
+            .coordinator
+            .advance_session(fixture.record.clone(), SessionKind::Keygen, lease)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("write rejected"), "{error}");
+        writer.abort();
+        let _ = writer.await;
+
+        let lease = SessionLease::acquire(
+            fixture.record.session_id.clone(),
+            &fixture.coordinator.processing_sessions,
+        )
+        .unwrap();
+        let error = fixture
+            .coordinator
+            .advance_session(fixture.record.clone(), SessionKind::Keygen, lease)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("writer is unavailable"),
+            "{error}"
+        );
+        assert!(!fixture
+            .coordinator
+            .processing_sessions
+            .contains(&fixture.record.session_id));
     }
 }

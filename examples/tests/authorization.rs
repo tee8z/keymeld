@@ -364,13 +364,19 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
     let session_id = session.session_id().clone();
     let secret = session.export_session_secret();
     let manifest = session.authorization_manifest().clone();
-    session.register_self(RegisterOptions::default()).await?;
+    // This test deliberately delegates unattended signing to the independent
+    // session signing authority. Default participants require fresh approval.
+    session
+        .register_self(RegisterOptions::default().approval(false))
+        .await?;
     attacker
         .keygen()
         .join_session(
             session_id.clone(),
             &secret,
-            JoinOptions::default().invitation(session.invitation(attacker.user_id())?),
+            JoinOptions::default()
+                .approval(false)
+                .invitation(session.invitation(attacker.user_id())?),
         )
         .await?;
 
@@ -628,7 +634,9 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
         .join_session(
             session_id.clone(),
             &secret,
-            JoinOptions::default().invitation(session.invitation(last.user_id())?),
+            JoinOptions::default()
+                .approval(false)
+                .invitation(session.invitation(last.user_id())?),
         )
         .await?;
     session.wait_for_completion().await?;

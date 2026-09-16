@@ -87,9 +87,9 @@ validate_sudoers() {
 # Check if passwordless sudo already works - if so, skip sudoers setup
 if can_modprobe_passwordless; then
     if [[ "$QUIET" == "true" ]]; then
-        log_quiet "✅ VSock kernel module permissions already configured"
+        log_quiet "VSock kernel module permissions already configured"
     else
-        log_success "✅ Passwordless sudo for VSock modules already works - no setup needed!"
+        log_success "Passwordless sudo for VSock modules already works - no setup needed!"
     fi
     exit 0
 fi
@@ -98,7 +98,7 @@ fi
 # Check this early to avoid any password prompts
 if [[ "$AUTOMATED_RUN" == "true" ]]; then
     if ! sudo -n true 2>/dev/null; then
-        log_warn "⚠️  Passwordless sudo not available (this is OK, will use fallback mode)"
+        log_warn "Passwordless sudo not available (this is OK, will use fallback mode)"
         exit 0
     fi
 fi
@@ -141,7 +141,7 @@ fi
 # Try to create the sudoers rule, but handle CI environments gracefully
 if ! echo "$SUDOERS_CONTENT" | sudo tee "$SUDOERS_FILE" >/dev/null 2>&1; then
     if [[ "$AUTOMATED_RUN" == "true" ]]; then
-        log_warn "⚠️  Could not create sudoers file in CI environment (this is OK, will use fallback mode)"
+        log_warn "Could not create sudoers file in CI environment (this is OK, will use fallback mode)"
         exit 0
     else
         log_error "Failed to create sudoers file. Check permissions."
@@ -152,7 +152,7 @@ fi
 # Set proper permissions
 if ! sudo chmod 440 "$SUDOERS_FILE" 2>/dev/null; then
     if [[ "$AUTOMATED_RUN" == "true" ]]; then
-        log_warn "⚠️  Could not set sudoers file permissions in CI environment (this is OK)"
+        log_warn "Could not set sudoers file permissions in CI environment (this is OK)"
     else
         log_error "Failed to set sudoers file permissions."
         exit 1
@@ -176,35 +176,35 @@ for module in "${MODULES[@]}"; do
     fi
     if sudo -n modprobe "$module" 2>/dev/null; then
         if [[ "$QUIET" != "true" ]]; then
-            log_success "✅ $module: Password-free loading works"
+            log_success "$module: Password-free loading works"
         fi
     else
         # Check if module is already loaded
         if lsmod | grep -q "^$module "; then
             if [[ "$QUIET" != "true" ]]; then
-                log_info "ℹ️  $module: Already loaded"
+                log_info "$module: Already loaded"
             fi
         else
             if [[ "$QUIET" != "true" ]]; then
-                log_warn "⚠️  $module: Not available on this system (this is OK)"
+                log_warn "$module: Not available on this system (this is OK)"
             fi
         fi
     fi
 done
 
 if [[ "$QUIET" == "true" ]]; then
-    log_quiet "✅ VSock kernel module permissions configured"
+    log_quiet "VSock kernel module permissions configured"
 elif [[ "$AUTOMATED_RUN" == "true" ]]; then
     echo ""
-    log_success "🎉 VSock setup complete! No more password prompts needed."
+    log_success "VSock setup complete! No more password prompts needed."
 else
     echo ""
-    log_success "🎉 VSock sudoers setup complete!"
+    log_success "VSock sudoers setup complete!"
     echo ""
     log_info "What was configured:"
-    echo "  ✅ Password-free modprobe for VSock kernel modules"
-    echo "  ✅ Applied to user: $CURRENT_USER"
-    echo "  ✅ Sudoers file: $SUDOERS_FILE"
+    echo "  Password-free modprobe for VSock kernel modules"
+    echo "  Applied to user: $CURRENT_USER"
+    echo "  Sudoers file: $SUDOERS_FILE"
     echo ""
     log_info "You can now run 'nix develop' without password prompts for VSock!"
 fi
@@ -214,10 +214,10 @@ if [[ "$QUIET" != "true" ]]; then
     echo ""
     log_info "VSock device status:"
     if [[ -e /dev/vsock ]]; then
-        log_success "✅ /dev/vsock is available"
+        log_success "/dev/vsock is available"
         ls -la /dev/vsock 2>/dev/null || true
     else
-        log_warn "⚠️  /dev/vsock not found (will use TCP fallback mode)"
+        log_warn "/dev/vsock not found (will use TCP fallback mode)"
     fi
 
     if [[ "$AUTOMATED_RUN" != "true" ]]; then

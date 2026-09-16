@@ -13,11 +13,12 @@ use keymeld_core::{
 };
 use rand::Rng;
 use std::collections::HashMap;
+use zeroize::{Zeroize, Zeroizing};
 
+use super::kms_recipient::{KmsRecipient, KmsResponseProtection};
 use crate::attestation::AttestationManager;
 
 /// Shared enclave context - read-only data accessible by all sessions
-#[derive(Debug)]
 pub struct EnclaveSharedContext {
     pub enclave_id: EnclaveId,
     pub public_key: Vec<u8>,
@@ -54,6 +55,49 @@ impl EnclaveSharedContext {
         encrypted_dek: Option<Vec<u8>>,
         encrypted_private_key: Option<Vec<u8>>,
     ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), EnclaveError> {
+        let manager = self.attestation_manager.as_ref().ok_or_else(|| {
+            EnclaveError::Crypto(CryptoError::Other(
+                "KMS requires an initialized NSM attestation manager".into(),
+            ))
+        })?;
+        let protection = KmsResponseProtection::Recipient(KmsRecipient::new(manager)?);
+        self.init_keys_with_kms_protection(
+            kms_client,
+            kms_key_id,
+            encrypted_dek,
+            encrypted_private_key,
+            protection,
+        )
+        .await
+    }
+
+    /// Explicit escape hatch for local simulation with an unattested KMS emulator.
+    /// The operator selects this only from its enclave-local development setting.
+    pub async fn init_keys_with_kms_development(
+        &mut self,
+        kms_client: &KmsClient,
+        kms_key_id: &str,
+        encrypted_dek: Option<Vec<u8>>,
+        encrypted_private_key: Option<Vec<u8>>,
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), EnclaveError> {
+        self.init_keys_with_kms_protection(
+            kms_client,
+            kms_key_id,
+            encrypted_dek,
+            encrypted_private_key,
+            KmsResponseProtection::DevelopmentPlaintext,
+        )
+        .await
+    }
+
+    async fn init_keys_with_kms_protection(
+        &mut self,
+        kms_client: &KmsClient,
+        kms_key_id: &str,
+        encrypted_dek: Option<Vec<u8>>,
+        encrypted_private_key: Option<Vec<u8>>,
+        protection: KmsResponseProtection,
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), EnclaveError> {
         match (encrypted_dek, encrypted_private_key) {
             (Some(enc_dek), Some(enc_privkey)) => {
                 // Restart scenario: decrypt existing keys
@@ -64,6 +108,7 @@ impl EnclaveSharedContext {
                     .key_id(kms_key_id)
                     .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(enc_dek.clone()))
                     .set_encryption_context(Some(encryption_context))
+                    .set_recipient(protection.recipient_info())
                     .send()
                     .await
                     .map_err(|e| {
@@ -72,26 +117,14 @@ impl EnclaveSharedContext {
                         )))
                     })?;
 
-                let plaintext_dek = response
-                    .plaintext()
-                    .ok_or_else(|| {
-                        EnclaveError::Crypto(CryptoError::Other(
-                            "No plaintext DEK returned from KMS".to_string(),
-                        ))
-                    })?
-                    .as_ref()
-                    .to_vec();
+                let dek_array = protection.decrypt_dek(
+                    response.plaintext(), response.ciphertext_for_recipient(),
+                )?;
 
-                let dek_array: [u8; 32] = plaintext_dek.clone().try_into().map_err(|_| {
-                    EnclaveError::Crypto(CryptoError::Other(
-                        "DEK must be exactly 32 bytes".to_string(),
-                    ))
-                })?;
-
-                let private_key_bytes = self.decrypt_private_key_with_dek(&dek_array, &enc_privkey)?;
+                let private_key_bytes = Zeroizing::new(self.decrypt_private_key_with_dek(&dek_array, &enc_privkey)?);
 
                 let secret_key = secp256k1::SecretKey::from_byte_array(
-                    private_key_bytes.clone().try_into().map_err(|_| {
+                    private_key_bytes.as_slice().try_into().map_err(|_| {
                         EnclaveError::Crypto(CryptoError::Other(
                             "Invalid private key length".to_string()
                         ))
@@ -109,8 +142,10 @@ impl EnclaveSharedContext {
                 let public_key_bytes = public_key.serialize().to_vec();
 
                 // Store in memory
-                self.master_dek = Some(dek_array);
-                self.private_key = private_key_bytes;
+                self.master_dek.zeroize();
+                self.master_dek = Some(*dek_array);
+                self.private_key.zeroize();
+                self.private_key = private_key_bytes.to_vec();
                 self.public_key = public_key_bytes.clone();
 
                 // Return same encrypted values (no re-encryption needed)
@@ -123,7 +158,7 @@ impl EnclaveSharedContext {
                     EnclaveError::Crypto(CryptoError::KeypairGeneration(format!("{e}")))
                 })?;
 
-                let private_key_bytes = keypair.0.secret_bytes().to_vec();
+                let private_key_bytes = Zeroizing::new(keypair.0.secret_bytes().to_vec());
                 let public_key_bytes = keypair.1.serialize().to_vec();
 
                 let encryption_context = self.build_encryption_context();
@@ -133,6 +168,7 @@ impl EnclaveSharedContext {
                     .key_id(kms_key_id)
                     .key_spec(aws_sdk_kms::types::DataKeySpec::Aes256)
                     .set_encryption_context(Some(encryption_context))
+                    .set_recipient(protection.recipient_info())
                     .send()
                     .await
                     .map_err(|e| {
@@ -141,18 +177,13 @@ impl EnclaveSharedContext {
                         )))
                     })?;
 
-                let plaintext_dek = response
-                    .plaintext()
-                    .ok_or_else(|| {
-                        EnclaveError::Crypto(CryptoError::Other(
-                            "No plaintext DEK returned from KMS".to_string(),
-                        ))
-                    })?
-                    .as_ref()
-                    .to_vec();
+                let dek_array = protection.decrypt_dek(
+                    response.plaintext(), response.ciphertext_for_recipient(),
+                )?;
 
                 let encrypted_dek = response
                     .ciphertext_blob()
+                    .filter(|ciphertext| !ciphertext.as_ref().is_empty())
                     .ok_or_else(|| {
                         EnclaveError::Crypto(CryptoError::Other(
                             "No encrypted DEK returned from KMS".to_string(),
@@ -161,17 +192,13 @@ impl EnclaveSharedContext {
                     .as_ref()
                     .to_vec();
 
-                let dek_array: [u8; 32] = plaintext_dek.clone().try_into().map_err(|_| {
-                    EnclaveError::Crypto(CryptoError::Other(
-                        "DEK must be exactly 32 bytes".to_string(),
-                    ))
-                })?;
-
                 let encrypted_private_key = self.encrypt_private_key_with_dek(&dek_array, &private_key_bytes)?;
 
                 // Store in memory
-                self.master_dek = Some(dek_array);
-                self.private_key = private_key_bytes;
+                self.master_dek.zeroize();
+                self.master_dek = Some(*dek_array);
+                self.private_key.zeroize();
+                self.private_key = private_key_bytes.to_vec();
                 self.public_key = public_key_bytes.clone();
 
                 // Return encrypted versions for gateway to store
@@ -184,21 +211,14 @@ impl EnclaveSharedContext {
         }
     }
 
-    /// Build encryption context for KMS requests
-    /// In production this would include real Nitro attestation PCRs
+    /// Bind persisted KMS ciphertext to this enclave's logical identity.
+    /// This caller-supplied AAD is not attestation; measured PCRs are in Recipient.
     fn build_encryption_context(&self) -> HashMap<String, String> {
         let mut context = HashMap::new();
         context.insert(
             "enclave_id".to_string(),
             self.enclave_id.as_u32().to_string(),
         );
-
-        // Add PCR values from attestation manager if available
-        if let Some(ref manager) = self.attestation_manager {
-            for (pcr_name, pcr_value) in &manager.config().required_pcrs {
-                context.insert(format!("pcr_{}", pcr_name), pcr_value.clone());
-            }
-        }
 
         context
     }
@@ -368,5 +388,257 @@ impl Clone for EnclaveSharedContext {
             attestation_manager: self.attestation_manager.clone(),
             config: self.config.clone(),
         }
+    }
+}
+
+impl Drop for EnclaveSharedContext {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+        self.master_dek.zeroize();
+    }
+}
+
+impl std::fmt::Debug for EnclaveSharedContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnclaveSharedContext")
+            .field("enclave_id", &self.enclave_id)
+            .field("public_key", &self.public_key)
+            .field("private_key", &"[REDACTED]")
+            .field("master_dek_initialized", &self.master_dek.is_some())
+            .field("attestation_manager", &self.attestation_manager)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod kms_tests {
+    use super::super::kms_recipient::test_support;
+    use super::*;
+    use aws_sdk_kms::config::{Credentials, Region};
+    use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Json, Router};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy, Default)]
+    enum ResponseMode {
+        #[default]
+        Recipient,
+        Plaintext,
+        Both,
+        Missing,
+        WrongRecipient,
+        InvalidCiphertext,
+    }
+
+    #[derive(Default)]
+    struct Fixture {
+        mode: ResponseMode,
+        requests: Vec<Value>,
+    }
+
+    async fn kms_fixture(
+        State(state): State<Arc<Mutex<Fixture>>>,
+        body: Bytes,
+    ) -> (StatusCode, Json<Value>) {
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(request["KeyId"], "pinned-key");
+        assert_eq!(request["EncryptionContext"], json!({"enclave_id": "17"}));
+        assert_eq!(
+            request["Recipient"]["KeyEncryptionAlgorithm"],
+            "RSAES_OAEP_SHA_256"
+        );
+        let document = STANDARD
+            .decode(
+                request["Recipient"]["AttestationDocument"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let evidence: std::collections::BTreeMap<String, serde_bytes::ByteBuf> =
+            serde_cbor::from_slice(&document).unwrap();
+        let recipient_key = evidence["public_key"].as_ref();
+        assert_eq!(
+            openssl::pkey::PKey::public_key_from_der(recipient_key)
+                .unwrap()
+                .bits(),
+            2048
+        );
+        if request.get("CiphertextBlob").is_some() {
+            assert_eq!(request["CiphertextBlob"], STANDARD.encode(b"sealed-dek"));
+        } else {
+            assert_eq!(request["KeySpec"], "AES_256");
+        }
+        let mode = {
+            let mut fixture = state.lock().unwrap();
+            fixture.requests.push(request);
+            fixture.mode
+        };
+        let mut response =
+            json!({"KeyId": "pinned-key", "CiphertextBlob": STANDARD.encode(b"sealed-dek")});
+        match mode {
+            ResponseMode::Recipient | ResponseMode::Both => {
+                response["CiphertextForRecipient"] = STANDARD
+                    .encode(test_support::envelope(recipient_key, &[0x33; 32]))
+                    .into();
+                if matches!(mode, ResponseMode::Both) {
+                    response["Plaintext"] = STANDARD.encode([0x33; 32]).into();
+                }
+            }
+            ResponseMode::Plaintext => response["Plaintext"] = STANDARD.encode([0x33; 32]).into(),
+            ResponseMode::Missing => {}
+            ResponseMode::WrongRecipient => {
+                let other = test_support::recipient();
+                response["CiphertextForRecipient"] = STANDARD
+                    .encode(test_support::envelope(
+                        &test_support::public_key(&other),
+                        &[0x33; 32],
+                    ))
+                    .into();
+            }
+            ResponseMode::InvalidCiphertext => {
+                response["CiphertextForRecipient"] = STANDARD.encode([0; 256]).into()
+            }
+        }
+        (StatusCode::OK, Json(response))
+    }
+
+    struct ServerTask(tokio::task::JoinHandle<()>);
+    impl Drop for ServerTask {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    async fn fixture() -> (KmsClient, Arc<Mutex<Fixture>>, ServerTask) {
+        let state = Arc::new(Mutex::new(Fixture::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/", post(kms_fixture))
+            .with_state(state.clone());
+        let server = ServerTask(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(Region::new("us-west-2"))
+            .credentials_provider(Credentials::new("test", "test", None, None, "kms-fixture"))
+            .endpoint_url(endpoint)
+            .load()
+            .await;
+        (KmsClient::new(&config), state, server)
+    }
+
+    fn context() -> EnclaveSharedContext {
+        EnclaveSharedContext::new(
+            EnclaveId::new(17),
+            Vec::new(),
+            Vec::new(),
+            None,
+            TimeoutConfig::default(),
+        )
+    }
+
+    fn protection() -> KmsResponseProtection {
+        KmsResponseProtection::Recipient(test_support::recipient())
+    }
+
+    #[tokio::test]
+    async fn generate_and_restore_send_recipient_and_only_install_unwrapped_keys() {
+        let (client, state, _server) = fixture().await;
+        let mut first = context();
+        let (encrypted_dek, encrypted_key, public_key) = first
+            .init_keys_with_kms_protection(&client, "pinned-key", None, None, protection())
+            .await
+            .unwrap();
+        assert_eq!(first.master_dek, Some([0x33; 32]));
+        let mut restored = context();
+        let result = restored
+            .init_keys_with_kms_protection(
+                &client,
+                "pinned-key",
+                Some(encrypted_dek),
+                Some(encrypted_key),
+                protection(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.2, public_key);
+        assert_eq!(first.private_key, restored.private_key);
+        let state = state.lock().unwrap();
+        assert_eq!(state.requests.len(), 2);
+        assert_ne!(
+            state.requests[0]["Recipient"]["AttestationDocument"],
+            state.requests[1]["Recipient"]["AttestationDocument"]
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_restore_reject_plaintext_missing_invalid_and_wrong_recipient() {
+        let (client, state, _server) = fixture().await;
+        let hierarchy = context()
+            .init_keys_with_kms_protection(&client, "pinned-key", None, None, protection())
+            .await
+            .unwrap();
+        for mode in [
+            ResponseMode::Plaintext,
+            ResponseMode::Both,
+            ResponseMode::Missing,
+            ResponseMode::WrongRecipient,
+            ResponseMode::InvalidCiphertext,
+        ] {
+            state.lock().unwrap().mode = mode;
+            for restart in [false, true] {
+                let mut rejected = context();
+                let result = rejected
+                    .init_keys_with_kms_protection(
+                        &client,
+                        "pinned-key",
+                        restart.then(|| hierarchy.0.clone()),
+                        restart.then(|| hierarchy.1.clone()),
+                        protection(),
+                    )
+                    .await;
+                assert!(result.is_err());
+                assert!(rejected.private_key.is_empty());
+                assert!(rejected.public_key.is_empty());
+                assert!(rejected.master_dek.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_kms_never_falls_back_when_attestation_is_unavailable() {
+        let (client, state, _server) = fixture().await;
+        assert!(context()
+            .init_keys_with_kms(&client, "pinned-key", None, None)
+            .await
+            .is_err());
+        let mut disabled = context();
+        disabled.attestation_manager = Some(AttestationManager::mock());
+        assert!(disabled
+            .init_keys_with_kms(&client, "pinned-key", None, None)
+            .await
+            .is_err());
+        assert!(state.lock().unwrap().requests.is_empty());
+    }
+
+    #[test]
+    fn configured_pcrs_are_not_kms_encryption_context() {
+        let mut context = context();
+        let mut config = crate::attestation::AttestationConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        config
+            .required_pcrs
+            .insert("PCR0".into(), "caller-supplied".into());
+        context.attestation_manager = Some(AttestationManager::new(config).unwrap());
+        assert_eq!(
+            context.build_encryption_context(),
+            HashMap::from([("enclave_id".into(), "17".into())])
+        );
     }
 }
