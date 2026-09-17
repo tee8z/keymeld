@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # Run real gateway/enclave authorization regressions with synthetic keys.
-# Usage: nix develop -c bash examples/run-authorization-e2e.sh [--skip-build]
+# Usage: nix develop -c bash examples/run-authorization-e2e.sh [--skip-build] [--single-enclave]
 set -euo pipefail
 
 test_repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$test_repository"
 
+test_skip_build=false
+test_enclave_count=3
+for test_argument in "$@"; do
+    case "$test_argument" in
+        --skip-build) test_skip_build=true ;;
+        --single-enclave) test_enclave_count=1 ;;
+        *) echo "Unknown option: $test_argument" >&2; exit 2 ;;
+    esac
+done
+
 # The repository enables incremental compilation, which conflicts with the
 # Nix shell's sccache wrapper. Use ordinary rustc for this reproducible test run.
-export RUSTC_WRAPPER= CARGO_INCREMENTAL=0
+export RUSTC_WRAPPER='' CARGO_INCREMENTAL=0
 
 for test_command in cargo moto_server aws jq curl ss sqlite3; do
     if ! command -v "$test_command" >/dev/null; then
@@ -17,7 +27,7 @@ for test_command in cargo moto_server aws jq curl ss sqlite3; do
     fi
 done
 
-if [[ "${1:-}" != "--skip-build" ]]; then
+if [[ "$test_skip_build" != true ]]; then
     cargo build --bin keymeld-gateway --bin keymeld-enclave
     cargo test -p keymeld-examples --test authorization --test approval_binding --test key_lifecycle --no-run
     cargo test -p keymeld-enclave --test kms_key_pinning --no-run
@@ -65,7 +75,7 @@ test_port_base=0
 for ((test_attempt = 0; test_attempt < 40; test_attempt++)); do
     test_candidate=$((20000 + RANDOM % 30000))
     test_ports_available=true
-    for ((test_offset = 0; test_offset < 5; test_offset++)); do
+    for ((test_offset = 0; test_offset < test_enclave_count + 2; test_offset++)); do
         if [[ -n "$(ss -H -ltn "sport = :$((test_candidate + test_offset))")" ]]; then
             test_ports_available=false
             break
@@ -77,7 +87,7 @@ for ((test_attempt = 0; test_attempt < 40; test_attempt++)); do
     fi
 done
 if [[ "$test_port_base" == 0 ]]; then
-    echo "Could not find five unused TCP ports." >&2
+    echo "Could not find $((test_enclave_count + 2)) unused TCP ports." >&2
     exit 1
 fi
 test_gateway_url="http://127.0.0.1:$test_port_base"
@@ -141,9 +151,12 @@ database:
   enable_wal_mode: true
 enclaves:
   enclaves:
-    - { id: 0, cid: 2, port: $((test_port_base + 2)), transport: tcp, tcp_host: "127.0.0.1" }
-    - { id: 1, cid: 2, port: $((test_port_base + 3)), transport: tcp, tcp_host: "127.0.0.1" }
-    - { id: 2, cid: 2, port: $((test_port_base + 4)), transport: tcp, tcp_host: "127.0.0.1" }
+EOF
+for ((test_enclave_id = 0; test_enclave_id < test_enclave_count; test_enclave_id++)); do
+    printf '    - { id: %s, cid: 2, port: %s, transport: tcp, tcp_host: "127.0.0.1" }\n' \
+        "$test_enclave_id" "$((test_port_base + 2 + test_enclave_id))" >>"$test_directory/config.yaml"
+done
+cat >>"$test_directory/config.yaml" <<EOF
 coordinator:
   processing_interval_ms: 50
   health_check_interval_secs: 2
@@ -166,7 +179,7 @@ EOF
 
 start_keymeld_services() {
     local test_log_suffix=$1
-    for ((test_enclave_id = 0; test_enclave_id < 3; test_enclave_id++)); do
+    for ((test_enclave_id = 0; test_enclave_id < test_enclave_count; test_enclave_id++)); do
         ENCLAVE_ID="$test_enclave_id" VSOCK_PORT=$((test_port_base + 2 + test_enclave_id)) \
             TRANSPORT_MODE=tcp TCP_HOST=127.0.0.1 \
             LD_LIBRARY_PATH="$test_service_library_path" \
@@ -179,38 +192,67 @@ start_keymeld_services() {
     test_gateway_pid=$!
     test_pids+=("$test_gateway_pid")
     wait_for_http "$test_gateway_url/api/v1/health"
-    for ((test_enclave_id = 0; test_enclave_id < 3; test_enclave_id++)); do
+    for ((test_enclave_id = 0; test_enclave_id < test_enclave_count; test_enclave_id++)); do
         wait_for_http "$test_gateway_url/api/v1/enclaves/$test_enclave_id/public-key"
     done
 }
 start_keymeld_services ""
 
+stop_gateway() {
+    local test_stop_attempt test_stop_status=0
+    kill "$test_gateway_pid"
+    for ((test_stop_attempt = 0; test_stop_attempt < 180; test_stop_attempt++)); do
+        if ! kill -0 "$test_gateway_pid" 2>/dev/null; then
+            wait "$test_gateway_pid" || test_stop_status=$?
+            unset 'test_pids[${#test_pids[@]}-1]'
+            return "$test_stop_status"
+        fi
+        sleep 0.25
+    done
+    echo "Gateway did not drain and exit within 45 seconds." >&2
+    kill -KILL "$test_gateway_pid" 2>/dev/null || true
+    wait "$test_gateway_pid" 2>/dev/null || true
+    unset 'test_pids[${#test_pids[@]}-1]'
+    return 1
+}
+
+check_restart_signing() {
+    local test_restart_name=signing_after_enclave_restart test_selection
+    test_selection=$(cargo test -p keymeld-examples --test authorization "$test_restart_name" \
+        -- --ignored --exact --list)
+    if [[ $(grep -Fxc "$test_restart_name: test" <<<"$test_selection") != 1 ]]; then
+        echo "Expected exactly one ignored restart signing test: $test_restart_name" >&2
+        return 1
+    fi
+    cargo test -p keymeld-examples --test authorization "$test_restart_name" \
+        -- --ignored --exact --nocapture
+}
+
 export KEYMELD_TEST_GATEWAY_URL="$test_gateway_url"
 export KEYMELD_TEST_ENCLAVE_PORT_BASE=$((test_port_base + 2))
+export KEYMELD_TEST_ENCLAVE_COUNT="$test_enclave_count"
 export KEYMELD_TEST_RESTART_STATE_PATH="$test_directory/restart-fixture.json"
+echo "Testing one gateway with $test_enclave_count enclave processes"
 cargo test -p keymeld-examples \
     --test authorization --test approval_binding --test key_lifecycle \
     -- --ignored --nocapture --skip signing_after_enclave_restart
 
-echo "Restarting only the gateway while all three enclaves retain their configured keys"
-kill "$test_gateway_pid"
-wait "$test_gateway_pid" 2>/dev/null || true
-unset 'test_pids[${#test_pids[@]}-1]'
+echo "Restarting only the gateway while the enclave processes retain their configured keys"
+stop_gateway
 CONFIG_PATH="$test_directory/config.yaml" LD_LIBRARY_PATH="$test_service_library_path" \
     "$test_binary_directory/keymeld-gateway" >"$test_directory/gateway-only-restarted.log" 2>&1 &
 test_gateway_pid=$!
 test_pids+=("$test_gateway_pid")
 wait_for_http "$test_gateway_url/api/v1/health"
-cargo test -p keymeld-examples --test authorization signing_after_enclave_restart \
-    -- --ignored --nocapture
+check_restart_signing
 
-echo "Restarting gateway and all three enclaves with the same database and KMS keys"
+echo "Restarting gateway and all enclave processes with the same database and KMS keys"
+stop_gateway
 for test_pid in "${test_pids[@]:1}"; do kill "$test_pid" 2>/dev/null || true; done
 for test_pid in "${test_pids[@]:1}"; do wait "$test_pid" 2>/dev/null || true; done
 test_pids=("$test_moto_pid")
 start_keymeld_services "-restarted"
-cargo test -p keymeld-examples --test authorization signing_after_enclave_restart \
-    -- --ignored --nocapture
+check_restart_signing
 
 # Rejected registrations and competing claims must not leave encrypted key rows
 # behind. Every synthetic key in this isolated run belongs to one claimed slot.

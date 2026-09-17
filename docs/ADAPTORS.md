@@ -1,8 +1,8 @@
 # Adaptor Signatures
 
-The proposed `0.4.0` protocol supports single-point adaptor signatures for conditional payments and Discreet Log Contracts (DLCs).
+The `0.4.0` protocol supports single-point adaptor signatures for conditional payments and Discreet Log Contracts (DLCs).
 `And` and `Or` configurations are unsupported and rejected.
-These changes are unreleased. KeyMeld remains experimental and must not be used with real funds.
+Upgrade all components to `0.4.0`; see the [upgrade notes](releases/0.4.0.md).
 
 ## Overview
 

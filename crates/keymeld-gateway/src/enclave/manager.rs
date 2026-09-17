@@ -4,6 +4,7 @@ use crate::session::types::ParticipantData;
 use crate::{config::KmsConfig, SigningSessionStatus};
 use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::{
+    authorization::{EnclaveRecipientAuthorization, SignedSessionManifest},
     identifiers::{EnclaveId, SessionId, UserId},
     managed_socket::{
         client::ClientMetrics, config::TimeoutConfig, pool::ConnectionStats,
@@ -435,6 +436,112 @@ impl EnclaveManager {
                 user_ids,
                 coordinator_user_id,
             )
+    }
+
+    pub fn plan_session_assignment_with_distributed_coordinator(
+        &self,
+        session_id: SessionId,
+        user_ids: &[UserId],
+        coordinator_user_id: &UserId,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        self.assignment_manager
+            .plan_enclaves_for_session_with_distributed_coordinator(
+                session_id,
+                user_ids,
+                coordinator_user_id,
+            )
+    }
+
+    pub fn publish_session_assignment(
+        &self,
+        assignment: SessionAssignment,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        self.assignment_manager.publish_assignment(assignment)
+    }
+
+    /// Rebuild process-local state from a committed reservation or signed roster.
+    /// This also handles cancellation between a reservation commit and publication.
+    pub fn assignment_for_keygen_session(
+        &self,
+        status: &KeygenSessionStatus,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        let (session_id, coordinator_enclave, expected, manifest, recipients, created_at) =
+            match status {
+                KeygenSessionStatus::Reserved(reserved) => {
+                    let assignment = self
+                        .assignment_manager
+                        .plan_enclaves_for_session_with_coordinator(
+                            reserved.keygen_session_id.clone(),
+                            &reserved.expected_participants,
+                            &reserved.coordinator_user_id,
+                            reserved.coordinator_enclave_id,
+                        )?;
+                    return self.publish_session_assignment(assignment);
+                }
+                KeygenSessionStatus::CollectingParticipants(collecting) => (
+                    &collecting.keygen_session_id,
+                    collecting.coordinator_enclave_id,
+                    &collecting.expected_participants,
+                    &collecting.authorization_manifest,
+                    &collecting.recipient_authorization,
+                    collecting.created_at,
+                ),
+                KeygenSessionStatus::Completed(completed) => (
+                    &completed.keygen_session_id,
+                    completed.coordinator_enclave_id,
+                    &completed.expected_participants,
+                    &completed.authorization_manifest,
+                    &completed.recipient_authorization,
+                    completed.created_at,
+                ),
+                KeygenSessionStatus::Failed(_) => {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Failed session has no usable assignment".to_string(),
+                    ))
+                }
+            };
+        self.assignment_from_authorized_roster(
+            session_id,
+            coordinator_enclave,
+            expected,
+            manifest,
+            recipients,
+            created_at,
+        )
+    }
+
+    pub(crate) fn assignment_from_authorized_roster(
+        &self,
+        session_id: &SessionId,
+        coordinator_enclave: EnclaveId,
+        expected: &[UserId],
+        manifest: &SignedSessionManifest,
+        recipients: &EnclaveRecipientAuthorization,
+        created_at: u64,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        recipients.verify(manifest).map_err(|error| {
+            KeyMeldError::InvalidConfiguration(format!(
+                "Invalid stored enclave recipient authorization: {error}"
+            ))
+        })?;
+        let assignments = &recipients.user_enclave_assignments;
+        if &manifest.manifest.keygen_session_id != session_id
+            || assignments.get(&manifest.manifest.coordinator_user_id) != Some(&coordinator_enclave)
+            || expected.len() != assignments.len()
+            || expected.iter().collect::<std::collections::BTreeSet<_>>()
+                != assignments.keys().collect()
+        {
+            return Err(KeyMeldError::InvalidConfiguration(
+                "Stored assignment does not match its authorized participant roster".to_string(),
+            ));
+        }
+        self.publish_session_assignment(SessionAssignment {
+            session_id: session_id.clone(),
+            coordinator_user_id: manifest.manifest.coordinator_user_id.clone(),
+            coordinator_enclave,
+            user_enclave_assignments: assignments.clone(),
+            created_at,
+        })
     }
 
     pub fn copy_session_assignment_for_signing(

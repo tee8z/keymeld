@@ -1,7 +1,15 @@
 # Deploy KeyMeld 0.4.0 on AWS Nitro
 
+The 0.4.0 beta has not been exercised on Nitro hardware; treat the first deployment as the acceptance run and use test keys only.
+
 Build measured images, review their manifests and KMS policy, then deploy the reviewed local artifacts.
 The helpers do not publish images, download mutable aliases, or change KMS policies.
+
+One gateway and one enclave support multiple signing participants.
+Configure one entry under `enclaves.enclaves`; all participant keys then share that enclave's isolation boundary.
+Participant credentials and signing approvals remain required.
+With multiple configured enclaves, KeyMeld distributes participants across them.
+Keep [one gateway owner per database and backup prefix](SECURITY_OPERATIONS.md#sqlite-ownership-and-shutdown).
 
 ## Prepare and build
 
@@ -23,8 +31,11 @@ Review and combine manifests as described in [measured image deployment](SECURIT
 
 Start the [parent KMS and credential relays](KMS.md#nitro-network-and-credentials) under a supervised service.
 Configure trusted measurements, gateway credentials, and matching KMS settings before deployment.
+Set `CONFIG_PATH` to a reviewed config with the intended enclave entries and actual `kms.key_id` ARN.
+The launcher preserves that path; the production template contains three enclave entries.
 
 ```bash
+export CONFIG_PATH="$PWD/reviewed-production.yaml"
 export EIF_MANIFEST="$PWD/reviewed-enclaves.json"
 export KEYMELD_AWS_ENV_FILE="$PWD/keymeld-aws.env"
 just deploy-aws

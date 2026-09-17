@@ -58,7 +58,8 @@ trap 'rm -f -- "$keymeld_temporary_env"' EXIT
 {
     printf '%s\n' '# Generated from reviewed per-enclave EIF artifacts.'
     printf '%s\n' 'export KEYMELD_ENVIRONMENT=production' 'export KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=false'
-    printf '%s\n' 'export CONFIG_PATH=config/production.yaml' 'unset KEYMELD_ENCLAVE_PCR0'
+    printf 'export CONFIG_PATH=%q\n' "${CONFIG_PATH:-config/production.yaml}"
+    printf '%s\n' 'unset KEYMELD_ENCLAVE_PCR0'
     printf 'export KEYMELD_ENCLAVE_PCR8=%q\n' "$KEYMELD_ENCLAVE_PCR8"
     printf 'export KEYMELD_EIF_MANIFEST=%q\n' "$EIF_MANIFEST"
 } > "$keymeld_temporary_env"

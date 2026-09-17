@@ -11,7 +11,7 @@ use crate::{
     middleware::metrics_middleware,
     routes,
 };
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::{
     middleware,
     response::Html,
@@ -34,7 +34,13 @@ use keymeld_sdk::{
 
 use std::{io::Error as IoError, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
-use tokio::{net::TcpListener, signal, task::JoinHandle, time::timeout};
+use tokio::{
+    net::TcpListener,
+    signal,
+    sync::oneshot,
+    task::{JoinError, JoinHandle},
+    time::{timeout, timeout_at, Instant},
+};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::OpenApi;
 
@@ -193,127 +199,156 @@ impl Modify for SecurityAddon {
 pub struct Application {
     listener: TcpListener,
     app: Router,
-    coordinator_handle: JoinHandle<Result<(), ApiError>>,
-    coordinator_shutdown: tokio::sync::oneshot::Sender<()>,
+    runtime: ApplicationRuntime,
+}
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+// The signal task starts before SQLite opens. Own it during that await so
+// cancellation of build() cannot detach a process-wide signal listener.
+struct StartupSignalTask(Option<JoinHandle<()>>);
+
+impl Drop for StartupSignalTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
+struct ApplicationRuntime {
     db: Database,
+    requested: oneshot::Receiver<()>,
+    signal_task: Option<JoinHandle<()>>,
+    http: Option<JoinHandle<Result<(), IoError>>>,
+    http_shutdown: Option<oneshot::Sender<()>>,
+    coordinator: Option<JoinHandle<Result<(), ApiError>>>,
+    coordinator_shutdown: Option<oneshot::Sender<()>>,
+    writer: Option<JoinHandle<Result<()>>>,
+    writer_shutdown: Option<oneshot::Sender<()>>,
+    shutdown_timeout: Duration,
 }
 
 impl Application {
     pub async fn build(config: Config) -> Result<Self> {
-        let db = Database::new(&config.database)
-            .await
-            .context("Failed to initialize database")?;
-
-        // Initialize KMS client if enabled
-        let _kms_client = kms::init_kms_client(&config.kms)
-            .await
-            .context("Failed to initialize KMS client")?;
-
-        let enclave_manager = Self::setup_enclave_manager(&config, &db).await?;
-        let metrics = Arc::new(Metrics);
-        let db_for_shutdown = db.clone();
-        let app_state = AppState {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let (signal_task, mut requested) = install_shutdown_signal()?;
+        let mut signal_task = StartupSignalTask(Some(signal_task));
+        let opened = tokio::select! {
+            biased;
+            _ = &mut requested => Err(anyhow!("Shutdown requested during database initialization")),
+            result = timeout_at(deadline, Database::open(&config.database)) => {
+                result.context("Database initialization exceeded startup timeout").and_then(|result| result)
+            }
+        };
+        let (db, writer) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                if let Some(task) = signal_task.0.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                return Err(error.context("Failed to initialize database"));
+            }
+        };
+        let (writer_shutdown, receiver) = oneshot::channel();
+        let mut runtime = ApplicationRuntime {
             db: db.clone(),
-            enclave_manager: enclave_manager.clone(),
-            metrics: metrics.clone(),
-            gateway_limits: GatewayLimits::default(),
-            nonce_cache: NonceCache::new(),
+            requested,
+            signal_task: signal_task.0.take(),
+            http: None,
+            http_shutdown: None,
+            coordinator: None,
+            coordinator_shutdown: None,
+            writer: Some(tokio::spawn(writer.run(receiver))),
+            writer_shutdown: Some(writer_shutdown),
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
         };
-
-        let app = Self::build_router(app_state, &config)?;
-
-        let address = format!("{}:{}", config.server.host, config.server.port);
-        let addr = SocketAddr::from_str(&address)
-            .with_context(|| format!("Failed to parse address: {address}"))?;
-
-        let listener = match TcpListener::bind(addr).await {
-            Ok(listener) => listener,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                suggest_port_conflict_resolution(addr);
-                return Err(anyhow::anyhow!(
-                    "Cannot start server - address {addr} is already in use. \
-                    Another instance may be running or the port is occupied by a different service."
-                ));
+        let prepare = async {
+            let _kms_client = kms::init_kms_client(&config.kms)
+                .await
+                .context("Failed to initialize KMS client")?;
+            let enclave_manager = Self::setup_enclave_manager(&config, &db).await?;
+            let metrics = Arc::new(Metrics);
+            let app = Self::build_router(
+                AppState {
+                    db: db.clone(),
+                    enclave_manager: enclave_manager.clone(),
+                    metrics: metrics.clone(),
+                    gateway_limits: GatewayLimits::default(),
+                    nonce_cache: NonceCache::new(),
+                },
+                &config,
+            )?;
+            let address = format!("{}:{}", config.server.host, config.server.port);
+            let addr = SocketAddr::from_str(&address)
+                .with_context(|| format!("Failed to parse address: {address}"))?;
+            let listener = TcpListener::bind(addr).await.map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AddrInUse {
+                    suggest_port_conflict_resolution(addr);
+                }
+                anyhow!(error).context(format!("Failed to bind to address: {addr}"))
+            })?;
+            let (coordinator, persistence) = Coordinator::new(
+                Arc::new(db),
+                enclave_manager,
+                Some(config.coordinator.clone()),
+                config.kms.clone(),
+                metrics,
+            )?;
+            Ok::<_, anyhow::Error>((listener, app, coordinator, persistence))
+        };
+        let prepared = tokio::select! {
+            biased;
+            _ = &mut runtime.requested => Err(anyhow!("Shutdown requested during startup")),
+            completion = wait_for_task(&mut runtime.writer) => {
+                Err(unexpected_task_result("Database writer", completion))
             }
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to bind to address: {addr}"));
+            result = timeout_at(deadline, prepare) => {
+                result.context("Gateway initialization exceeded startup timeout").and_then(|result| result)
             }
         };
-
-        let coordinator_config = Some(config.coordinator.clone());
-        let coordinator = Coordinator::new(
-            Arc::new(db.clone()),
-            enclave_manager.clone(),
-            coordinator_config,
-            config.kms.clone(),
-            metrics.clone(),
-        );
-        let (coordinator_handle, coordinator_shutdown) = coordinator.start_background_task();
-
+        let (listener, app, coordinator, persistence) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Err(cleanup) = runtime.shutdown().await {
+                    error!(error = %cleanup, "Shutdown after startup failure also failed");
+                }
+                return Err(error);
+            }
+        };
+        let (handle, shutdown) = coordinator.start_background_task(persistence);
+        runtime.coordinator = Some(handle);
+        runtime.coordinator_shutdown = Some(shutdown);
         Ok(Self {
             listener,
             app,
-            coordinator_handle,
-            coordinator_shutdown,
-            db: db_for_shutdown,
+            runtime,
         })
     }
 
     pub async fn run_until_stopped(self) -> Result<(), IoError> {
-        let socket_addr = self
-            .listener
-            .local_addr()
-            .map_err(|e| IoError::other(format!("Failed to get local address: {e}")))?;
-
-        let server = serve(
-            self.listener,
-            self.app.into_make_service_with_connect_info::<SocketAddr>(),
-        );
-
+        let Self {
+            listener,
+            app,
+            mut runtime,
+        } = self;
+        let socket_addr = listener.local_addr()?;
+        let (shutdown, receiver) = oneshot::channel();
+        runtime.http_shutdown = Some(shutdown);
+        runtime.http = Some(tokio::spawn(async move {
+            serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = receiver.await;
+            })
+            .await
+        }));
         info!("HTTP server started on {}", socket_addr);
-        info!("API Documentation:");
-        info!(
-            "  → Interactive docs: http://{}:{}/api/v1/docs",
-            socket_addr.ip(),
-            socket_addr.port()
-        );
-        info!(
-            "  → OpenAPI spec:     http://{}:{}/api/v1/openapi.json",
-            socket_addr.ip(),
-            socket_addr.port()
-        );
-
-        match server.with_graceful_shutdown(shutdown_signal()).await {
-            Ok(_) => {
-                info!("Server on {} shut down gracefully", socket_addr);
-
-                let _ = self.coordinator_shutdown.send(());
-                match timeout(Duration::from_secs(10), self.coordinator_handle).await {
-                    Ok(Ok(_)) => {
-                        info!("Session coordinator shut down gracefully");
-                    }
-                    Ok(Err(e)) => {
-                        error!("Session coordinator shutdown error: {:?}", e);
-                    }
-                    Err(_) => {
-                        warn!("Session coordinator shutdown timed out after 10 seconds");
-                    }
-                }
-
-                // Checkpoint WAL before exit so Litestream replicates a complete database
-                info!("Checkpointing WAL before shutdown...");
-                self.db.checkpoint().await;
-
-                Ok(())
-            }
-            Err(e) => {
-                error!("Server error on {}: {}", socket_addr, e);
-
-                let _ = self.coordinator_shutdown.send(());
-                self.coordinator_handle.abort();
-                Err(IoError::other(e))
-            }
-        }
+        runtime.run_until_stopped().await.map_err(IoError::other)
     }
 
     async fn setup_enclave_manager(config: &Config, db: &Database) -> Result<Arc<EnclaveManager>> {
@@ -625,38 +660,181 @@ where
     )
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(e) = signal::ctrl_c().await {
-            error!("Failed to install Ctrl+C handler: {}", e);
-            return;
-        }
-        info!("Received Ctrl+C signal");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-                info!("Received SIGTERM signal");
+impl ApplicationRuntime {
+    async fn run_until_stopped(mut self) -> Result<()> {
+        let result = tokio::select! {
+            biased;
+            _ = &mut self.requested => Ok(()),
+            completion = wait_for_task(&mut self.writer) => {
+                Err(unexpected_task_result("Database writer", completion))
             }
-            Err(e) => {
-                error!("Failed to install SIGTERM handler: {}", e);
+            completion = wait_for_task(&mut self.coordinator) => {
+                Err(unexpected_task_result("Session coordinator", completion))
             }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+            completion = wait_for_task(&mut self.http) => {
+                Err(unexpected_task_result("HTTP server", completion))
+            }
+        };
+        combine_results(result, self.shutdown().await)
     }
 
-    info!("Shutdown signal received, starting graceful shutdown...");
+    async fn shutdown(&mut self) -> Result<()> {
+        self.db.stop_readiness();
+        if let Some(shutdown) = self.http_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let result = match timeout(self.shutdown_timeout, self.drain()).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.abort_tasks();
+                if self.http.is_some() {
+                    let _ = wait_for_task(&mut self.http).await;
+                }
+                if self.coordinator.is_some() {
+                    let _ = wait_for_task(&mut self.coordinator).await;
+                }
+                if self.writer.is_some() {
+                    let _ = wait_for_task(&mut self.writer).await;
+                }
+                Err(anyhow!(
+                    "Shutdown exceeded {} seconds; accepted operation outcomes may be unknown",
+                    self.shutdown_timeout.as_secs_f64()
+                ))
+            }
+        };
+        if let Some(signal_task) = self.signal_task.take() {
+            signal_task.abort();
+            let _ = signal_task.await;
+        }
+        result
+    }
+
+    async fn drain(&mut self) -> Result<()> {
+        let http = if self.http.is_some() {
+            task_result("HTTP server", wait_for_task(&mut self.http).await)
+        } else {
+            Ok(())
+        };
+        // HTTP handlers may enqueue writes until they finish. The coordinator
+        // then finishes its current work and drains enclave transitions before
+        // the database writer closes admission and drains accepted SQL writes.
+        if let Some(shutdown) = self.coordinator_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let coordinator = if self.coordinator.is_some() {
+            task_result(
+                "Session coordinator",
+                wait_for_task(&mut self.coordinator).await,
+            )
+        } else {
+            Ok(())
+        };
+        if let Some(shutdown) = self.writer_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let writer = if self.writer.is_some() {
+            task_result("Database writer", wait_for_task(&mut self.writer).await)
+        } else {
+            Ok(())
+        };
+        combine_results(combine_results(http, coordinator), writer)
+    }
+
+    fn abort_tasks(&self) {
+        if let Some(task) = &self.http {
+            task.abort();
+        }
+        if let Some(task) = &self.coordinator {
+            task.abort();
+        }
+        if let Some(task) = &self.writer {
+            task.abort();
+        }
+        if let Some(task) = &self.signal_task {
+            task.abort();
+        }
+    }
 }
+
+impl Drop for ApplicationRuntime {
+    fn drop(&mut self) {
+        // Dropping a JoinHandle detaches it. Cancellation must not leave a
+        // background coordinator or writable connection running unsupervised.
+        self.abort_tasks();
+    }
+}
+
+type TaskResult<E> = std::result::Result<std::result::Result<(), E>, JoinError>;
+
+async fn wait_for_task<E>(
+    task: &mut Option<JoinHandle<std::result::Result<(), E>>>,
+) -> TaskResult<E> {
+    let result = match task.as_mut() {
+        Some(task) => task.await,
+        None => std::future::pending().await,
+    };
+    task.take();
+    result
+}
+
+fn task_result<E: Into<anyhow::Error>>(name: &str, result: TaskResult<E>) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.into().context(format!("{name} task failed"))),
+        Err(error) => Err(anyhow!(error).context(format!("{name} task panicked or was aborted"))),
+    }
+}
+
+fn unexpected_task_result<E: Into<anyhow::Error>>(
+    name: &str,
+    result: TaskResult<E>,
+) -> anyhow::Error {
+    task_result(name, result)
+        .err()
+        .unwrap_or_else(|| anyhow!("{name} task stopped unexpectedly"))
+}
+
+fn combine_results(first: Result<()>, second: Result<()>) -> Result<()> {
+    match (first, second) {
+        (Err(error), Err(additional)) => {
+            error!(error = %additional, "Additional shutdown failure");
+            Err(error)
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+fn install_shutdown_signal() -> Result<(JoinHandle<()>, oneshot::Receiver<()>)> {
+    // Register before initialization so a signal received during startup persists.
+    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    let mut interrupt = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
+    let (shutdown, receiver) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+        let _ = shutdown.send(());
+    });
+    Ok((task, receiver))
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_signal() -> Result<(JoinHandle<()>, oneshot::Receiver<()>)> {
+    let (shutdown, receiver) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        if let Err(error) = signal::ctrl_c().await {
+            error!(%error, "Termination signal handler failed");
+        }
+        let _ = shutdown.send(());
+    });
+    Ok((task, receiver))
+}
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

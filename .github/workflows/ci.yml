@@ -148,6 +148,7 @@ jobs:
           bash scripts/test-nitro-bridges.sh
           bash scripts/test-locked-kms-policy.sh
           bash scripts/test-nitro-kms-e2e-mocks.sh
+          bash scripts/test-aws-launchers.sh
 
   # WASM SDK build check
   wasm:
@@ -213,6 +214,9 @@ jobs:
           - name: authorization
             command: bash examples/run-authorization-e2e.sh --skip-build
             timeout: 20
+          - name: single-enclave
+            command: just test-single-enclave
+            timeout: 20
           - name: ui-playwright
             command: just test-ui-e2e
             timeout: 15
@@ -250,8 +254,8 @@ jobs:
 
       - name: Set up VSock for CI
         run: |
-          echo "CI=true" >> $GITHUB_ENV
-          echo "AUTOMATED_RUN=true" >> $GITHUB_ENV
+          echo "CI=true" >> "$GITHUB_ENV"
+          echo "AUTOMATED_RUN=true" >> "$GITHUB_ENV"
           ./scripts/vsock-setup.sh setup
 
       - name: Setup Node.js for Playwright

@@ -44,7 +44,9 @@ pub struct EnclaveAssignmentManager {
 }
 
 impl EnclaveAssignmentManager {
-    pub fn new(available_enclaves: Vec<EnclaveId>) -> Self {
+    pub fn new(mut available_enclaves: Vec<EnclaveId>) -> Self {
+        // Reserved sessions can reconstruct their assignment after restart.
+        available_enclaves.sort();
         let enclave_loads = DashMap::new();
         for &enclave_id in &available_enclaves {
             enclave_loads.insert(enclave_id, AtomicU32::new(0));
@@ -58,6 +60,20 @@ impl EnclaveAssignmentManager {
     }
 
     pub fn assign_enclaves_for_session_with_distributed_coordinator(
+        &self,
+        session_id: SessionId,
+        user_ids: &[UserId],
+        coordinator_user_id: &UserId,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        let assignment = self.plan_enclaves_for_session_with_distributed_coordinator(
+            session_id,
+            user_ids,
+            coordinator_user_id,
+        )?;
+        self.publish_assignment(assignment)
+    }
+
+    pub fn plan_enclaves_for_session_with_distributed_coordinator(
         &self,
         session_id: SessionId,
         user_ids: &[UserId],
@@ -97,7 +113,7 @@ impl EnclaveAssignmentManager {
         );
 
         // Use existing logic with the distributed coordinator
-        self.assign_enclaves_for_session_with_coordinator(
+        self.plan_enclaves_for_session_with_coordinator(
             session_id,
             user_ids,
             coordinator_user_id,
@@ -106,6 +122,22 @@ impl EnclaveAssignmentManager {
     }
 
     pub fn assign_enclaves_for_session_with_coordinator(
+        &self,
+        session_id: SessionId,
+        user_ids: &[UserId],
+        coordinator_user_id: &UserId,
+        coordinator_enclave: EnclaveId,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        let assignment = self.plan_enclaves_for_session_with_coordinator(
+            session_id,
+            user_ids,
+            coordinator_user_id,
+            coordinator_enclave,
+        )?;
+        self.publish_assignment(assignment)
+    }
+
+    pub fn plan_enclaves_for_session_with_coordinator(
         &self,
         session_id: SessionId,
         user_ids: &[UserId],
@@ -142,22 +174,16 @@ impl EnclaveAssignmentManager {
 
         user_assignments.insert(coordinator_user_id.clone(), coordinator_enclave);
 
-        // CRITICAL SECURITY: Distribute participants across multiple enclaves
-        // NEVER allow all keys to be in a single enclave
+        // Use the configured topology. A single enclave can hold multiple
+        // participants; their registration and signing authorities stay separate.
         let remaining_participants: Vec<_> = user_ids
             .iter()
             .filter(|&uid| uid != coordinator_user_id)
             .cloned()
             .collect();
 
-        if self.available_enclaves.len() < 2 {
-            return Err(KeyMeldError::InvalidConfiguration(
-                "At least 2 enclaves required for secure key distribution".to_string(),
-            ));
-        }
-
         if user_ids.len() > 1 {
-            // For multi-user sessions, enforce that keys are distributed across at least 2 enclaves
+            // Spread keys across multiple enclaves when the deployment has them.
             let mut used_enclaves = std::collections::HashSet::new();
             used_enclaves.insert(coordinator_enclave);
 
@@ -166,14 +192,9 @@ impl EnclaveAssignmentManager {
                 let assigned_enclave = self.available_enclaves[enclave_index];
                 user_assignments.insert(user_id.clone(), assigned_enclave);
                 used_enclaves.insert(assigned_enclave);
-
-                if let Some(load) = self.enclave_loads.get(&assigned_enclave) {
-                    load.fetch_add(1, Ordering::Relaxed);
-                }
             }
 
-            // Security check: Ensure keys are distributed across multiple enclaves
-            if used_enclaves.len() < 2 {
+            if used_enclaves.len() < 2 && self.available_enclaves.len() > 1 {
                 // Force the first non-coordinator participant to a different enclave
                 if let Some(first_participant) = remaining_participants.first() {
                     let different_enclave = self
@@ -186,9 +207,6 @@ impl EnclaveAssignmentManager {
                         ))?;
 
                     user_assignments.insert(first_participant.clone(), different_enclave);
-                    if let Some(load) = self.enclave_loads.get(&different_enclave) {
-                        load.fetch_add(1, Ordering::Relaxed);
-                    }
                 }
             }
         } else {
@@ -197,10 +215,6 @@ impl EnclaveAssignmentManager {
                 "MuSig2 requires at least 2 participants. Single-user sessions are not supported."
                     .to_string(),
             ));
-        }
-
-        if let Some(load) = self.enclave_loads.get(&coordinator_enclave) {
-            load.fetch_add(1, Ordering::Relaxed);
         }
 
         let assignment = SessionAssignment {
@@ -214,9 +228,9 @@ impl EnclaveAssignmentManager {
                 .as_secs(),
         };
 
-        // CRITICAL SECURITY VALIDATION: Ensure keys are distributed across multiple enclaves
+        // A multi-enclave deployment must still distribute its participants.
         let all_assigned_enclaves = assignment.get_all_assigned_enclaves();
-        if all_assigned_enclaves.len() < 2 && user_ids.len() > 1 {
+        if all_assigned_enclaves.len() < 2 && self.available_enclaves.len() > 1 {
             return Err(KeyMeldError::InvalidConfiguration(format!(
                 "Security violation: All {} participants assigned to single enclave {}. Keys must be distributed across multiple enclaves.",
                 user_ids.len(),
@@ -243,15 +257,41 @@ impl EnclaveAssignmentManager {
             assignment.user_enclave_assignments
         );
 
-        match self.session_assignments.entry(session_id) {
-            Entry::Occupied(mut entry) => {
-                entry.insert(assignment.clone());
+        Ok(assignment)
+    }
+
+    /// Publish only an assignment whose reservation or roster was persisted.
+    /// Repeated publication is harmless; a different authority cannot replace it.
+    pub fn publish_assignment(
+        &self,
+        assignment: SessionAssignment,
+    ) -> Result<SessionAssignment, KeyMeldError> {
+        match self
+            .session_assignments
+            .entry(assignment.session_id.clone())
+        {
+            Entry::Occupied(entry) => {
+                let current = entry.get();
+                if current.coordinator_user_id != assignment.coordinator_user_id
+                    || current.coordinator_enclave != assignment.coordinator_enclave
+                    || current.user_enclave_assignments != assignment.user_enclave_assignments
+                {
+                    return Err(KeyMeldError::InvalidConfiguration(
+                        "Session assignment differs from its persisted authority".to_string(),
+                    ));
+                }
+                Ok(current.clone())
             }
             Entry::Vacant(entry) => {
+                for enclave_id in assignment.user_enclave_assignments.values() {
+                    if let Some(load) = self.enclave_loads.get(enclave_id) {
+                        load.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 entry.insert(assignment.clone());
+                Ok(assignment)
             }
         }
-        Ok(assignment)
     }
 
     pub fn get_session_assignment(&self, session_id: &SessionId) -> Option<SessionAssignment> {
@@ -408,5 +448,61 @@ impl EnclaveAssignmentManager {
                 entry.insert(assignment);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_enclave_supports_multiple_participants_and_signing_assignment() {
+        let enclave = EnclaveId::from(7);
+        let manager = EnclaveAssignmentManager::new(vec![enclave]);
+        let participants = vec![UserId::new_v7(), UserId::new_v7(), UserId::new_v7()];
+        let keygen_id = SessionId::new_v7();
+        let assignment = manager
+            .assign_enclaves_for_session_with_distributed_coordinator(
+                keygen_id.clone(),
+                &participants,
+                &participants[0],
+            )
+            .unwrap();
+        assert_eq!(assignment.get_all_assigned_enclaves(), vec![enclave]);
+        assert_eq!(
+            assignment.user_enclave_assignments.len(),
+            participants.len()
+        );
+        for participant in &participants {
+            assert_eq!(assignment.get_user_enclave(participant), Some(enclave));
+        }
+        let signing = manager
+            .copy_session_assignment_for_signing(&keygen_id, SessionId::new_v7())
+            .unwrap();
+        assert_eq!(
+            signing.user_enclave_assignments,
+            assignment.user_enclave_assignments
+        );
+    }
+
+    #[test]
+    fn multiple_enclaves_keep_two_participants_separate() {
+        let enclaves = vec![EnclaveId::from(0), EnclaveId::from(1)];
+        let manager = EnclaveAssignmentManager::new(enclaves.clone());
+        let participants = vec![UserId::new_v7(), UserId::new_v7()];
+        let session_id = SessionId::new_v7();
+        let assignment = manager
+            .assign_enclaves_for_session_with_coordinator(
+                session_id.clone(),
+                &participants,
+                &participants[0],
+                enclaves[0],
+            )
+            .unwrap();
+        assert_eq!(assignment.get_all_assigned_enclaves(), enclaves);
+        assert_ne!(
+            assignment.get_user_enclave(&participants[0]),
+            assignment.get_user_enclave(&participants[1])
+        );
     }
 }

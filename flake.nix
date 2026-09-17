@@ -197,6 +197,21 @@
           ];
 
           shellHook = ''
+            # Host environments (for example NixOS set-environment) can export
+            # OpenSSL, pkg-config, and dynamic-linker overrides built against a
+            # different glibc than this shell's nixpkgs. Pin them to this shell so
+            # builds, tests, curl, aws, and moto resolve one consistent toolchain.
+            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            unset OPENSSL_DIR
+            export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH_FOR_TARGET:-${pkgs.openssl.dev}/lib/pkgconfig}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.openssl ]}"
+            # A host sccache wrapper refuses incremental artifacts, which
+            # .cargo/config.toml enables; keep plain cargo usable with it.
+            if [ -n "''${RUSTC_WRAPPER:-}" ]; then
+              export CARGO_INCREMENTAL=0
+            fi
+
             # Clear any problematic eval cache on shell entry to prevent SQLite conflicts
             if [ -d "$HOME/.cache/nix/eval-cache-v6" ]; then
               rm -rf "$HOME/.cache/nix/eval-cache-v6" 2>/dev/null || true
@@ -849,38 +864,8 @@ EOF
         '';
 
         gateway-aws = pkgs.writeShellScriptBin "gateway-aws" ''
-          set -e
-
-          echo "Starting KeyMeld Gateway for AWS Nitro Enclaves"
-
-          # Check if environment file exists
-          if [ -f "keymeld-aws.env" ]; then
-            echo "Loading AWS environment configuration..."
-            source keymeld-aws.env
-          else
-            echo "No keymeld-aws.env found. Using environment variables directly."
-            echo "   Make sure KEYMELD_ENCLAVE_*_CID variables are set."
-          fi
-
-          # Verify CIDs are set
-          if [ -z "$KEYMELD_ENCLAVE_0_CID" ]; then
-            echo "KEYMELD_ENCLAVE_0_CID not set. Run 'nix run .#deploy-aws' first."
-            exit 1
-          fi
-
-          echo "Gateway Configuration:"
-          echo "   Environment: ''${KEYMELD_ENVIRONMENT:-production}"
-          echo "   Config: ''${CONFIG_PATH:-config/production.yaml}"
-          echo "   Enclave 0 CID: $KEYMELD_ENCLAVE_0_CID"
-          echo "   Enclave 1 CID: ''${KEYMELD_ENCLAVE_1_CID:-not_set}"
-          echo "   Enclave 2 CID: ''${KEYMELD_ENCLAVE_2_CID:-not_set}"
-
-          # Start gateway with production configuration
-          export RUST_LOG=''${RUST_LOG:-"info,keymeld_gateway=debug"}
-          export KEYMELD_ENVIRONMENT=''${KEYMELD_ENVIRONMENT:-production}
-
-          echo "Starting gateway..."
-          ${keymeld-gateway}/bin/keymeld-gateway
+          set -euo pipefail
+          exec ${pkgs.bash}/bin/bash "$PWD/scripts/start-aws-gateway.sh" "${keymeld-gateway}/bin/keymeld-gateway"
         '';
 
         stop-aws-enclaves = pkgs.writeShellScriptBin "stop-aws-enclaves" ''
@@ -1007,8 +992,8 @@ EOF
           restore-litestream = restore-litestream;
 
           # AWS deployment automation
-          build-eif = build-enclave-eif;      # CI/CD: Build and upload EIF
-          deploy-aws = deploy-aws-enclaves;   # Production: Download and deploy
+          build-eif = build-enclave-eif;      # Build measured EIF and review manifest
+          deploy-aws = deploy-aws-enclaves;   # Deploy reviewed local EIF artifacts
           gateway-aws = gateway-aws;          # Production: Start gateway
           stop-aws = stop-aws-enclaves;       # Production: Stop and cleanup
         };

@@ -121,6 +121,7 @@ The runner creates a temporary gateway credential and pins its public key in all
 It also pins the temporary Moto KMS endpoint and key.
 Only this explicit development setup disables attestation verification.
 Command authentication and participant authorization remain required.
+Run `just test-single-enclave` for the same authorization, signing, and restart checks with one enclave and multiple participants.
 
 The local launchers use `scripts/development-auth.sh` to provision an ignored development credential.
 The helper explicitly selects `KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=true` for simulation.
@@ -150,7 +151,7 @@ Production defaults allow a per-IP burst of 512 requests and refill 30 requests 
 The process-wide burst is 2048, refilling 120 requests per second.
 At most 8192 depleted client buckets are retained.
 Configure these bounds under `server.rate_limit`; all bounds must remain positive.
-Limits apply per gateway process, so replicated deployments need an additional shared ingress limit.
+Limits apply per gateway process.
 
 Rejected requests return HTTP 429 and `Retry-After`.
 The SDK exposes that delay as `ApiError::RateLimited.retry_after_secs`.
@@ -166,15 +167,28 @@ An empty list permits no cross-origin browser clients; wildcard origins are reje
 For example, allow the coordinator's exact `https://` origin when its browser client calls KeyMeld directly.
 CORS does not authenticate requests; participant and signing credentials remain required.
 
+## SQLite ownership and shutdown
+
+Run one live gateway per SQLite database and Litestream replica prefix.
+The Helm chart requires one replica and `Recreate` updates; it rejects `blueGreen.enabled` and ships no blue/green templates.
+All database clones share a bounded queue and one writable connection.
+`database.max_connections` bounds the read-only pool, in addition to that writer.
+Success confirms a local commit; asynchronous backups do not guarantee remote durability.
+
+Shutdown disables readiness, drains HTTP and coordinator work, then drains accepted writes and closes SQLite.
+The gateway allows 30 seconds for shutdown; give the process supervisor additional time for backup cleanup.
+A full or closed write queue returns HTTP 503 (`database_unavailable`).
+A lost reply after admission returns HTTP 500 (`database_outcome_unknown`); check operation state before retrying.
+Retries need fresh authentication proofs.
+
 ## Acceptance before release
 
 Run workspace tests, Clippy, WASM compilation, SQLx checks, and the isolated security regressions on the reviewed commit.
 The live suite must retain valid signing after rejected attacks, gateway restart, and full enclave restart.
 Run the release workflow as a dry run before tagging.
 
-Real Nitro deployment requires an additional hardware acceptance run with the final measured image and KMS policy.
-Verify signed attestation, rejected debug mode, gateway credential rejection, KMS recovery, and signing after restart on that deployment.
-Local TCP tests and signed attestation fixtures cannot establish hardware deployment readiness.
+The 0.4.0 beta has not been run on Nitro hardware; local TCP tests and signed attestation fixtures cannot establish that.
+Before trusting a Nitro deployment with real keys, follow the [KMS hardware acceptance procedure](KMS.md#hardware-acceptance) with the final measured image and KMS policy.
+That run verifies signed attestation, rejected debug mode, gateway credential rejection, KMS recovery, and signing after restart.
 KMS recovery requires Nitro `Recipient` in production; ordinary IAM credentials alone must fail under the deployed locked policy.
-Follow the [KMS hardware acceptance procedure](KMS.md#hardware-acceptance) with the final image and policy.
 See the [0.4.0 upgrade notes](releases/0.4.0.md).
