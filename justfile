@@ -25,6 +25,7 @@ help:
     @echo "  demo-adaptors       Run adaptor signatures demo"
     @echo "  test-dlctix-batch   Run DLC batch signing E2E test"
     @echo "  test-single-signer  Run single-signer E2E test"
+    @echo "  test-single-enclave Run multisignature E2E with one enclave"
     @echo "  test-kms-e2e        Run KMS end-to-end tests with restart"
     @echo "  test-ui             Run Playwright UI tests (services must be running)"
     @echo "  test-ui-e2e         Run full UI E2E test (starts services automatically)"
@@ -41,7 +42,7 @@ help:
     @echo ""
     @echo "AWS CI/CD Workflow:"
     @echo "  build-eif           Build measured AWS Nitro image and review manifest"
-    @echo "  deploy-aws          [Production] Download EIF and deploy to AWS"
+    @echo "  deploy-aws          [Production] Deploy reviewed local EIF artifacts"
     @echo "  gateway-aws         [Production] Start gateway for AWS deployment"
     @echo "  stop-aws            [Production] Stop AWS enclaves and cleanup"
     @echo ""
@@ -399,6 +400,18 @@ stress mode count amount="50000":
         ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
     else
         nix develop -c ./scripts/run-stress-test.sh {{mode}} {{count}} {{amount}}
+    fi
+
+# Test multiple signing participants on one gateway and one enclave, including recovery
+test-single-enclave:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--single-enclave)
+    if [[ -n "${SKIP_BUILD:-}" ]]; then args+=(--skip-build); fi
+    if [[ -n "${IN_NIX_SHELL:-}" ]]; then
+        bash examples/run-authorization-e2e.sh "${args[@]}"
+    else
+        nix develop -c bash examples/run-authorization-e2e.sh "${args[@]}"
     fi
 
 # Monitor stress test progress in real-time

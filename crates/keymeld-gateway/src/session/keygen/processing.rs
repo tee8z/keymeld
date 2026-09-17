@@ -76,16 +76,14 @@ impl Advanceable<KeygenSessionStatus> for KeygenCollectingParticipants {
             enclave_manager,
         )?;
 
-        let user_ids: Vec<_> = self.expected_participants.to_vec();
-
-        let coordinator_user_id = &self.authorization_manifest.manifest.coordinator_user_id;
-
         enclave_manager
-            .create_session_assignment_with_coordinator(
-                self.keygen_session_id.clone(),
-                &user_ids,
-                coordinator_user_id,
+            .assignment_from_authorized_roster(
+                &self.keygen_session_id,
                 self.coordinator_enclave_id,
+                &self.expected_participants,
+                &self.authorization_manifest,
+                &self.recipient_authorization,
+                self.created_at,
             )
             .map_err(|e| {
                 KeyMeldError::EnclaveError(format!("Failed to create session assignment: {e}"))

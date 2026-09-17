@@ -1,4 +1,6 @@
 mod request_auth;
+#[cfg(test)]
+mod writer_tests;
 
 use crate::{
     config::DatabaseConfig,
@@ -12,6 +14,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
+use futures::future::BoxFuture;
 use keymeld_core::{
     authorization::ParticipantApproval,
     identifiers::{EnclaveId, KeyId, SessionId, UserId},
@@ -24,9 +27,17 @@ use keymeld_sdk::{
 use secp256k1::PublicKey;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
-    FromRow,
+    Connection, FromRow, SqliteConnection,
 };
-use std::{collections::BTreeMap, future::Future, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use time::OffsetDateTime;
 use tokio::{
     fs::create_dir_all,
@@ -73,78 +84,84 @@ pub struct CreatePendingKeyImportParams<'a> {
     pub expires_at: i64,
 }
 
-type WriteOperation = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+const WRITE_QUEUE_CAPACITY: usize = 1024;
+
+type WriteOperation = Box<dyn for<'a> FnOnce(&'a mut SqliteConnection) -> BoxFuture<'a, ()> + Send>;
 
 #[derive(Debug)]
 pub struct DatabaseWriter {
-    write_tx: mpsc::UnboundedSender<WriteOperation>,
-    _handle: tokio::task::JoinHandle<()>,
-}
-
-impl Default for DatabaseWriter {
-    fn default() -> Self {
-        Self::new()
-    }
+    connection: SqliteConnection,
+    readers: SqlitePool,
+    commands: mpsc::Receiver<WriteOperation>,
+    ready: Arc<AtomicBool>,
 }
 
 impl DatabaseWriter {
-    pub fn new() -> Self {
-        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteOperation>();
+    /// The process owner must supervise this task and signal it only after
+    /// request handlers and background producers have drained.
+    pub async fn run(mut self, mut shutdown: oneshot::Receiver<()>) -> Result<()> {
+        let result = loop {
+            let command = tokio::select! {
+                biased;
+                signal = &mut shutdown => {
+                    break signal.context("Database writer shutdown sender dropped");
+                }
+                command = self.commands.recv() => {
+                    match command {
+                        Some(command) => command,
+                        None => break Err(anyhow::anyhow!("Database writer command channel closed unexpectedly")),
+                    }
+                }
+            };
+            command(&mut self.connection).await;
+        };
 
-        let handle = tokio::spawn(async move {
-            while let Some(future) = write_rx.recv().await {
-                future.await;
-            }
-        });
-
-        Self {
-            write_tx,
-            _handle: handle,
+        self.ready.store(false, Ordering::Release);
+        self.commands.close();
+        // Once admitted, a write belongs to this task even if its caller has
+        // disconnected. Closing the receiver rejects new work but retains it.
+        while let Some(command) = self.commands.recv().await {
+            command(&mut self.connection).await;
         }
-    }
-
-    pub async fn execute<T, F, Fut>(&self, pool: SqlitePool, operation: F) -> Result<T, ApiError>
-    where
-        T: Send + 'static,
-        F: FnOnce(SqlitePool) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<T, ApiError>> + Send + 'static,
-    {
-        let (result_tx, result_rx) = oneshot::channel::<Result<T, ApiError>>();
-
-        let write_op = Box::pin(async move {
-            let result = operation(pool).await;
-            let _ = result_tx.send(result);
-        });
-
-        self.write_tx
-            .send(write_op)
-            .map_err(|_| ApiError::database("Database writer channel closed".to_string()))?;
-
-        result_rx
-            .await
-            .map_err(|_| ApiError::database("Failed to receive write result".to_string()))?
+        self.readers.close().await;
+        let close = self.connection.close().await;
+        result?;
+        close.context("Failed to close database writer")?;
+        Ok(())
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Database {
+    // Request handlers can only read here; the writer owns the sole writable
+    // connection. Clones share command admission instead of creating writers.
     pool: SqlitePool,
     path: String,
-    writer: DatabaseWriter,
-}
-
-impl Clone for Database {
-    fn clone(&self) -> Self {
-        Self {
-            pool: self.pool.clone(),
-            path: self.path.clone(),
-            writer: DatabaseWriter::new(),
-        }
-    }
+    commands: mpsc::Sender<WriteOperation>,
+    ready: Arc<AtomicBool>,
 }
 
 impl Database {
-    pub async fn new(config: &DatabaseConfig) -> Result<Self> {
+    pub async fn open(config: &DatabaseConfig) -> Result<(Self, DatabaseWriter)> {
+        Self::open_with_capacity(config, WRITE_QUEUE_CAPACITY).await
+    }
+
+    async fn open_with_capacity(
+        config: &DatabaseConfig,
+        capacity: usize,
+    ) -> Result<(Self, DatabaseWriter)> {
+        anyhow::ensure!(
+            capacity > 0,
+            "Database write queue capacity must be positive"
+        );
+        anyhow::ensure!(
+            config.max_connections > 0,
+            "Database read pool size must be positive"
+        );
+        anyhow::ensure!(
+            config.connection_timeout_secs > 0,
+            "Database connection timeout must be positive"
+        );
         if let Some(parent) = std::path::Path::new(&config.path).parent() {
             create_dir_all(parent)
                 .await
@@ -159,40 +176,128 @@ impl Database {
         }
 
         options = options
-            .pragma("synchronous", "NORMAL")
+            .pragma("synchronous", "FULL")
             .pragma("busy_timeout", "5000")
             .pragma("cache_size", "-64000")
             .pragma("foreign_keys", "ON")
             .pragma("temp_store", "MEMORY");
 
+        let mut connection = SqliteConnection::connect_with(&options)
+            .await
+            .context("Failed to open database writer")?;
+        sqlx::migrate!("./migrations")
+            .run_direct(&mut connection)
+            .await
+            .context("Failed to run database migrations")?;
+
         let pool = SqlitePoolOptions::new()
             .max_connections(config.max_connections)
             .acquire_timeout(Duration::from_secs(config.connection_timeout_secs))
             .idle_timeout(config.idle_timeout_secs.map(Duration::from_secs))
-            .connect_with(options)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite:{}", config.path))?
+                    .read_only(true)
+                    .pragma("query_only", "ON")
+                    .pragma("foreign_keys", "ON")
+                    .busy_timeout(Duration::from_secs(5)),
+            )
             .await
             .context("Failed to create database connection pool")?;
 
+        let (commands, receiver) = mpsc::channel(capacity);
+        let ready = Arc::new(AtomicBool::new(true));
+        let writer = DatabaseWriter {
+            connection,
+            readers: pool.clone(),
+            commands: receiver,
+            ready: ready.clone(),
+        };
         let db = Self {
             pool,
             path: config.path.clone(),
-            writer: DatabaseWriter::new(),
+            commands,
+            ready,
         };
-
-        db.run_migrations().await?;
 
         info!("Database initialized successfully at: {}", config.path);
 
-        Ok(db)
+        Ok((db, writer))
     }
 
-    async fn run_migrations(&self) -> Result<()> {
-        sqlx::migrate!("./migrations")
-            .run(&self.pool)
-            .await
-            .context("Failed to run database migrations")?;
+    // Compatibility for unit fixtures that do not exercise process lifecycle.
+    // With no retained Database clone, the command channel closes and the
+    // writer drains and closes its connections. Production owns run() itself.
+    #[cfg(test)]
+    pub(crate) async fn new(config: &DatabaseConfig) -> Result<Self> {
+        let (database, writer) = Self::open(config).await?;
+        let (shutdown, receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            let _shutdown = shutdown;
+            let _ = writer.run(receiver).await;
+        });
+        Ok(database)
+    }
 
-        Ok(())
+    pub fn stop_readiness(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
+
+    pub fn is_writer_available(&self) -> bool {
+        self.ready.load(Ordering::Acquire) && !self.commands.is_closed()
+    }
+
+    fn write_operation<T, F>(
+        operation: F,
+    ) -> (WriteOperation, oneshot::Receiver<Result<T, ApiError>>)
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a mut SqliteConnection) -> BoxFuture<'a, Result<T, ApiError>>
+            + Send
+            + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        let command: WriteOperation = Box::new(move |connection| {
+            Box::pin(async move {
+                let result = operation(connection).await;
+                let _ = reply.send(result);
+            })
+        });
+        (command, response)
+    }
+
+    async fn execute<T, F>(&self, operation: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a mut SqliteConnection) -> BoxFuture<'a, Result<T, ApiError>>
+            + Send
+            + 'static,
+    {
+        let (command, response) = Self::write_operation(operation);
+        self.commands
+            .try_send(command)
+            .map_err(|_| ApiError::DatabaseUnavailable)?;
+        response
+            .await
+            .map_err(|_| ApiError::DatabaseOutcomeUnknown)?
+    }
+
+    // Coordinator work is already bounded and may have changed enclave state.
+    // Backpressure must retain its result and any session lease until persisted.
+    async fn execute_waiting<T, F>(&self, operation: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a mut SqliteConnection) -> BoxFuture<'a, Result<T, ApiError>>
+            + Send
+            + 'static,
+    {
+        let (command, response) = Self::write_operation(operation);
+        self.commands
+            .send(command)
+            .await
+            .map_err(|_| ApiError::DatabaseUnavailable)?;
+        response
+            .await
+            .map_err(|_| ApiError::DatabaseOutcomeUnknown)?
     }
 
     pub async fn get_stats(&self) -> Result<DatabaseStats, ApiError> {
@@ -240,6 +345,9 @@ impl Database {
     }
 
     pub async fn health_check(&self) -> Result<(), ApiError> {
+        if !self.is_writer_available() {
+            return Err(ApiError::DatabaseUnavailable);
+        }
         sqlx::query!("SELECT 1 as health_check")
             .fetch_one(&self.pool)
             .await
@@ -261,29 +369,16 @@ impl Database {
         Ok(())
     }
 
-    /// Checkpoint WAL to main database file before shutdown.
-    /// This ensures all pending writes are flushed so Litestream
-    /// can replicate a complete database to S3.
-    pub async fn checkpoint(&self) {
-        match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
-            .execute(&self.pool)
-            .await
-        {
-            Ok(_) => info!("WAL checkpoint completed successfully"),
-            Err(e) => error!("WAL checkpoint failed: {}", e),
-        }
-    }
-
     pub async fn cleanup_expired_keygen_sessions(&self) -> Result<usize, ApiError> {
-        self.writer
-            .execute(self.pool.clone(), |pool| async move {
+        self.execute(|connection| {
+            Box::pin(async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
 
                 let deleted_sessions = sqlx::query!(
                     "DELETE FROM keygen_sessions WHERE expires_at < $1",
                     current_time
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?
                 .rows_affected();
 
@@ -293,15 +388,16 @@ impl Database {
 
                 Ok(deleted_sessions as usize)
             })
-            .await
+        })
+        .await
     }
 
     pub async fn cleanup_old_completed_keygen_sessions(
         &self,
         retention_hours: u64,
     ) -> Result<usize, ApiError> {
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff_time = current_time - (retention_hours as i64 * 3600);
 
@@ -312,7 +408,7 @@ impl Database {
                     cutoff_time,
                     cutoff_time
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?
                 .rows_affected();
 
@@ -325,19 +421,20 @@ impl Database {
 
                 Ok(deleted_sessions as usize)
             })
-            .await
+        })
+        .await
     }
 
     pub async fn cleanup_expired_signing_sessions(&self) -> Result<usize, ApiError> {
-        self.writer
-            .execute(self.pool.clone(), |pool| async move {
+        self.execute(|connection| {
+            Box::pin(async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
 
                 let deleted_sessions = sqlx::query!(
                     "DELETE FROM signing_sessions WHERE expires_at < $1",
                     current_time
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?
                 .rows_affected();
 
@@ -347,15 +444,16 @@ impl Database {
 
                 Ok(deleted_sessions as usize)
             })
-            .await
+        })
+        .await
     }
 
     pub async fn cleanup_old_completed_signing_sessions(
         &self,
         retention_hours: u64,
     ) -> Result<usize, ApiError> {
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 let current_time = OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff_time = current_time - (retention_hours as i64 * 3600);
 
@@ -366,7 +464,7 @@ impl Database {
                     cutoff_time,
                     cutoff_time
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?
                 .rows_affected();
 
@@ -379,7 +477,8 @@ impl Database {
 
                 Ok(deleted_sessions as usize)
             })
-            .await
+        })
+        .await
     }
 
     pub async fn count_signing_sessions_for_keygen(
@@ -416,8 +515,7 @@ impl Database {
         coordinator_enclave_id: EnclaveId,
     ) -> Result<(), ApiError> {
         let request = request.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| Box::pin(async move {
                 let current_time = DbUtils::current_timestamp();
                 let expires_at = current_time + request.timeout_secs as i64;
 
@@ -470,11 +568,11 @@ impl Database {
                     expected_participants_json,
                     status_json
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -486,9 +584,8 @@ impl Database {
         let session_id = session_id.clone();
         let request = request.clone();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
                 // First get the existing reserved session
                 let existing_row = sqlx::query!(
                     "SELECT status, coordinator_enclave_id FROM keygen_sessions WHERE keygen_session_id = $1",
@@ -585,7 +682,7 @@ impl Database {
 
                 transaction.commit().await?;
                 Ok(request.encrypted_session_secret.clone())
-            })
+            }))
             .await
     }
 
@@ -654,9 +751,8 @@ impl Database {
     ) -> Result<usize, ApiError> {
         let keygen_session_id = keygen_session_id.clone();
         let request = request.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let status_json: String = sqlx::query_scalar(
                     "SELECT status FROM keygen_sessions WHERE keygen_session_id = ?",
                 )
@@ -755,7 +851,7 @@ impl Database {
                 .await?;
                 transaction.commit().await?;
                 Ok(count as usize)
-            })
+            }))
             .await
     }
 
@@ -860,8 +956,8 @@ impl Database {
     ) -> Result<(), ApiError> {
         let keygen_session_id = keygen_session_id.clone();
         let status = status.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 let status_json = serde_json::to_string(&status).map_err(|e| {
                     ApiError::Serialization(format!("Failed to serialize keygen status: {e}"))
                 })?;
@@ -884,12 +980,13 @@ impl Database {
                     current_time,
                     keygen_session_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     pub async fn create_signing_session(
@@ -897,9 +994,8 @@ impl Database {
         request: &CreateSigningSessionRequest,
     ) -> Result<(), ApiError> {
         let request = request.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
                 // First get the keygen session status
                 let keygen_session_id = &request.keygen_session_id;
                 let keygen_row = sqlx::query!(
@@ -1085,7 +1181,7 @@ impl Database {
 
                 transaction.commit().await?;
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -1094,18 +1190,6 @@ impl Database {
         signing_session_id: &SessionId,
     ) -> Result<Option<SigningSessionStatus>, ApiError> {
         tracing::debug!("Loading signing session {}", signing_session_id);
-
-        // Force WAL checkpoint to ensure we see recent writes
-        // PRAGMA returns columns with NULL type that sqlx macros can't map
-        let _ = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    "Failed to checkpoint WAL before signing session load: {}",
-                    e
-                );
-            });
 
         let row = sqlx::query!(
             "SELECT status FROM signing_sessions WHERE signing_session_id = $1",
@@ -1246,8 +1330,8 @@ impl Database {
     ) -> Result<(), ApiError> {
         let signing_session_id = signing_session_id.clone();
         let status = status.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 let status_json = serde_json::to_string(&status).map_err(|e| {
                     ApiError::Serialization(format!("Failed to serialize signing status: {e}"))
                 })?;
@@ -1270,12 +1354,13 @@ impl Database {
                     current_time,
                     signing_session_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     pub async fn get_keygen_session_id_from_signing_session(
@@ -1528,12 +1613,14 @@ impl Database {
         max_attempts: i64,
     ) -> Result<(), ApiError> {
         let session_id_bytes = session_id.uuid().as_bytes().to_vec();
-        let now = DbUtils::current_timestamp();
+        self.execute(move |connection| {
+            Box::pin(async move {
+                let now = DbUtils::current_timestamp();
 
-        // Increment the attempt counter; if we hit the threshold, also set
-        // restoration_failed_at so the session is excluded from future queries.
-        sqlx::query!(
-            r#"
+                // Increment the attempt counter; if we hit the threshold, also set
+                // restoration_failed_at so the session is excluded from future queries.
+                sqlx::query!(
+                    r#"
             UPDATE keygen_sessions
             SET restoration_attempts = restoration_attempts + 1,
                 restoration_failed_at = CASE
@@ -1543,14 +1630,17 @@ impl Database {
             WHERE keygen_session_id = $3
               AND restoration_failed_at IS NULL
             "#,
-            max_attempts,
-            now,
-            session_id_bytes
-        )
-        .execute(&self.pool)
-        .await?;
+                    max_attempts,
+                    now,
+                    session_id_bytes
+                )
+                .execute(&mut *connection)
+                .await?;
 
-        Ok(())
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Get all ACTIVE (non-completed, non-failed) signing sessions for an enclave.
@@ -1601,14 +1691,13 @@ impl Database {
         signing_session_id: &SessionId,
     ) -> Result<(), ApiError> {
         let signing_session_id = signing_session_id.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| Box::pin(async move {
                 // First get the current session to extract needed data
                 let row = sqlx::query!(
                     "SELECT status FROM signing_sessions WHERE signing_session_id = $1",
                     signing_session_id
                 )
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *connection)
                 .await?;
 
                 let row = row.ok_or_else(|| {
@@ -1642,7 +1731,7 @@ impl Database {
                             r#"SELECT user_id as "user_id: UserId" FROM signing_approvals WHERE signing_session_id = $1"#,
                             signing_session_id
                         )
-                        .fetch_all(&pool)
+                        .fetch_all(&mut *connection)
                         .await?;
 
                         // Get participants requiring approval from keygen session
@@ -1652,7 +1741,7 @@ impl Database {
                              WHERE keygen_session_id = $1 AND require_signing_approval = true"#,
                             keygen_session_id
                         )
-                        .fetch_all(&pool)
+                        .fetch_all(&mut *connection)
                         .await?;
 
                         SigningSessionStatus::CollectingParticipants(
@@ -1709,11 +1798,11 @@ impl Database {
                     current_time,
                     signing_session_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -1730,8 +1819,7 @@ impl Database {
         startup_time: Option<i64>,
         active_sessions: Option<i32>,
     ) -> Result<(), ApiError> {
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| Box::pin(async move {
                 let current_time = DbUtils::current_timestamp();
                 let expires_at = current_time + cache_duration_secs;
                 let public_key_value = public_key.unwrap_or_else(|| "unavailable".to_string());
@@ -1767,11 +1855,11 @@ impl Database {
                     startup_time,
                     active_sessions
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -1814,8 +1902,8 @@ impl Database {
     }
 
     pub async fn invalidate_enclave_cache(&self, enclave_id: u32) -> Result<(), ApiError> {
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 let current_time = DbUtils::current_timestamp();
                 let enclave_id_i32 = enclave_id as i32;
 
@@ -1826,12 +1914,13 @@ impl Database {
                     current_time,
                     enclave_id_i32
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     pub async fn approve_signing_session(
@@ -1843,9 +1932,8 @@ impl Database {
         let signing_session_id = signing_session_id.clone();
         let user_id = user_id.clone();
         let approval = approval.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let current_time = DbUtils::current_timestamp();
                 let status: String = sqlx::query_scalar(
                     "SELECT status FROM signing_sessions WHERE signing_session_id = ?",
@@ -1888,7 +1976,7 @@ impl Database {
                 .await?;
                 transaction.commit().await?;
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -1933,8 +2021,8 @@ impl Database {
         let kms_encrypted_dek = kms_encrypted_dek.to_vec();
         let encrypted_private_key = encrypted_private_key.to_vec();
         let kms_key_id = kms_key_id.to_string();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 let enclave_id: i64 = enclave_id.into();
 
                 sqlx::query!(
@@ -1951,12 +2039,13 @@ impl Database {
                     encrypted_private_key,
                     kms_key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Uses runtime query_as for custom FromRow type
@@ -1992,9 +2081,8 @@ impl Database {
         let now = DbUtils::current_timestamp();
         let auth_pubkey = auth_pubkey.to_vec();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_keys WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_imports WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_stores WHERE key_id = ?)")
                     .bind(&key_id).bind(&key_id).bind(&key_id).fetch_one(&mut *tx).await?;
                 if exists {
@@ -2014,7 +2102,7 @@ impl Database {
                 }
                 tx.commit().await?;
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -2039,18 +2127,19 @@ impl Database {
     /// Delete a reserved key slot (after successful import or expiry cleanup)
     pub async fn delete_reserved_key_slot(&self, key_id: &KeyId) -> Result<(), ApiError> {
         let key_id = key_id.clone();
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"DELETE FROM reserved_key_slots WHERE key_id = $1"#,
                     key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Store a user key
@@ -2064,8 +2153,8 @@ impl Database {
         let origin_keygen_session_id = params.origin_keygen_session_id.cloned();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 let result = sqlx::query!(
                     r#"INSERT INTO user_keys (
                         user_id, key_id, enclave_id, enclave_key_epoch,
@@ -2083,14 +2172,15 @@ impl Database {
                     now,
                     now
                 )
-                .fetch_one(&pool)
+                .fetch_one(&mut *connection)
                 .await?;
 
                 result
                     .id
                     .ok_or_else(|| ApiError::database("No id returned from insert".to_string()))
             })
-            .await
+        })
+        .await
     }
 
     /// Get a user key by key_id
@@ -2156,9 +2246,9 @@ impl Database {
         let user_id = user_id.clone();
         let key_id = key_id.clone();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin().await?;
+        self.execute(move |connection| {
+            Box::pin(async move {
+                let mut tx = connection.begin().await?;
 
                 // First get the user_key id to delete associated signing sessions
                 let user_key_row: Option<(i64,)> = sqlx::query_as(
@@ -2188,7 +2278,8 @@ impl Database {
                     Ok(false)
                 }
             })
-            .await
+        })
+        .await
     }
 
     /// Get stored single-signer keys for restoration. Registration envelopes are
@@ -2229,8 +2320,8 @@ impl Database {
         let expires_at = params.expires_at;
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"INSERT INTO single_signing_sessions (
                         signing_session_id, user_key_id, status_name,
@@ -2249,12 +2340,13 @@ impl Database {
                     now,
                     expires_at
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Get a single signing session
@@ -2300,8 +2392,8 @@ impl Database {
             "failed"
         };
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE single_signing_sessions
                      SET status_name = $1, encrypted_signature = $2, error_message = $3,
@@ -2314,12 +2406,13 @@ impl Database {
                     now,
                     signing_session_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Get processable single signing sessions
@@ -2360,8 +2453,8 @@ impl Database {
         let signing_session_id = signing_session_id.clone();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE single_signing_sessions
                      SET status_name = 'processing', processing_started_at = $1,
@@ -2372,12 +2465,13 @@ impl Database {
                     now,
                     signing_session_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Atomically move a reserved key slot to pending key import
@@ -2394,9 +2488,9 @@ impl Database {
         let auth_pubkey = auth_pubkey.to_vec();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| {
+            Box::pin(async move {
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
 
                 // SELECT + INSERT in one statement using CTE
                 let result = sqlx::query(
@@ -2439,7 +2533,8 @@ impl Database {
                 tx.commit().await?;
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Create a pending key import record
@@ -2456,8 +2551,8 @@ impl Database {
         let now = DbUtils::current_timestamp();
         let enclave_key_epoch_i64 = params.enclave_key_epoch as i64;
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"INSERT INTO pending_key_imports (
                         key_id, user_id, enclave_id, enclave_key_epoch,
@@ -2474,12 +2569,13 @@ impl Database {
                     now,
                     expires_at
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Get a pending key import by key_id
@@ -2524,8 +2620,8 @@ impl Database {
         let key_id = key_id.clone();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE pending_key_imports
                      SET status_name = 'processing', processing_started_at = ?,
@@ -2536,12 +2632,13 @@ impl Database {
                     now,
                     key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Complete pending key import - atomically move to user_keys table
@@ -2550,9 +2647,9 @@ impl Database {
         let key_id = key_id.clone();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin().await?;
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
+                let mut tx = connection.begin().await?;
 
                 // SELECT + INSERT in one statement using CTE
                 let result = sqlx::query(
@@ -2593,7 +2690,8 @@ impl Database {
                 tx.commit().await?;
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Fail pending key import with error message
@@ -2606,8 +2704,8 @@ impl Database {
         let error_message = error_message.to_string();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE pending_key_imports
                      SET status_name = 'failed', error_message = ?, updated_at = ?
@@ -2616,12 +2714,13 @@ impl Database {
                     now,
                     key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Create a pending key store record
@@ -2640,9 +2739,8 @@ impl Database {
         let now = DbUtils::current_timestamp();
         let authorization = authorization.to_owned();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.execute(move |connection| Box::pin(async move {
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_keys WHERE key_id = ? UNION ALL SELECT 1 FROM reserved_key_slots WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_imports WHERE key_id = ? UNION ALL SELECT 1 FROM pending_key_stores WHERE key_id = ?)")
                     .bind(&key_id).bind(&key_id).bind(&key_id).bind(&key_id)
                     .fetch_one(&mut *tx).await?;
@@ -2661,7 +2759,7 @@ impl Database {
                 .await?;
                 tx.commit().await?;
                 Ok(())
-            })
+            }))
             .await
     }
 
@@ -2707,8 +2805,8 @@ impl Database {
         let key_id = key_id.clone();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE pending_key_stores
                      SET status_name = 'processing', processing_started_at = ?,
@@ -2719,12 +2817,13 @@ impl Database {
                     now,
                     key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Complete pending key store - atomically store encrypted key from enclave response
@@ -2742,9 +2841,9 @@ impl Database {
         let now = DbUtils::current_timestamp();
         let enclave_key_epoch_i64 = enclave_key_epoch as i64;
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
-                let mut tx = pool.begin().await?;
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
+                let mut tx = connection.begin().await?;
 
                 // SELECT + INSERT in one statement using CTE
                 let result = sqlx::query(
@@ -2787,7 +2886,8 @@ impl Database {
                 tx.commit().await?;
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Fail pending key store with error message
@@ -2800,8 +2900,8 @@ impl Database {
         let error_message = error_message.to_string();
         let now = DbUtils::current_timestamp();
 
-        self.writer
-            .execute(self.pool.clone(), move |pool| async move {
+        self.execute_waiting(move |connection| {
+            Box::pin(async move {
                 sqlx::query!(
                     r#"UPDATE pending_key_stores
                      SET status_name = 'failed', error_message = ?, updated_at = ?
@@ -2810,12 +2910,13 @@ impl Database {
                     now,
                     key_id
                 )
-                .execute(&pool)
+                .execute(&mut *connection)
                 .await?;
 
                 Ok(())
             })
-            .await
+        })
+        .await
     }
 
     /// Get key operation status (checks both pending tables and user_keys)
@@ -3150,10 +3251,14 @@ mod tests {
         let enclave_id = EnclaveId::from(1);
         let user_id = UserId::new_v7();
         let session_id = SessionId::new_v7();
-        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
-            .execute(&db.pool).await.unwrap();
-        sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status) VALUES (?, 'completed', 0, 1, '[]', '{}')")
-            .bind(&session_id).execute(&db.pool).await.unwrap();
+        let seed_session_id = session_id.clone();
+        db.execute(move |connection| Box::pin(async move {
+            sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+                .execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status) VALUES (?, 'completed', 0, 1, '[]', '{}')")
+                .bind(&seed_session_id).execute(&mut *connection).await?;
+            Ok(())
+        })).await.unwrap();
 
         let registration_key_id = KeyId::new_v7();
         let stored_key_id = KeyId::new_v7();
@@ -3176,9 +3281,13 @@ mod tests {
                 .await
                 .unwrap();
             if key_id == &registration_key_id {
-                sqlx::query("INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, registered_at) VALUES (?, ?, ?, 0)")
-                    .bind(&session_id).bind(&user_id).bind(row_id)
-                    .execute(&db.pool).await.unwrap();
+                let (session_id, user_id) = (session_id.clone(), user_id.clone());
+                db.execute(move |connection| Box::pin(async move {
+                    sqlx::query("INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, registered_at) VALUES (?, ?, ?, 0)")
+                        .bind(&session_id).bind(&user_id).bind(row_id)
+                        .execute(connection).await?;
+                    Ok(())
+                })).await.unwrap();
             }
         }
 
@@ -3192,8 +3301,11 @@ mod tests {
     #[tokio::test]
     async fn reserved_key_ownership_is_immutable_and_import_rechecks_ownership_and_expiry() {
         let (db, _directory) = create_test_db().await;
-        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
-            .execute(&db.pool).await.unwrap();
+        db.execute(|connection| Box::pin(async move {
+            sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+                .execute(connection).await?;
+            Ok(())
+        })).await.unwrap();
         let user = UserId::new_v7();
         let key = KeyId::new_v7();
         let owner = [2; 33];
@@ -3237,8 +3349,11 @@ mod tests {
     #[tokio::test]
     async fn keygen_persistence_cannot_claim_an_existing_destination() {
         let (db, _directory) = create_test_db().await;
-        sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
-            .execute(&db.pool).await.unwrap();
+        db.execute(|connection| Box::pin(async move {
+            sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+                .execute(connection).await?;
+            Ok(())
+        })).await.unwrap();
         let user = UserId::new_v7();
         let key = KeyId::new_v7();
         let expiry = DbUtils::current_timestamp() + 600;

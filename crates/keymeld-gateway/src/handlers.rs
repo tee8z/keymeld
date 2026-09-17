@@ -290,10 +290,10 @@ pub async fn reserve_keygen_session(
         return Err(ApiError::bad_request("Keygen session already exists"));
     }
 
-    // Create session assignment to determine coordinator enclave
+    // Plan without changing the cache; rejected reservations own no assignment.
     let session_assignment = state
         .enclave_manager
-        .create_session_assignment_with_distributed_coordinator(
+        .plan_session_assignment_with_distributed_coordinator(
             request.keygen_session_id.clone(),
             &request.expected_participants,
             &request.coordinator_user_id,
@@ -334,6 +334,9 @@ pub async fn reserve_keygen_session(
         .db
         .reserve_keygen_session(&request, coordinator_enclave_id)
         .await?;
+    state
+        .enclave_manager
+        .publish_session_assignment(session_assignment.clone())?;
 
     let current_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -399,9 +402,8 @@ pub async fn initialize_keygen_session(
                 })?;
             let assignment = state
                 .enclave_manager
-                .get_session_assignment(&session_id)
-                .map_err(|e| ApiError::enclave_communication(e.to_string()))?
-                .ok_or_else(|| ApiError::bad_request("Missing participant enclave assignment"))?;
+                .assignment_for_keygen_session(&session_status)
+                .map_err(|e| ApiError::enclave_communication(e.to_string()))?;
             if request.recipient_authorization.user_enclave_assignments
                 != assignment.user_enclave_assignments
             {
@@ -545,11 +547,8 @@ pub async fn register_keygen_participant(
     // Get the session assignment to validate participant's assigned enclave
     let session_assignment = state
         .enclave_manager
-        .get_session_assignment(&keygen_session_id)
-        .map_err(|e| ApiError::Internal(format!("Failed to get session assignment: {e}")))?
-        .ok_or(ApiError::Internal(
-            "Session assignment not found".to_string(),
-        ))?;
+        .assignment_for_keygen_session(&session_status)
+        .map_err(|e| ApiError::Internal(format!("Failed to get session assignment: {e}")))?;
 
     // Get the pre-assigned enclave for this participant
     let assigned_enclave = session_assignment

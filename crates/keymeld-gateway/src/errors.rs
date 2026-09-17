@@ -14,6 +14,10 @@ pub enum ApiError {
     KeyMeld(#[from] KeyMeldError),
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Database write was not admitted")]
+    DatabaseUnavailable,
+    #[error("Database write was admitted but its result is unknown")]
+    DatabaseOutcomeUnknown,
     #[error("Bad request: {0}")]
     BadRequest(String),
     #[error("Conflict: {0}")]
@@ -72,6 +76,8 @@ impl ApiError {
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::DatabaseUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::DatabaseOutcomeUnknown => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Configuration(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Serialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::EnclaveCommunication(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -83,6 +89,8 @@ impl ApiError {
         match self {
             ApiError::KeyMeld(_) => "keymeld_error",
             ApiError::Database(_) => "database_error",
+            ApiError::DatabaseUnavailable => "database_unavailable",
+            ApiError::DatabaseOutcomeUnknown => "database_outcome_unknown",
             ApiError::BadRequest(_) => "bad_request",
             ApiError::Conflict(_) => "conflict",
             ApiError::Unauthorized(_) => "unauthorized",
@@ -98,6 +106,7 @@ impl ApiError {
         matches!(
             self,
             ApiError::Database(_)
+                | ApiError::DatabaseOutcomeUnknown
                 | ApiError::Configuration(_)
                 | ApiError::EnclaveCommunication(_)
                 | ApiError::Internal(_)
@@ -112,6 +121,13 @@ impl ApiError {
             ApiError::NotFound(msg) => msg.clone(),
 
             ApiError::Database(_) => "Database operation failed".to_string(),
+            ApiError::DatabaseUnavailable => {
+                "Database write was not accepted; try again later".to_string()
+            }
+            ApiError::DatabaseOutcomeUnknown => {
+                "Database write outcome is unknown; check the operation state before retrying"
+                    .to_string()
+            }
             ApiError::Configuration(_) => "Server configuration error".to_string(),
             ApiError::Serialization(_) => "Data serialization error".to_string(),
             ApiError::EnclaveCommunication(_) => "Enclave communication failed".to_string(),
@@ -192,6 +208,30 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn write_rejection_and_unknown_outcome_have_distinct_safe_responses() {
+        let rejected = ApiError::DatabaseUnavailable.into_response();
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(rejected.into_body(), 2048).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "database_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "Database write was not accepted; try again later"
+        );
+
+        let unknown = ApiError::DatabaseOutcomeUnknown.into_response();
+        assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(unknown.into_body(), 2048).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "database_outcome_unknown");
+        assert_eq!(
+            body["error"]["message"],
+            "Database write outcome is unknown; check the operation state before retrying"
+        );
+    }
 
     #[test]
     fn test_error_status_codes() {

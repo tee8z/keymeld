@@ -138,6 +138,7 @@ impl ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub path: String,
+    /// Read-only pool size; mutations use one separately owned connection.
     pub max_connections: u32,
     pub connection_timeout_secs: u64,
     pub idle_timeout_secs: Option<u64>,
@@ -769,7 +770,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             path: "./data/keymeld.db".to_string(),
-            max_connections: 50, // Increased for better concurrency handling
+            max_connections: 50,
             connection_timeout_secs: 30,
             idle_timeout_secs: Some(300), // 5 minutes
             enable_wal_mode: Some(true),

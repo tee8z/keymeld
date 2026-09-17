@@ -3,6 +3,8 @@
 Releases through `v0.3.5` are unsupported and must not be used for key custody or signing.
 Upgrade the SDK, gateway, and enclaves together to `0.4.0` for the authorization and security fixes.
 Follow the [migration guide](docs/AUTHORIZATION.md) to create fresh session state.
+`0.4.0` is a beta validated with simulated enclaves and a mock KMS; it has not run on AWS Nitro hardware.
+Use test keys and test funds only.
 
 ## Reporting
 

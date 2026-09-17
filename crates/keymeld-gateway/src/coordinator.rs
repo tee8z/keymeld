@@ -7,6 +7,7 @@ use crate::{
     session::{Session, SessionKind, SigningSessionStatus},
     Advanceable, KeygenSessionStatus,
 };
+use anyhow::anyhow;
 use dashmap::DashSet;
 use futures::stream::{FuturesUnordered, StreamExt};
 use keymeld_core::identifiers::{EnclaveId, SessionId};
@@ -72,6 +73,7 @@ pub struct CircuitBreaker {
 const MAX_RETRIES_DEFAULT: u32 = 3;
 const PROCESSING_TIMEOUT_DEFAULT: u64 = 10;
 const DEFAULT_BATCH_SIZE: u32 = 20;
+const SESSION_WRITE_QUEUE_CAPACITY: usize = 1024;
 /// Threshold in seconds to log a warning about slow session processing
 const SLOW_SESSION_THRESHOLD_SECS: u64 = 30;
 
@@ -130,6 +132,75 @@ pub struct Coordinator {
     db_write_tx: mpsc::Sender<DbWriteRequest>,
 }
 
+pub struct CoordinatorWriter {
+    db: Arc<Database>,
+    metrics: Arc<Metrics>,
+    receiver: mpsc::Receiver<DbWriteRequest>,
+}
+
+impl CoordinatorWriter {
+    async fn persist(&self, request: DbWriteRequest) -> Result<(), ApiError> {
+        let session_id = request.session_id;
+        let result = match &request.session {
+            Session::Keygen(status) => {
+                self.db
+                    .update_keygen_session_status(&session_id, status)
+                    .await
+            }
+            Session::Signing(status) => {
+                self.db
+                    .update_signing_session_status(&session_id, status)
+                    .await
+            }
+        };
+        let failure = result.as_ref().err().map(|error| {
+            let kind = match &request.session {
+                Session::Keygen(_) => "keygen",
+                Session::Signing(_) => "signing",
+            };
+            error!(
+                "Failed to persist {} session {}: {}",
+                kind, session_id, error
+            );
+            self.metrics.record_session_error(kind, "db_write_failed");
+            ApiError::Internal(format!(
+                "Session persistence failed for {session_id}: {error}"
+            ))
+        });
+        let _ = request.completed.send(result.map(|()| request.session));
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn run(mut self, mut shutdown: Receiver<()>) -> Result<(), ApiError> {
+        info!("Session persistence task started");
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    self.receiver.close();
+                    break;
+                }
+                request = self.receiver.recv() => {
+                    let request = request.ok_or_else(|| ApiError::Internal(
+                        "Session persistence queue closed unexpectedly".into()
+                    ))?;
+                    self.persist(request).await?;
+                }
+            }
+        }
+        // Processing has stopped. Reject new work and persist every accepted
+        // transition before the application's database writer can be stopped.
+        while let Some(request) = self.receiver.recv().await {
+            self.persist(request).await?;
+        }
+        info!("Session persistence task drained");
+        Ok(())
+    }
+}
+
 impl Coordinator {
     pub fn new(
         db: Arc<Database>,
@@ -137,84 +208,68 @@ impl Coordinator {
         config: Option<CoordinatorConfig>,
         kms_config: KmsConfig,
         metrics: Arc<Metrics>,
-    ) -> Self {
+    ) -> Result<(Self, CoordinatorWriter), ApiError> {
         let config = config.unwrap_or_default();
+        Self::validate_config(&config)?;
 
         let circuit_breaker = CircuitBreaker::new(
             config.circuit_breaker_failure_threshold.unwrap_or(5),
             Duration::from_secs(config.circuit_breaker_reset_timeout_secs.unwrap_or(60)),
         );
 
-        // Create channel for database writes
-        // Size based on batch_size * number of batches we could process in ~10 seconds
-        // This ensures the channel can buffer all writes if the DB is temporarily slow
-        let batch_size = config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE) as usize;
-        let processing_interval_ms = config.processing_interval_ms.unwrap_or(200);
-        let batches_per_10_secs = (10_000 / processing_interval_ms) as usize;
-        let db_writer_channel_size = batch_size * batches_per_10_secs;
-        let (db_write_tx, db_write_rx) = mpsc::channel(db_writer_channel_size);
-        info!(
-            "Database writer channel capacity: {} (batch_size={}, interval={}ms, batches_per_10s={})",
-            db_writer_channel_size, batch_size, processing_interval_ms, batches_per_10_secs
-        );
-
-        // Spawn the database writer task
-        let db_for_writer = Arc::clone(&db);
-        let metrics_for_writer = Arc::clone(&metrics);
-        tokio::spawn(Self::run_db_writer(
-            db_for_writer,
-            metrics_for_writer,
-            db_write_rx,
-        ));
-
-        Self {
-            db,
-            enclave_manager,
-            config,
-            kms_config,
-            metrics,
-            circuit_breaker,
-            processing_sessions: Arc::new(DashSet::new()),
-            db_write_tx,
-        }
+        let (db_write_tx, receiver) = mpsc::channel(SESSION_WRITE_QUEUE_CAPACITY);
+        let writer = CoordinatorWriter {
+            db: Arc::clone(&db),
+            metrics: Arc::clone(&metrics),
+            receiver,
+        };
+        Ok((
+            Self {
+                db,
+                enclave_manager,
+                config,
+                kms_config,
+                metrics,
+                circuit_breaker,
+                processing_sessions: Arc::new(DashSet::new()),
+                db_write_tx,
+            },
+            writer,
+        ))
     }
 
-    /// Background task that processes database write requests
-    async fn run_db_writer(
-        db: Arc<Database>,
-        metrics: Arc<Metrics>,
-        mut rx: mpsc::Receiver<DbWriteRequest>,
-    ) {
-        info!("Database writer task started");
-
-        while let Some(request) = rx.recv().await {
-            let session_id = request.session_id;
-            let result = match &request.session {
-                Session::Keygen(keygen_status) => {
-                    db.update_keygen_session_status(&session_id, keygen_status)
-                        .await
-                }
-                Session::Signing(signing_status) => {
-                    db.update_signing_session_status(&session_id, signing_status)
-                        .await
-                }
-            };
-
-            if let Err(e) = &result {
-                let kind = match &request.session {
-                    Session::Keygen(_) => "keygen",
-                    Session::Signing(_) => "signing",
-                };
-                error!(
-                    "Database writer failed to update {} session {}: {}",
-                    kind, session_id, e
-                );
-                metrics.record_session_error(kind, "db_write_failed");
-            }
-            let _ = request.completed.send(result.map(|()| request.session));
+    fn validate_config(config: &CoordinatorConfig) -> Result<(), ApiError> {
+        let batch_size = config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+        if batch_size == 0 || batch_size as usize > SESSION_WRITE_QUEUE_CAPACITY {
+            return Err(ApiError::Configuration(anyhow!(
+                "Coordinator batch_size must be between 1 and {SESSION_WRITE_QUEUE_CAPACITY}"
+            )));
         }
-
-        info!("Database writer task stopped");
+        for (name, duration) in [
+            (
+                "processing_interval_ms",
+                Duration::from_millis(config.processing_interval_ms.unwrap_or(200)),
+            ),
+            (
+                "cleanup_interval_secs",
+                Duration::from_secs(config.cleanup_interval_secs.unwrap_or(300)),
+            ),
+            (
+                "metric_record_interval_secs",
+                Duration::from_secs(config.metric_record_interval_secs.unwrap_or(30)),
+            ),
+            (
+                "health_check_interval_secs",
+                Duration::from_secs(config.health_check_interval_secs.unwrap_or(10)),
+            ),
+        ] {
+            if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
+                return Err(ApiError::Configuration(anyhow!(
+                    "Coordinator {name} must be positive and fit the monotonic clock"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Monitor database pool health using actual database health check
@@ -442,19 +497,20 @@ impl Coordinator {
                     debug!("Starting parallel processing for session {}", session_id);
 
                     let slow_threshold = Duration::from_secs(SLOW_SESSION_THRESHOLD_SECS);
-                    let session_id_for_warning = session_id.clone();
-                    let warning_task = tokio::spawn(async move {
-                        tokio::time::sleep(slow_threshold).await;
-                        warn!("Session {} is taking longer than {:?} - still processing", session_id_for_warning, slow_threshold);
-                    });
-
-                    // Use session_kind from ProcessableSessionRecord
                     let kind = session_record.session_kind;
-
-                    let result = match tokio::time::timeout(
+                    let advancing = tokio::time::timeout(
                         session_timeout,
-                        coordinator.advance_session(session_record, kind, lease)
-                    ).await {
+                        coordinator.advance_session(session_record, kind, lease),
+                    );
+                    tokio::pin!(advancing);
+                    let completion = tokio::select! {
+                        result = &mut advancing => result,
+                        _ = tokio::time::sleep(slow_threshold) => {
+                            warn!("Session {} is taking longer than {:?} - still processing", session_id, slow_threshold);
+                            advancing.await
+                        }
+                    };
+                    let result = match completion {
                         Ok(result) => result,
                         Err(_) => {
                             error!("Session {} ABANDONED after {:?} - possible deadlock or stuck enclave call", session_id, session_timeout);
@@ -462,7 +518,6 @@ impl Coordinator {
                         }
                     };
 
-                    warning_task.abort();
                     (session_id, result)
                 }
             })
@@ -656,7 +711,7 @@ impl Coordinator {
             .db_write_tx
             .reserve()
             .await
-            .map_err(|_| ApiError::Internal("Session database writer is unavailable".into()))?;
+            .map_err(|_| ApiError::DatabaseUnavailable)?;
         let next_session = process.await?;
         let (completed, persisted) = tokio::sync::oneshot::channel();
         // No await between receiving a transition and transferring its lease to
@@ -667,9 +722,9 @@ impl Coordinator {
             completed,
             _lease: lease,
         });
-        persisted.await.map_err(|_| {
-            ApiError::Internal("Session database writer did not acknowledge persistence".into())
-        })?
+        persisted
+            .await
+            .map_err(|_| ApiError::DatabaseOutcomeUnknown)?
     }
 
     async fn load_session(
@@ -768,7 +823,17 @@ impl Coordinator {
         self.perform_startup_enclave_health_check().await;
 
         loop {
+            if !matches!(
+                shutdown_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ) {
+                break;
+            }
             tokio::select! {
+                _ = &mut shutdown_rx => {
+                    info!("Session coordinator received shutdown signal");
+                    break;
+                }
                 _ = processing_interval_ms.tick() => {
                     let cycle_start = Instant::now();
                     debug!("Coordinator processing cycle starting");
@@ -827,14 +892,10 @@ impl Coordinator {
                     // Fast epoch detection - only check epoch changes, not full health
                     let _ = self.fast_epoch_detection().await;
                 }
-                _ = &mut shutdown_rx => {
-                    info!("Session coordinator received shutdown signal");
-                    break;
-                }
             }
         }
 
-        info!("Session coordinator shut down gracefully");
+        info!("Session coordinator stopped processing");
         Ok(())
     }
 
@@ -861,11 +922,35 @@ impl Coordinator {
         }
     }
 
-    pub fn start_background_task(self) -> (JoinHandle<Result<(), ApiError>>, Sender<()>) {
+    async fn supervise_persistence(
+        processing: impl std::future::Future<Output = Result<(), ApiError>>,
+        writer: CoordinatorWriter,
+    ) -> Result<(), ApiError> {
+        let (shutdown, writer_shutdown) = tokio::sync::oneshot::channel();
+        let persistence = writer.run(writer_shutdown);
+        tokio::pin!(processing, persistence);
+        tokio::select! {
+            result = &mut processing => {
+                let _ = shutdown.send(());
+                let drained = persistence.await;
+                result.and(drained)
+            }
+            result = &mut persistence => {
+                result.and(Err(ApiError::Internal(
+                    "Session persistence stopped before processing".into()
+                )))
+            }
+        }
+    }
+
+    pub fn start_background_task(
+        self,
+        writer: CoordinatorWriter,
+    ) -> (JoinHandle<Result<(), ApiError>>, Sender<()>) {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-
-        let handle = tokio::spawn(async move { self.run_continuous(shutdown_rx).await });
-
+        let handle = tokio::spawn(async move {
+            Self::supervise_persistence(self.run_continuous(shutdown_rx), writer).await
+        });
         (handle, shutdown_tx)
     }
 
@@ -1919,7 +2004,9 @@ mod tests {
     struct Fixture {
         coordinator: Coordinator,
         pool: sqlx::SqlitePool,
-        receiver: mpsc::Receiver<DbWriteRequest>,
+        receiver: Option<mpsc::Receiver<DbWriteRequest>>,
+        database_task: Option<JoinHandle<anyhow::Result<()>>>,
+        database_shutdown: Option<Sender<()>>,
         record: ProcessableSessionRecord,
         _directory: tempfile::TempDir,
     }
@@ -1928,14 +2015,15 @@ mod tests {
         async fn new() -> Self {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("coordinator.sqlite");
-            let db = Arc::new(
-                Database::new(&DatabaseConfig {
-                    path: path.to_string_lossy().into_owned(),
-                    ..DatabaseConfig::default()
-                })
-                .await
-                .unwrap(),
-            );
+            let (db, writer) = Database::open(&DatabaseConfig {
+                path: path.to_string_lossy().into_owned(),
+                ..DatabaseConfig::default()
+            })
+            .await
+            .unwrap();
+            let (shutdown, requested) = tokio::sync::oneshot::channel();
+            let database_task = tokio::spawn(writer.run(requested));
+            let db = Arc::new(db);
             let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
                 .await
                 .unwrap();
@@ -1971,25 +2059,54 @@ mod tests {
                 ),
             )
             .unwrap();
-            let mut coordinator = Coordinator::new(
+            let (mut coordinator, _writer) = Coordinator::new(
                 db,
                 Arc::new(manager),
                 None,
                 KmsConfig::default(),
                 Arc::new(Metrics),
-            );
+            )
+            .unwrap();
             // Keep writes queued until the test deliberately starts the real writer.
             let (sender, receiver) = mpsc::channel(1);
             coordinator.db_write_tx = sender;
             Self {
                 coordinator,
                 pool,
-                receiver,
+                receiver: Some(receiver),
+                database_task: Some(database_task),
+                database_shutdown: Some(shutdown),
                 record: ProcessableSessionRecord {
                     session_id,
                     session_kind: SessionKind::Keygen,
                 },
                 _directory: directory,
+            }
+        }
+
+        fn take_writer(&mut self) -> CoordinatorWriter {
+            CoordinatorWriter {
+                db: self.coordinator.db.clone(),
+                metrics: self.coordinator.metrics.clone(),
+                receiver: self.receiver.take().unwrap(),
+            }
+        }
+
+        async fn close(mut self) {
+            self.pool.close().await;
+            self.database_shutdown.take().unwrap().send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), self.database_task.take().unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(task) = &self.database_task {
+                task.abort();
             }
         }
     }
@@ -2001,10 +2118,13 @@ mod tests {
         let record = fixture.record.clone();
         let processing =
             tokio::spawn(async move { coordinator.process_batch_sessions(vec![record]).await });
-        let request = tokio::time::timeout(Duration::from_secs(5), fixture.receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let request = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.receiver.as_mut().unwrap().recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
             !processing.is_finished(),
             "dispatch returned before the writer acknowledged persistence"
@@ -2022,7 +2142,7 @@ mod tests {
             0
         );
         assert!(
-            fixture.receiver.try_recv().is_err(),
+            fixture.receiver.as_mut().unwrap().try_recv().is_err(),
             "stale state was dispatched a second time"
         );
 
@@ -2042,12 +2162,16 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("writer receiver dropped"));
         drop(sender);
-        Coordinator::run_db_writer(
-            fixture.coordinator.db.clone(),
-            fixture.coordinator.metrics.clone(),
+        let (shutdown, requested) = tokio::sync::oneshot::channel();
+        shutdown.send(()).unwrap();
+        CoordinatorWriter {
+            db: fixture.coordinator.db.clone(),
+            metrics: fixture.coordinator.metrics.clone(),
             receiver,
-        )
-        .await;
+        }
+        .run(requested)
+        .await
+        .unwrap();
         let updated_at: i64 = sqlx::query_scalar(
             "SELECT updated_at FROM keygen_sessions WHERE keygen_session_id = ?",
         )
@@ -2064,6 +2188,7 @@ mod tests {
             &fixture.coordinator.processing_sessions
         )
         .is_some());
+        fixture.close().await;
     }
 
     #[tokio::test]
@@ -2092,11 +2217,7 @@ mod tests {
                 Ok(Session::Keygen(next))
             },
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
-                .await
-                .is_err()
-        );
+        assert!(futures::poll!(&mut waiting).is_pending());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         drop(waiting);
         assert!(!fixture
@@ -2105,21 +2226,19 @@ mod tests {
             .contains(&fixture.record.session_id));
         drop(occupied_capacity);
         assert!(
-            fixture.receiver.is_empty(),
+            fixture.receiver.as_ref().unwrap().is_empty(),
             "a canceled operation queued a transition"
         );
+        fixture.close().await;
     }
 
     #[tokio::test]
     async fn failed_and_unavailable_writes_are_reported_to_session_processing() {
-        let fixture = Fixture::new().await;
+        let mut fixture = Fixture::new().await;
         sqlx::query("CREATE TRIGGER reject_session_update BEFORE UPDATE ON keygen_sessions BEGIN SELECT RAISE(FAIL, 'write rejected'); END")
             .execute(&fixture.pool).await.unwrap();
-        let writer = tokio::spawn(Coordinator::run_db_writer(
-            fixture.coordinator.db.clone(),
-            fixture.coordinator.metrics.clone(),
-            fixture.receiver,
-        ));
+        let (_shutdown, requested) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(fixture.take_writer().run(requested));
         let lease = SessionLease::acquire(
             fixture.record.session_id.clone(),
             &fixture.coordinator.processing_sessions,
@@ -2131,8 +2250,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("write rejected"), "{error}");
-        writer.abort();
-        let _ = writer.await;
+        assert!(writer.await.unwrap().is_err());
 
         let lease = SessionLease::acquire(
             fixture.record.session_id.clone(),
@@ -2144,13 +2262,158 @@ mod tests {
             .advance_session(fixture.record.clone(), SessionKind::Keygen, lease)
             .await
             .unwrap_err();
-        assert!(
-            error.to_string().contains("writer is unavailable"),
-            "{error}"
-        );
+        assert!(matches!(error, ApiError::DatabaseUnavailable), "{error}");
         assert!(!fixture
             .coordinator
             .processing_sessions
             .contains(&fixture.record.session_id));
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_accepted_transitions_before_the_owned_task_returns() {
+        let mut fixture = Fixture::new().await;
+        let mut transaction = fixture.pool.begin().await.unwrap();
+        sqlx::query("UPDATE keygen_sessions SET updated_at = 0")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let session = fixture
+            .coordinator
+            .db
+            .get_keygen_session_by_id(&fixture.record.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (completed, persisted) = tokio::sync::oneshot::channel();
+        let lease = SessionLease::acquire(
+            fixture.record.session_id.clone(),
+            &fixture.coordinator.processing_sessions,
+        )
+        .unwrap();
+        fixture
+            .coordinator
+            .db_write_tx
+            .send(DbWriteRequest {
+                session_id: fixture.record.session_id.clone(),
+                session: Session::Keygen(session),
+                completed,
+                _lease: lease,
+            })
+            .await
+            .unwrap_or_else(|_| panic!("session persistence receiver dropped"));
+        let writer = fixture.take_writer();
+        let (processing_stopped, stopped) = tokio::sync::oneshot::channel();
+        let processing = async move {
+            processing_stopped.send(()).unwrap();
+            Ok(())
+        };
+        let running = tokio::spawn(Coordinator::supervise_persistence(processing, writer));
+        // Processing has returned. An already-dequeued write may still hold
+        // persistence inside its SQL call, so receiver closure is not readiness.
+        tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !running.is_finished(),
+            "shutdown abandoned an accepted write"
+        );
+        assert!(fixture
+            .coordinator
+            .processing_sessions
+            .contains(&fixture.record.session_id));
+        transaction.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        persisted.await.unwrap().unwrap();
+        assert!(fixture.coordinator.db_write_tx.try_reserve().is_err());
+        let updated_at: i64 = sqlx::query_scalar(
+            "SELECT updated_at FROM keygen_sessions WHERE keygen_session_id = ?",
+        )
+        .bind(&fixture.record.session_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(updated_at > 0);
+        assert!(fixture.coordinator.processing_sessions.is_empty());
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn unexpected_persistence_exit_stops_its_owned_processing_future() {
+        let fixture = Fixture::new().await;
+        let (sender, receiver) = mpsc::channel(1);
+        drop(sender);
+        let writer = CoordinatorWriter {
+            db: fixture.coordinator.db.clone(),
+            metrics: fixture.coordinator.metrics.clone(),
+            receiver,
+        };
+        let (processing_owner, dropped) = tokio::sync::oneshot::channel::<()>();
+        let processing = async move {
+            let _owner = processing_owner;
+            std::future::pending::<Result<(), ApiError>>().await
+        };
+        let running = tokio::spawn(Coordinator::supervise_persistence(processing, writer));
+        let error = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("queue closed unexpectedly"));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), dropped)
+                .await
+                .unwrap()
+                .is_err(),
+            "processing was detached after failure"
+        );
+        fixture.close().await;
+    }
+
+    #[test]
+    fn coordinator_configuration_rejects_unbounded_batches_and_zero_timers() {
+        for batch_size in [0, SESSION_WRITE_QUEUE_CAPACITY as u32 + 1, u32::MAX] {
+            let config = CoordinatorConfig {
+                batch_size: Some(batch_size),
+                ..CoordinatorConfig::default()
+            };
+            assert!(Coordinator::validate_config(&config).is_err());
+        }
+        let invalid = [
+            CoordinatorConfig {
+                processing_interval_ms: Some(0),
+                ..CoordinatorConfig::default()
+            },
+            CoordinatorConfig {
+                cleanup_interval_secs: Some(0),
+                ..CoordinatorConfig::default()
+            },
+            CoordinatorConfig {
+                metric_record_interval_secs: Some(0),
+                ..CoordinatorConfig::default()
+            },
+            CoordinatorConfig {
+                health_check_interval_secs: Some(0),
+                ..CoordinatorConfig::default()
+            },
+            CoordinatorConfig {
+                cleanup_interval_secs: Some(u64::MAX),
+                ..CoordinatorConfig::default()
+            },
+        ];
+        for config in invalid {
+            assert!(Coordinator::validate_config(&config).is_err());
+        }
+        let slow = CoordinatorConfig {
+            processing_interval_ms: Some(20_000),
+            ..CoordinatorConfig::default()
+        };
+        assert!(Coordinator::validate_config(&slow).is_ok());
+        assert!(Coordinator::validate_config(&CoordinatorConfig::default()).is_ok());
     }
 }

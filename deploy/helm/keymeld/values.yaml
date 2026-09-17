@@ -1,14 +1,13 @@
 # KeyMeld Helm Chart Values
 # Distributed MuSig2 signing system for AWS Nitro Enclaves
 
+# One active gateway owns SQLite custody state and its Litestream replica.
 replicaCount: 1
 
-# Blue/Green deployment support
-# When enabled, renders both blue and green Deployments and PVCs from a single release
-# The Service selector uses activeSlot to route traffic to the active deployment
+# Blue/green overlap is unsupported; upgrades use Recreate.
+# The chart rejects enabled: true so stale overrides fail loudly.
 blueGreen:
   enabled: false
-  activeSlot: blue    # Which slot the Service routes traffic to
 
 image:
   repository: ghcr.io/tee8z/keymeld/gateway

@@ -21,10 +21,10 @@ server:
 kms:
   enabled: true # Enable AWS KMS integration for secure key management
   endpoint_url: null # Use default AWS KMS endpoint (region-based)
-  key_id: "${KMS_KEY_ARN}" # KMS key ARN from environment variable for enclave encryption
+  key_id: "REPLACE_WITH_KMS_KEY_ARN" # Set the actual full ARN; this file does not interpolate environment variables
 database:
   path: "/var/lib/keymeld/keymeld.db" # SQLite database file path (should be on persistent storage)
-  max_connections: 50 # Maximum concurrent database connections in pool (higher for production load)
+  max_connections: 50 # Maximum read-only connections, in addition to the single writer
   connection_timeout_secs: 10 # Timeout for acquiring database connections (faster timeout for production)
   idle_timeout_secs: 300 # Timeout for idle connections before closing (5 minutes)
   enable_wal_mode: true # Enable Write-Ahead Logging for better concurrency and durability

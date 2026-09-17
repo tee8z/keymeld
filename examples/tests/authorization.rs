@@ -40,6 +40,41 @@ fn participant(gateway: &str, scalar: u8) -> Result<KeyMeldClient> {
         .build()?)
 }
 
+async fn verify_adaptor_signing(
+    coordinator: &KeyMeldClient,
+    session: &KeygenSession<'_>,
+    message: [u8; 32],
+) -> Result<()> {
+    let secret = musig2::secp256k1::SecretKey::from_byte_array([0x51; 32])?;
+    let point = musig2::secp256k1::PublicKey::from_secret_key(
+        &musig2::secp256k1::Secp256k1::new(),
+        &secret,
+    );
+    let config = AdaptorConfig::single(hex::encode(point.serialize()));
+    let item = BatchSigningItem::adaptor(message, vec![config.clone()]);
+    let item_id = item.id();
+    let mut signing = coordinator
+        .signer()
+        .sign_batch(session, vec![item], SigningOptions::default().timeout(120))
+        .await?;
+    let results = signing.wait_for_completion().await?;
+    ensure!(results.len() == 1, "expected one adaptor batch result");
+    ensure!(results[0].batch_item_id == item_id, "adaptor item changed");
+    let signature = results[0]
+        .adaptor_signatures
+        .as_ref()
+        .and_then(|signatures| signatures.get(&config.adaptor_id))
+        .context("missing adaptor signature")?;
+    let encrypted = musig2::AdaptorSignature::from_bytes(&signature.signature_scalar)?;
+    let adapted: musig2::LiftedSignature = encrypted
+        .adapt(secret)
+        .context("adaptor signature could not be completed with its secret")?;
+    let aggregate = musig2::secp256k1::PublicKey::from_slice(&session.decrypt_aggregate_key()?)?;
+    musig2::verify_single(aggregate, adapted, message)?;
+    println!("PASS multisignature adaptor result adapts to a valid Schnorr signature");
+    Ok(())
+}
+
 async fn post(
     http: &Client,
     url: &str,
@@ -682,6 +717,18 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
         "actual enclave roster differs from intended participants"
     );
     println!("PASS actual enclave roster matches every intended participant key");
+    if std::env::var("KEYMELD_TEST_ENCLAVE_COUNT").as_deref() == Ok("1") {
+        ensure!(
+            roster.roster.registrations.len() == expected_roster.len()
+                && roster
+                    .roster
+                    .registrations
+                    .values()
+                    .all(|registration| { registration.context.enclave_id.as_u32() == 0 }),
+            "single-enclave deployment assigned a participant to another enclave"
+        );
+        println!("PASS four signing participants share the sole configured enclave");
+    }
 
     let unauthorized = signing_request(&session_id, session.credentials(), &attacker_authority)?;
     let (status, body) = post(
@@ -744,7 +791,14 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
             protocol::{ClearSessionCommand, Command, EnclaveCommand, SystemCommand},
         };
         let base_port: u16 = port.parse()?;
-        for offset in 0..3 {
+        let enclave_count: u16 = std::env::var("KEYMELD_TEST_ENCLAVE_COUNT")
+            .unwrap_or_else(|_| "3".into())
+            .parse()?;
+        ensure!(
+            (1..=3).contains(&enclave_count),
+            "invalid test enclave count"
+        );
+        for offset in 0..enclave_count {
             let client: SocketClient<ChannelRequest, ChannelResponse> =
                 SocketClient::tcp("127.0.0.1", base_port + offset);
             let ChannelResponse::Challenge(challenge) = client
@@ -769,7 +823,7 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
                 "Direct attacker ClearSession reached enclave"
             );
         }
-        println!("PASS direct unauthenticated ClearSession rejected by all three enclave sockets");
+        println!("PASS direct unauthenticated ClearSession rejected by all {enclave_count} enclave sockets");
     }
 
     // No participant approval is required: this must stay usable by unattended
@@ -813,6 +867,7 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
         Secp256k1::verification_only().verify_schnorr(&signature, &message, &public_key)?;
     }
     println!("PASS unattended authorized full and subset signing; both Schnorr signatures verify");
+    verify_adaptor_signing(&coordinator, &session, [0x33; 32]).await?;
 
     let mut replaced_session = status_response.clone();
     replaced_session["keygen_session_id"] = json!(SessionId::new_v7());
@@ -942,5 +997,6 @@ async fn signing_after_enclave_restart() -> Result<()> {
         &public_key,
     )?;
     println!("PASS gateway and enclave restart preserves authorized roster and valid signing");
+    verify_adaptor_signing(&coordinator, &session, [0x72; 32]).await?;
     Ok(())
 }
