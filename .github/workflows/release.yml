@@ -190,7 +190,7 @@ jobs:
         with:
           key: release-wasm
       - name: Verify WASM library compilation
-        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client --locked
+        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client,dlctix --locked
         env:
           CFLAGS_wasm32_unknown_unknown: "-Wno-error=implicit-function-declaration"
 

@@ -5,11 +5,11 @@
 [![MuSig2](https://img.shields.io/badge/MuSig2-BIP--327-green.svg)](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki)
 
 > **Releases through `v0.3.5` are unsupported and must not be used for key custody or signing.**
-> **Upgrade to 0.4.0** for the authorization and security fixes.
+> **Upgrade to 0.4.1** for the authorization, security, and DLC integration fixes.
 > Upgrade the SDK, gateway, and enclaves together and create fresh session state.
 > See the [migration guide](docs/AUTHORIZATION.md) and [security configuration](docs/SECURITY_OPERATIONS.md).
 >
-> **Beta:** 0.4.0 has been validated only against simulated TCP enclaves and a mock KMS.
+> **Beta:** 0.4.1 has been validated only against simulated TCP enclaves and a mock KMS.
 > No run on real AWS Nitro hardware has been completed yet. Use test keys and test funds only.
 
 Distributed MuSig2 Bitcoin signing via AWS Nitro Enclaves using a secure 2-phase workflow.

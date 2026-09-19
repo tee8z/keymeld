@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "keymeld-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "keymeld-enclave"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "keymeld-examples"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "bdk_bitcoind_rpc",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "keymeld-gateway"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "keymeld-sdk"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "dlctix",
  "flate2",
