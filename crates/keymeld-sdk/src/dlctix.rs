@@ -183,13 +183,22 @@ impl<'a> DlcBatchBuilder<'a> {
                 Outcome::Attestation(idx) => {
                     outcome_batch_ids.insert(*idx, batch_item_id);
 
-                    if let Some(adaptor_point) = self.signing_data.adaptor_points.get(idx) {
-                        let adaptor_config = AdaptorConfig::from_maybe_point(adaptor_point)?;
-                        BatchSigningItem::adaptor(message_hash, vec![adaptor_config])
-                            .with_id(batch_item_id)
-                    } else {
-                        BatchSigningItem::new(message_hash).with_id(batch_item_id)
-                    }
+                    // An attestation outcome signed with a plain signature could be
+                    // broadcast without the oracle, so a missing adaptor point is an
+                    // error, never a fallback.
+                    let adaptor_point = self
+                        .signing_data
+                        .adaptor_point(outcome)
+                        .ok()
+                        .flatten()
+                        .ok_or_else(|| {
+                            SdkError::InvalidInput(format!(
+                                "Attestation outcome {idx} has no adaptor point"
+                            ))
+                        })?;
+                    let adaptor_config = AdaptorConfig::from_maybe_point(&adaptor_point)?;
+                    BatchSigningItem::adaptor(message_hash, vec![adaptor_config])
+                        .with_id(batch_item_id)
                 }
                 Outcome::Expiry => {
                     expiry_batch_id = Some(batch_item_id);

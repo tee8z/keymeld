@@ -149,7 +149,7 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
             expiry: None,
         },
         outcome_payouts,
-        fee_rate: FeeRate::from_sat_per_vb_unchecked(50),
+        fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: Amount::from_sat(FUNDING_AMOUNT_SATS),
         relative_locktime_block_delta: 1,
     };
@@ -404,7 +404,11 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         split_tx_signatures: dlc_sigs.split_signatures,
     };
 
-    let signed_contract: SignedContract = ticketed_dlc.into_signed_contract(contract_signatures);
+    // The market maker's verification covers every signature; a bad set would
+    // lock the funding output until every player cooperates.
+    let signed_contract: SignedContract = ticketed_dlc
+        .into_signed_contract(contract_params.market_maker.pubkey, contract_signatures)
+        .map_err(|e| anyhow!("DLC signature verification failed: {e}"))?;
     info!(
         "Created SignedContract with {} outcome + {} split signatures",
         dlc_batch.outcome_batch_ids.len(),
