@@ -174,7 +174,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-wasm-
 
       - name: Build SDK for WASM
-        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --features client --locked
+        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --features client,dlctix --locked
         env:
           # Workaround for secp256k1-sys WASM build with clang 16+
           # The wasm-sysroot in secp256k1-sys is missing memmove declaration in string.h
