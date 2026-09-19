@@ -17,7 +17,10 @@ use axum::{
 use axum_extra::TypedHeader;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::{KeygenStatusKind, SigningStatusKind},
+    protocol::{
+        Command, EnclaveCommand, EnclaveOutcome, KeygenCommand, KeygenOutcome, KeygenStatusKind,
+        MusigCommand, MusigOutcome, ReleasePayoutPreimageCommand, SigningStatusKind,
+    },
     AttestationDocument,
 };
 use keymeld_sdk::{
@@ -28,11 +31,12 @@ use keymeld_sdk::{
     EnclaveId, EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse,
     HealthCheckResponse, ImportUserKeyRequest, ImportUserKeyResponse,
     InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeyId,
-    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse,
-    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse, ReserveKeySlotRequest,
-    ReserveKeySlotResponse, ReserveKeygenSessionRequest, ReserveKeygenSessionResponse,
-    SignSingleRequest, SignSingleResponse, SigningSessionStatusResponse, SingleSigningStatus,
-    SingleSigningStatusResponse, StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
+    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse, PayoutReleaseRequest,
+    PayoutReleaseResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
+    ReserveKeySlotRequest, ReserveKeySlotResponse, ReserveKeygenSessionRequest,
+    ReserveKeygenSessionResponse, SignSingleRequest, SignSingleResponse,
+    SigningSessionStatusResponse, SingleSigningStatus, SingleSigningStatusResponse,
+    StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
 };
 use log::error;
 use moka::sync::Cache;
@@ -628,6 +632,7 @@ pub async fn register_keygen_participant(
                             auth_pubkey: request.auth_pubkey.clone(),
                             require_signing_approval: request.require_signing_approval,
                             registration_authorization: request.registration_authorization.clone(),
+                            payout_policy: request.payout_policy.clone(),
                         },
                     },
                 ),
@@ -1008,6 +1013,91 @@ pub async fn approve_signing_session(
 }
 
 /// Validate session signature using database-stored public key
+/// Release a participant's payout preimage against proof of a Lightning payment.
+#[utoipa::path(
+    post,
+    path = "/keygen/{keygen_session_id}/payout-release",
+    tag = "keygen",
+    summary = "Release a participant's payout preimage",
+    description = "The session's signing authority presents the signed batch, the settlement commitment and attestation, and proof that the participant's Lightning Address was paid. The participant's enclave verifies the claim and returns the payout preimage encrypted to the session secret. Requires X-Session-Signature header.",
+    params(
+        ("keygen_session_id" = String, Path, description = "Keygen session ID")
+    ),
+    request_body = PayoutReleaseRequest,
+    security(
+        ("SessionSignature" = [])
+    ),
+    responses(
+        (status = 200, description = "Encrypted payout preimage", body = PayoutReleaseResponse),
+        (status = 400, description = "Claim rejected by the enclave", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid X-Session-Signature header", body = ErrorResponse),
+        (status = 404, description = "Session or participant not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn release_payout_preimage(
+    State(state): State<AppState>,
+    Path(keygen_session_id): Path<SessionId>,
+    TypedHeader(session_signature): TypedHeader<SessionSignature>,
+    Json(request): Json<PayoutReleaseRequest>,
+) -> ApiResult<Json<PayoutReleaseResponse>> {
+    if request.claim.keygen_session_id != keygen_session_id {
+        return Err(ApiError::bad_request(
+            "Claim names a different keygen session",
+        ));
+    }
+    validate_session_signature(&state, &keygen_session_id, session_signature.value()).await?;
+
+    // The participant's key lives on exactly one enclave.
+    let participant = state
+        .db
+        .get_keygen_participant(&keygen_session_id, &request.claim.user_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Participant not found in keygen session"))?;
+    let user_id = request.claim.user_id.clone();
+    info!(
+        "Forwarding payout release claim for participant {} in session {} to enclave {}",
+        user_id,
+        keygen_session_id,
+        participant.enclave_id.as_u32()
+    );
+
+    let command = Command::new(EnclaveCommand::Musig(MusigCommand::Keygen(
+        KeygenCommand::ReleasePayoutPreimage(ReleasePayoutPreimageCommand {
+            claim: request.claim,
+            authorization: request.authorization,
+        }),
+    )));
+    let outcome = state
+        .enclave_manager
+        .send_command_to_enclave(&participant.enclave_id, command)
+        .await
+        .map_err(|e| ApiError::enclave_communication(e.to_string()))?;
+
+    match outcome.response {
+        EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::PayoutPreimageReleased(
+            released,
+        ))) => {
+            if released.keygen_session_id != keygen_session_id || released.user_id != user_id {
+                return Err(ApiError::enclave_communication(
+                    "Enclave released a preimage for a different participant",
+                ));
+            }
+            Ok(Json(PayoutReleaseResponse {
+                keygen_session_id: released.keygen_session_id,
+                user_id: released.user_id,
+                encrypted_payout_preimage: released.encrypted_payout_preimage,
+            }))
+        }
+        EnclaveOutcome::Error(error) => Err(ApiError::bad_request(format!(
+            "Enclave rejected the payout claim: {error:?}"
+        ))),
+        other => Err(ApiError::enclave_communication(format!(
+            "Unexpected enclave response to a payout claim: {other}"
+        ))),
+    }
+}
+
 async fn validate_session_signature(
     state: &AppState,
     session_id: &SessionId,

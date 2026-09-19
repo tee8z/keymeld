@@ -21,10 +21,23 @@ impl UserCredentials {
         context: keymeld_core::authorization::RegistrationContext,
         enclave_public_key_hex: &str,
     ) -> Result<String, SdkError> {
+        self.prepare_registration_with_policy(context, enclave_public_key_hex, None)
+    }
+
+    /// Like [`Self::prepare_registration`], also sealing how this participant
+    /// is paid out. The policy travels inside the encrypted envelope, so the
+    /// application relaying it cannot change the address.
+    pub fn prepare_registration_with_policy(
+        &self,
+        context: keymeld_core::authorization::RegistrationContext,
+        enclave_public_key_hex: &str,
+        payout_policy: Option<keymeld_core::authorization::PayoutPolicy>,
+    ) -> Result<String, SdkError> {
         use zeroize::Zeroize;
-        let envelope = keymeld_core::authorization::RegistrationEnvelope::new(
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::with_payout_policy(
             context,
             &self.private_key_bytes(),
+            payout_policy,
         )?;
         let mut plaintext = serde_json::to_vec(&envelope)?;
         let result = SecureCrypto::ecies_encrypt_from_hex(enclave_public_key_hex, &plaintext);

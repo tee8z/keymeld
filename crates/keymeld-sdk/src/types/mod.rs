@@ -1,3 +1,4 @@
+use keymeld_core::authorization::PayoutPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
@@ -158,6 +159,10 @@ pub struct RegisterKeygenParticipantRequest {
     #[serde(default)]
     pub require_signing_approval: bool,
     pub auth_pubkey: Vec<u8>,
+    /// Payout policy the registering party expects sealed in the envelope; the
+    /// enclave rejects the registration if the envelope carries another.
+    #[serde(default)]
+    pub payout_policy: Option<PayoutPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +226,34 @@ pub struct CreateSigningSessionRequest {
     pub keygen_session_id: SessionId,
     pub timeout_secs: u64,
     pub batch_items: Vec<SigningBatchItem>,
+}
+
+/// What a completed signing session leaves the claimant for later payout
+/// claims: the batch exactly as the enclaves received it and its authorization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningReceipt {
+    pub keygen_session_id: SessionId,
+    pub signing_session_id: SessionId,
+    pub batch_items: Vec<keymeld_core::protocol::EnclaveBatchItem>,
+    pub signing_authorization: SigningAuthorization,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct PayoutReleaseRequest {
+    pub claim: keymeld_core::authorization::PayoutClaim,
+    pub authorization: keymeld_core::authorization::PayoutReleaseAuthorization,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct PayoutReleaseResponse {
+    pub keygen_session_id: SessionId,
+    pub user_id: UserId,
+    /// `EncryptedData` hex, session secret, context `payout_preimage`.
+    pub encrypted_payout_preimage: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

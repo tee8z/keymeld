@@ -2509,10 +2509,12 @@ dependencies = [
  "bincode",
  "coset",
  "dashmap",
+ "dlctix",
  "getrandom 0.2.16",
  "getrandom 0.3.4",
  "hex",
  "hkdf",
+ "lightning-invoice",
  "musig2",
  "p384",
  "rand 0.9.5",
@@ -2715,6 +2717,26 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "lightning-invoice"
+version = "0.33.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39b494954ed8f1d774d86473224fadf9f0dfcca38c2d16a7dbdf2b5800c8943"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "lightning-types",
+]
+
+[[package]]
+name = "lightning-types"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da19491efc72d10a13d5b8fd9c0cc6de7814742675adcb9996fa13f40a3b5ca"
+dependencies = [
+ "bitcoin",
 ]
 
 [[package]]

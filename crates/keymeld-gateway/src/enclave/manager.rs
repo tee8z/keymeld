@@ -146,6 +146,8 @@ impl EnclaveManager {
                     enclave_encrypted_data: participant.enclave_encrypted_data.clone(),
                     auth_pubkey: participant.auth_pubkey.clone(),
                     require_signing_approval: participant.require_signing_approval,
+                    // Checked against the envelope when the registration was validated.
+                    payout_policy: None,
                 });
         }
 
@@ -771,7 +773,7 @@ impl EnclaveManager {
         match self.send_command_to_enclave(enclave_id, command).await {
             Ok(outcome) => match outcome.response {
                 EnclaveOutcome::System(SystemOutcome::PublicInfo(response))
-                    if response.authorization_protocol_version == 1 =>
+                    if response.authorization_protocol_version == 2 =>
                 {
                     Ok((
                         response.public_key,
@@ -2070,6 +2072,7 @@ impl EnclaveManager {
                     enclave_encrypted_data: p.enclave_encrypted_data.clone(),
                     auth_pubkey: p.auth_pubkey.clone(),
                     require_signing_approval: p.require_signing_approval,
+                    payout_policy: None,
                 })
             })
             .collect::<Result<_, KeyMeldError>>()?;

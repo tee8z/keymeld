@@ -228,6 +228,7 @@ impl<'a> SigningManager<'a> {
             batch_items: request.batch_items,
             signing_session_id: response.signing_session_id,
             keygen_session_id: response.keygen_session_id,
+            signing_authorization: Some(request.signing_authorization.clone()),
             credentials,
             status: response.status,
             batch_results: vec![],
@@ -285,6 +286,7 @@ impl<'a> SigningManager<'a> {
             batch_items: status_response.batch_items,
             signing_session_id: status_response.signing_session_id,
             keygen_session_id: status_response.keygen_session_id,
+            signing_authorization: None,
             credentials,
             status: status_response.status,
             batch_results: status_response.batch_results,
@@ -353,6 +355,9 @@ pub struct SigningSession<'a> {
     batch_items: Vec<SigningBatchItem>,
     signing_session_id: SessionId,
     keygen_session_id: SessionId,
+    /// The authority's signature over the batch, kept only by the session that
+    /// created it; restored sessions do not carry it.
+    signing_authorization: Option<SigningAuthorization>,
     credentials: SessionCredentials,
     status: SigningStatusKind,
     batch_results: Vec<BatchItemResult>,
@@ -364,6 +369,22 @@ pub struct SigningSession<'a> {
 impl<'a> SigningSession<'a> {
     pub fn session_id(&self) -> &SessionId {
         &self.signing_session_id
+    }
+
+    /// The authorized batch exactly as the enclaves received it, for later
+    /// payout claims. Persist it: only the session that created the batch has
+    /// it, and a claim must present the batch the authority signed.
+    pub fn receipt(&self) -> Option<crate::types::SigningReceipt> {
+        Some(crate::types::SigningReceipt {
+            keygen_session_id: self.keygen_session_id.clone(),
+            signing_session_id: self.signing_session_id.clone(),
+            batch_items: self
+                .batch_items
+                .iter()
+                .map(SigningBatchItem::to_enclave_batch_item)
+                .collect(),
+            signing_authorization: self.signing_authorization.clone()?,
+        })
     }
 
     pub fn keygen_session_id(&self) -> &SessionId {

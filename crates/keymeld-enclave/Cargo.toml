@@ -7,7 +7,7 @@ description = "Enclave runtime for KeyMeld - runs inside AWS Nitro Enclaves"
 license = "MIT"
 
 [dependencies]
-keymeld-core = { path = "../keymeld-core", features = ["enclave"] }
+keymeld-core = { path = "../keymeld-core", features = ["enclave", "payout"] }
 musig2 = { workspace = true }
 secp256k1 = { workspace = true }
 

@@ -26,8 +26,13 @@ pub use error::{
 pub use types::*;
 
 pub use keymeld_core::attestation::AttestationPolicy;
-pub use keymeld_core::crypto::{EncryptedData, SecureCrypto, SessionSecret};
+pub use keymeld_core::authorization::{PayoutClaim, PayoutPolicy, PayoutReleaseAuthorization};
+pub use keymeld_core::crypto::{
+    derive_payout_preimage, EncryptedData, SecureCrypto, SessionSecret,
+};
 pub use keymeld_core::hash_message;
+#[cfg(feature = "dlctix")]
+pub use keymeld_core::payout;
 pub use keymeld_core::request_auth;
 pub use keymeld_core::validation;
 
@@ -37,6 +42,8 @@ pub use http::HttpClient;
 #[cfg(feature = "client")]
 pub use client::{KeyMeldClient, KeyMeldClientBuilder};
 
+#[cfg(feature = "dlctix")]
+pub use managers::PayoutProof;
 #[cfg(feature = "client")]
 pub use managers::{
     AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
@@ -55,7 +62,8 @@ pub mod prelude {
         UserKeyInfo,
     };
     pub use keymeld_core::attestation::AttestationPolicy;
-    pub use keymeld_core::crypto::{SecureCrypto, SessionSecret};
+    pub use keymeld_core::authorization::{PayoutClaim, PayoutPolicy, PayoutReleaseAuthorization};
+    pub use keymeld_core::crypto::{derive_payout_preimage, SecureCrypto, SessionSecret};
 
     #[cfg(feature = "client")]
     pub use crate::client::{KeyMeldClient, KeyMeldClientBuilder};

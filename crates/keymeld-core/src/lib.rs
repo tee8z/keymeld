@@ -22,6 +22,8 @@ pub mod identifiers;
 pub mod logging;
 #[cfg(feature = "networking")]
 pub mod managed_socket;
+#[cfg(feature = "payout")]
+pub mod payout;
 pub mod protocol;
 pub mod request_auth;
 pub mod validation;

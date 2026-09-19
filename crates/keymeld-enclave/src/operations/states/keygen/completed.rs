@@ -1,3 +1,4 @@
+use crate::musig::types::ParticipantSettings;
 use crate::{
     musig::MusigProcessor,
     operations::states::{
@@ -123,6 +124,7 @@ impl TryFrom<Completed> for Initialized {
                             user_session.coordinator,
                             user_session.auth_pubkey,
                             user_session.require_signing_approval,
+                            user_session.payout_policy,
                         ),
                     );
                 }
@@ -148,8 +150,10 @@ impl TryFrom<Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval)) in
-            user_private_keys
+        for (
+            user_id,
+            (private_key, coordinator, auth_pubkey, require_signing_approval, payout_policy),
+        ) in user_private_keys
         {
             let signer_index = session_metadata
                 .expected_participants
@@ -163,8 +167,11 @@ impl TryFrom<Completed> for Initialized {
                     private_key,
                     signer_index,
                     coordinator,
-                    auth_pubkey,
-                    require_signing_approval,
+                    ParticipantSettings {
+                        auth_pubkey,
+                        require_signing_approval,
+                        payout_policy,
+                    },
                 )
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(
@@ -217,6 +224,7 @@ impl TryFrom<&Completed> for Initialized {
                             user_session.coordinator,
                             user_session.auth_pubkey,
                             user_session.require_signing_approval,
+                            user_session.payout_policy,
                         ),
                     );
                 }
@@ -242,8 +250,10 @@ impl TryFrom<&Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval)) in
-            user_private_keys
+        for (
+            user_id,
+            (private_key, coordinator, auth_pubkey, require_signing_approval, payout_policy),
+        ) in user_private_keys
         {
             let signer_index = session_metadata
                 .expected_participants
@@ -257,8 +267,11 @@ impl TryFrom<&Completed> for Initialized {
                     private_key,
                     signer_index,
                     coordinator,
-                    auth_pubkey,
-                    require_signing_approval,
+                    ParticipantSettings {
+                        auth_pubkey,
+                        require_signing_approval,
+                        payout_policy,
+                    },
                 )
                 .map_err(|e| {
                     EnclaveError::Session(SessionError::MusigInitialization(format!(

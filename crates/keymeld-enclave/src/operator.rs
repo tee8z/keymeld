@@ -429,6 +429,20 @@ impl EnclaveOperator {
                     }),
                 )))
             }
+            KeygenCommand::ReleasePayoutPreimage(cmd) => match &session.status {
+                OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => {
+                    let response = crate::operations::payout_release::release(completed, cmd)?;
+                    Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
+                        KeygenOutcome::PayoutPreimageReleased(response),
+                    )))
+                }
+                _ => Err(EnclaveError::Validation(
+                    keymeld_core::protocol::ValidationError::Other(
+                        "Payout preimages are released only from a completed keygen session"
+                            .to_string(),
+                    ),
+                )),
+            },
             KeygenCommand::AddParticipantsBatch(_cmd) => {
                 // Extract batch response data from the session state
                 match &session.status {
@@ -741,7 +755,7 @@ impl EnclaveOperator {
 
         Ok(EnclaveOutcome::System(SystemOutcome::PublicInfo(
             PublicInfoResponse {
-                authorization_protocol_version: 1,
+                authorization_protocol_version: 2,
                 public_key: hex::encode(&*self.public_key.read().unwrap()),
                 attestation_document,
                 active_sessions: active_sessions_count,

@@ -41,7 +41,7 @@ types-only = []
 openapi = ["dep:utoipa", "keymeld-core/openapi"]
 
 # DLC protocol utilities
-dlctix = ["dep:dlctix"]
+dlctix = ["dep:dlctix", "keymeld-core/payout"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { workspace = true, features = ["v7", "serde"] }

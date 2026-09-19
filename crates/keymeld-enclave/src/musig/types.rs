@@ -1,3 +1,4 @@
+use keymeld_core::authorization::PayoutPolicy;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
     protocol::{SubsetDefinition, TaprootTweak},
@@ -36,6 +37,16 @@ pub enum SessionPhase {
     Failed,
 }
 
+/// What a participant's registration fixes for the session: the key that
+/// authorizes their signatures, whether they must approve each batch, and
+/// where they are paid.
+#[derive(Debug, Clone, Default)]
+pub struct ParticipantSettings {
+    pub auth_pubkey: Option<Vec<u8>>,
+    pub require_signing_approval: bool,
+    pub payout_policy: Option<PayoutPolicy>,
+}
+
 pub struct UserMusigSession {
     pub user_id: UserId,
     pub coordinator: bool,
@@ -45,6 +56,9 @@ pub struct UserMusigSession {
     pub auth_pubkey: Option<Vec<u8>>,
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
+    /// How this participant is paid out, from their registration envelope.
+    /// Needed to release their payout preimage; see `operations::payout_release`.
+    pub payout_policy: Option<PayoutPolicy>,
 
     // === Batch signing MuSig2 state ===
     // Single messages are treated as a batch of 1

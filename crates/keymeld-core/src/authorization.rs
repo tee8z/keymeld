@@ -285,6 +285,41 @@ pub struct RegistrationEnvelope {
     pub context: RegistrationContext,
     pub private_key: Vec<u8>,
     pub proof_signature: Vec<u8>,
+    /// How the participant is paid out. Encrypted with the key, so whoever
+    /// relays the envelope cannot substitute an address.
+    #[serde(default)]
+    pub payout_policy: Option<PayoutPolicy>,
+}
+
+/// Where a participant is paid: a Lightning Address (LUD-16) and the node
+/// that issues its invoices. The enclave releases the participant's payout
+/// preimage only against proof of a payment to this address; see `payout`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PayoutPolicy {
+    pub lightning_address: String,
+    /// Compressed secp256k1 public key, hex, of the node that signs invoices
+    /// for the address. A paid invoice counts only if this key signed it;
+    /// otherwise a claimant could pay an invoice of its own making.
+    pub payee_node_id: String,
+}
+
+impl PayoutPolicy {
+    /// A well-formed policy: a `user@domain` address and a compressed node key.
+    pub fn validate(&self) -> Result<(), String> {
+        let address = self.lightning_address.trim();
+        let (user, domain) = address
+            .split_once('@')
+            .ok_or_else(|| "Lightning Address must be user@domain".to_string())?;
+        if user.is_empty() || domain.is_empty() || !domain.contains('.') || address.len() > 320 {
+            return Err("Lightning Address must be user@domain".to_string());
+        }
+        let node = hex::decode(self.payee_node_id.trim())
+            .map_err(|_| "Payee node id must be hex".to_string())?;
+        secp256k1::PublicKey::from_slice(&node)
+            .map_err(|_| "Payee node id must be a compressed public key".to_string())?;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for RegistrationEnvelope {
@@ -304,10 +339,25 @@ impl Drop for RegistrationEnvelope {
 
 impl RegistrationEnvelope {
     pub fn new(context: RegistrationContext, private_key: &[u8; 32]) -> Result<Self, KeyMeldError> {
+        Self::with_payout_policy(context, private_key, None)
+    }
+
+    /// The possession proof covers the payout policy too, so a policy can only
+    /// come from the key holder.
+    pub fn with_payout_policy(
+        context: RegistrationContext,
+        private_key: &[u8; 32],
+        payout_policy: Option<PayoutPolicy>,
+    ) -> Result<Self, KeyMeldError> {
         let envelope = Self {
-            proof_signature: sign_authorization(private_key, "registration-possession", &context)?,
+            proof_signature: sign_authorization(
+                private_key,
+                "registration-possession",
+                &(&context, &payout_policy),
+            )?,
             context,
             private_key: private_key.to_vec(),
+            payout_policy,
         };
         envelope.verify()?;
         Ok(envelope)
@@ -337,7 +387,7 @@ impl RegistrationEnvelope {
             verify_authorization(
                 &self.context.public_key,
                 "registration-possession",
-                &self.context,
+                &(&self.context, &self.payout_policy),
                 &self.proof_signature,
             )
         })();
@@ -455,6 +505,50 @@ impl SigningAuthorization {
             &(keygen_id, signing_id, self.timeout_secs, batch),
             &self.signature,
         )
+    }
+}
+
+/// A claimant's request for a participant's payout preimage: the settlement
+/// commitment that was signed, the oracle's attestation, and proof that the
+/// participant's Lightning Address was paid. Verified by the enclave; see
+/// `payout`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PayoutClaim {
+    pub keygen_session_id: SessionId,
+    pub signing_session_id: SessionId,
+    pub user_id: UserId,
+    /// The batch the session's authority authorized for signing, exactly as sent.
+    pub batch_items: Vec<EnclaveBatchItem>,
+    /// The authority's authorization of that batch.
+    pub signing_authorization: SigningAuthorization,
+    /// `EncryptedData` hex, session secret, context `payout_contract`: a JSON
+    /// `ContractCommitment`.
+    pub encrypted_contract: String,
+    /// The oracle's 32-byte attestation scalar, hex.
+    pub attestation: String,
+    pub invoice: String,
+    pub lnurl_metadata: String,
+    /// The 32-byte preimage revealed by paying the invoice, hex.
+    pub payment_preimage: String,
+}
+
+/// The session signing authority's signature over a [`PayoutClaim`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PayoutReleaseAuthorization {
+    pub signature: Vec<u8>,
+}
+
+impl PayoutReleaseAuthorization {
+    pub fn sign(secret: &[u8; 32], claim: &PayoutClaim) -> Result<Self, KeyMeldError> {
+        Ok(Self {
+            signature: sign_authorization(secret, "payout-release", claim)?,
+        })
+    }
+
+    pub fn verify(&self, public_key: &[u8], claim: &PayoutClaim) -> Result<(), KeyMeldError> {
+        verify_authorization(public_key, "payout-release", claim, &self.signature)
     }
 }
 

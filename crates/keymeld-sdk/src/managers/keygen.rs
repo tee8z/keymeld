@@ -520,6 +520,16 @@ impl<'a> KeygenManager<'a> {
     }
 }
 
+/// Proof that a participant's Lightning Address was paid; see
+/// `keymeld_core::payout::PaymentProof`.
+#[cfg(feature = "dlctix")]
+#[derive(Debug, Clone)]
+pub struct PayoutProof {
+    pub invoice: String,
+    pub lnurl_metadata: String,
+    pub payment_preimage: [u8; 32],
+}
+
 pub struct KeygenSession<'a> {
     recipient_authorization: Option<keymeld_core::authorization::EnclaveRecipientAuthorization>,
     authorization_manifest: SignedSessionManifest,
@@ -544,6 +554,91 @@ impl<'a> KeygenSession<'a> {
         &self,
     ) -> Option<&keymeld_core::authorization::EnclaveRecipientAuthorization> {
         self.recipient_authorization.as_ref()
+    }
+
+    /// Buy a participant's payout preimage with proof that their Lightning
+    /// Address was paid. Requires the session's signing authority; the
+    /// participant's enclave verifies the claim (see `keymeld_core::payout`).
+    #[cfg(feature = "dlctix")]
+    pub async fn release_payout_preimage(
+        &self,
+        receipt: &crate::types::SigningReceipt,
+        user_id: UserId,
+        contract: &keymeld_core::payout::ContractCommitment,
+        attestation: [u8; 32],
+        proof: PayoutProof,
+    ) -> Result<[u8; 32], SdkError> {
+        use keymeld_core::{
+            authorization::{PayoutClaim, PayoutReleaseAuthorization},
+            crypto::SecureCrypto,
+            EncryptedData, SessionSecret,
+        };
+
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            SdkError::InvalidInput(
+                "Releasing a payout preimage requires the session's signing authority credentials"
+                    .into(),
+            )
+        })?;
+        if receipt.keygen_session_id != self.session_id {
+            return Err(SdkError::InvalidInput(
+                "Signing receipt belongs to a different keygen session".into(),
+            ));
+        }
+        let session_secret = self.credentials.export_session_secret();
+        let encrypted_contract = SecureCrypto::encrypt_structured_data_with_session_key(
+            contract,
+            &hex::encode(session_secret),
+            "payout_contract",
+        )?
+        .to_hex()?;
+        let claim = PayoutClaim {
+            keygen_session_id: self.session_id.clone(),
+            signing_session_id: receipt.signing_session_id.clone(),
+            user_id,
+            batch_items: receipt.batch_items.clone(),
+            signing_authorization: receipt.signing_authorization.clone(),
+            encrypted_contract,
+            attestation: hex::encode(attestation),
+            invoice: proof.invoice,
+            lnurl_metadata: proof.lnurl_metadata,
+            payment_preimage: hex::encode(proof.payment_preimage),
+        };
+        let authorization = PayoutReleaseAuthorization::sign(&authority.export_secret(), &claim)?;
+        let request = crate::types::PayoutReleaseRequest {
+            claim,
+            authorization,
+        };
+        let session_signature = self
+            .credentials
+            .sign_session_request(&self.session_id.to_string())?;
+        let response: crate::types::PayoutReleaseResponse = self
+            .client
+            .http()
+            .post(
+                &self.client.url(&format!(
+                    "/api/v1/keygen/{}/payout-release",
+                    self.session_id
+                )),
+                &request,
+                &[("X-Session-Signature", &session_signature)],
+            )
+            .await?;
+        if response.keygen_session_id != self.session_id
+            || response.user_id != request.claim.user_id
+        {
+            return Err(SdkError::InvalidInput(
+                "Gateway returned a payout preimage for a different participant".into(),
+            ));
+        }
+        let encrypted = EncryptedData::from_hex(&response.encrypted_payout_preimage)?;
+        let preimage =
+            SessionSecret::from_bytes(session_secret).decrypt(&encrypted, "payout_preimage")?;
+        <[u8; 32]>::try_from(preimage.as_slice()).map_err(|_| {
+            SdkError::Api(crate::error::ApiError::InvalidResponse(
+                "Payout preimage must be 32 bytes".into(),
+            ))
+        })
     }
     pub fn authorization_manifest(&self) -> &SignedSessionManifest {
         &self.authorization_manifest
@@ -711,6 +806,9 @@ impl<'a> KeygenSession<'a> {
             enclave_key_epoch,
             require_signing_approval,
             auth_pubkey,
+            // Participants registering through the SDK seal their own policy;
+            // only a party that will pay them states an expectation.
+            payout_policy: None,
         };
 
         let response: RegisterKeygenParticipantResponse = self

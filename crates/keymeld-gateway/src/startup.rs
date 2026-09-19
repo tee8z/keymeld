@@ -25,11 +25,12 @@ use keymeld_sdk::{
     EnclaveHealthResponse, EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse,
     HealthCheckResponse, ImportUserKeyRequest, ImportUserKeyResponse,
     InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeyStatusResponse,
-    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse,
-    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse, ReserveKeySlotRequest,
-    ReserveKeySlotResponse, ReserveKeygenSessionRequest, ReserveKeygenSessionResponse,
-    SignSingleRequest, SignSingleResponse, SigningSessionStatusResponse, SingleSigningStatus,
-    SingleSigningStatusResponse, StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
+    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse, PayoutReleaseRequest,
+    PayoutReleaseResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
+    ReserveKeySlotRequest, ReserveKeySlotResponse, ReserveKeygenSessionRequest,
+    ReserveKeygenSessionResponse, SignSingleRequest, SignSingleResponse,
+    SigningSessionStatusResponse, SingleSigningStatus, SingleSigningStatusResponse,
+    StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
 };
 
 use std::{io::Error as IoError, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
@@ -79,6 +80,7 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
         handlers::register_keygen_participant,
         handlers::get_keygen_status,
         handlers::get_available_slots,
+        handlers::release_payout_preimage,
         handlers::create_signing_session,
         handlers::get_signing_status,
         handlers::get_enclave_public_key,
@@ -105,6 +107,8 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             KeygenSessionStatusResponse,
             GetAvailableSlotsResponse,
             AvailableUserSlot,
+            PayoutReleaseRequest,
+            PayoutReleaseResponse,
             CreateSigningSessionRequest,
             CreateSigningSessionResponse,
             SigningSessionStatusResponse,
@@ -452,6 +456,10 @@ impl Application {
         let api_routes = Router::new()
             // Keygen routes
             .route("/keygen/reserve", post(handlers::reserve_keygen_session))
+            .route(
+                "/keygen/{keygen_session_id}/payout-release",
+                post(handlers::release_payout_preimage),
+            )
             .route(
                 "/keygen/{session_id}/initialize",
                 post(handlers::initialize_keygen_session),

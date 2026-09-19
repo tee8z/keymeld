@@ -19,7 +19,7 @@ use tracing::{debug, error, warn};
 
 use KeygenCommand::{
     AddParticipantsBatch, DistributeParticipantPublicKeysBatch, GetAggregatePublicKey,
-    InitSession as KgInitSession,
+    InitSession as KgInitSession, ReleasePayoutPreimage,
 };
 use KeygenStatus::{
     Completed as KgCompleted, Distributing, Failed as KgFailed, Initialized as KgInitialized,
@@ -101,6 +101,9 @@ impl KeygenStatus {
 
             // Completed + GetAggregatePublicKey => Completed
             (KgCompleted(s), GetAggregatePublicKey(c)) => s.get_aggregate_key(c),
+
+            // Completed + ReleasePayoutPreimage => Completed (the operator builds the outcome)
+            (KgCompleted(s), ReleasePayoutPreimage(_)) => Ok(KgCompleted(s)),
 
             // Idempotent: late-arriving commands on completed session
             (KgCompleted(s), KgInitSession(_))
