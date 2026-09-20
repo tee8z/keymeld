@@ -20,6 +20,8 @@ pub enum ApiError {
     DatabaseOutcomeUnknown,
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("Unsupported capability: {0}")]
+    UnsupportedCapability(String),
     #[error("Conflict: {0}")]
     Conflict(String),
     #[error("Unauthorized: {0}")]
@@ -68,6 +70,7 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::UnsupportedCapability(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -92,6 +95,7 @@ impl ApiError {
             ApiError::DatabaseUnavailable => "database_unavailable",
             ApiError::DatabaseOutcomeUnknown => "database_outcome_unknown",
             ApiError::BadRequest(_) => "bad_request",
+            ApiError::UnsupportedCapability(_) => "unsupported_capability",
             ApiError::Conflict(_) => "conflict",
             ApiError::Unauthorized(_) => "unauthorized",
             ApiError::NotFound(_) => "not_found",
@@ -116,6 +120,7 @@ impl ApiError {
     pub fn client_message(&self) -> String {
         match self {
             ApiError::BadRequest(msg) => msg.clone(),
+            ApiError::UnsupportedCapability(msg) => msg.clone(),
             ApiError::Conflict(msg) => msg.clone(),
             ApiError::Unauthorized(msg) => msg.clone(),
             ApiError::NotFound(msg) => msg.clone(),

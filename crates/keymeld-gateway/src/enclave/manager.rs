@@ -146,8 +146,6 @@ impl EnclaveManager {
                     enclave_encrypted_data: participant.enclave_encrypted_data.clone(),
                     auth_pubkey: participant.auth_pubkey.clone(),
                     require_signing_approval: participant.require_signing_approval,
-                    // Checked against the envelope when the registration was validated.
-                    payout_policy: None,
                 });
         }
 
@@ -2072,7 +2070,6 @@ impl EnclaveManager {
                     enclave_encrypted_data: p.enclave_encrypted_data.clone(),
                     auth_pubkey: p.auth_pubkey.clone(),
                     require_signing_approval: p.require_signing_approval,
-                    payout_policy: None,
                 })
             })
             .collect::<Result<_, KeyMeldError>>()?;

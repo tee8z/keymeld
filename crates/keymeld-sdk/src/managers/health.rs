@@ -14,6 +14,16 @@ impl<'a> HealthManager<'a> {
         Self { client }
     }
 
+    /// Generic escrow and optional adapters supported by gateway and enclaves.
+    pub async fn escrow_capabilities(
+        &self,
+    ) -> Result<keymeld_core::escrow_capabilities::EscrowCapabilities, SdkError> {
+        self.client
+            .http()
+            .get(&self.client.url("/api/v1/escrow/capabilities"), &[])
+            .await
+    }
+
     pub async fn is_healthy(&self) -> Result<bool, SdkError> {
         let response: HealthCheckResponse = self
             .client

@@ -7,7 +7,7 @@ description = "Enclave runtime for KeyMeld - runs inside AWS Nitro Enclaves"
 license = "MIT"
 
 [dependencies]
-keymeld-core = { path = "../keymeld-core", features = ["enclave", "payout"] }
+keymeld-core = { path = "../keymeld-core", default-features = false, features = ["enclave"] }
 musig2 = { workspace = true }
 secp256k1 = { workspace = true }
 
@@ -15,14 +15,16 @@ tokio = { workspace = true, features = ["full"] }
 tokio-vsock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bincode = { workspace = true }
 serde_cbor = { workspace = true }
 serde_bytes = "0.11"
 aws-nitro-enclaves-nsm-api = "0.4"
 aws-nitro-enclaves-cose = "0.5"
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+# Modern Hyper 1 / rustls 0.23 connector; the SDK default also enables legacy TLS.
+aws-sdk-kms = { version = "1.98.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-http-client = { version = "=1.1.5", features = ["rustls-aws-lc"] }
-openssl = "0.10.75"
+openssl = "0.10.81"
 cms = "0.2.3"
 der = { version = "0.7.10", features = ["alloc"] }
 pkcs1 = "0.7.5"
@@ -39,9 +41,15 @@ uuid = { workspace = true }
 dashmap = { workspace = true }
 
 [features]
-default = []
+# Escrow ships in the built binaries. test-support stays opt-in: it is an
+# in-process fixture only and production images must not enable it.
+default = ["escrow"]
+escrow = ["keymeld-core/escrow"]
+# In-process integration fixtures only. Production images must not enable this.
+test-support = []
 
 [dev-dependencies]
+keymeld-sdk = { path = "../keymeld-sdk" }
 axum = { workspace = true }
 base64 = "0.22"
 spki = "0.7.3"

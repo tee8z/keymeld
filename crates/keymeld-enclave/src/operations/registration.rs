@@ -36,6 +36,25 @@ pub fn validate_registration(
     let envelope: RegistrationEnvelope =
         serde_json::from_slice(&decrypted).map_err(|e| invalid(e.to_string()))?;
     envelope.verify().map_err(|e| invalid(e.to_string()))?;
+    if let Some(escrow) = &envelope.escrow {
+        if !enclave.confidential_dispatch {
+            return Err(invalid(
+                "Generic escrow registration requires confidential transport".into(),
+            ));
+        }
+        enclave
+            .escrow_capabilities
+            .require_escrow()
+            .map_err(|e| invalid(e.to_string()))?;
+        enclave.escrow_verifiers.validate_registration(
+            crate::escrow_verifier::RegistrationView {
+                manifest,
+                policy: &escrow.policy,
+                restoring: current_epoch.is_none(),
+            },
+        )?;
+    }
+
     if serde_json::to_vec(&envelope.context).map_err(|e| invalid(e.to_string()))?
         != serde_json::to_vec(context).map_err(|e| invalid(e.to_string()))?
     {
@@ -43,16 +62,7 @@ pub fn validate_registration(
             "Encrypted registration differs from authorized context".into(),
         ));
     }
-    if let Some(policy) = &envelope.payout_policy {
-        policy.validate().map_err(invalid)?;
-    }
-    // A claimant pays the sealed address before the enclave releases anything,
-    // so it must know the sealed policy is the one it expects.
-    if participant.payout_policy.is_some() && participant.payout_policy != envelope.payout_policy {
-        return Err(invalid(
-            "Sealed payout policy differs from the one the registration expects".into(),
-        ));
-    }
+
     Ok(envelope)
 }
 
@@ -61,8 +71,7 @@ pub(crate) mod tests {
     use super::*;
     use keymeld_core::{
         authorization::{
-            PayoutPolicy, RegistrationAuthorization, RegistrationContext,
-            SessionAuthorizationManifest,
+            RegistrationAuthorization, RegistrationContext, SessionAuthorizationManifest,
         },
         crypto::SecureCrypto,
         protocol::TaprootTweak,
@@ -88,10 +97,6 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture() -> Fixture {
-        fixture_with_policy(None)
-    }
-
-    pub(crate) fn fixture_with_policy(policy: Option<PayoutPolicy>) -> Fixture {
         let creator = [11; 32];
         let signer = [12; 32];
         let invite = [13; 32];
@@ -140,8 +145,7 @@ pub(crate) mod tests {
             auth_pubkey: auth.serialize().to_vec(),
             require_signing_approval: true,
         };
-        let envelope =
-            RegistrationEnvelope::with_payout_policy(context.clone(), &key, policy).unwrap();
+        let envelope = RegistrationEnvelope::new(context.clone(), &key).unwrap();
         let ciphertext = hex::encode(
             SecureCrypto::ecies_encrypt(
                 &PublicKey::from_slice(&public_key(&enclave_key)).unwrap(),
@@ -159,7 +163,6 @@ pub(crate) mod tests {
                 enclave_encrypted_data: ciphertext,
                 require_signing_approval: true,
                 registration_authorization,
-                payout_policy: None,
             },
             enclave: EnclaveSharedContext::new(
                 EnclaveId::new(1),
@@ -194,43 +197,6 @@ pub(crate) mod tests {
         assert!(validate_registration(&f.manifest, &participant, &f.enclave, Some(1)).is_err());
     }
 
-    fn policy(address: &str) -> PayoutPolicy {
-        PayoutPolicy {
-            lightning_address: address.into(),
-            payee_node_id: hex::encode(public_key(&[31; 32])),
-        }
-    }
-
-    #[test]
-    fn expected_payout_policy_must_match_the_sealed_one() {
-        let sealed = policy("alice@cash.app");
-        let f = fixture_with_policy(Some(sealed.clone()));
-        // Without an expectation the sealed policy is accepted as is.
-        assert!(validate_registration(&f.manifest, &f.participant, &f.enclave, Some(1)).is_ok());
-        let mut participant = f.participant.clone();
-        participant.payout_policy = Some(sealed.clone());
-        assert!(validate_registration(&f.manifest, &participant, &f.enclave, Some(1)).is_ok());
-        participant.payout_policy = Some(policy("mallory@cash.app"));
-        assert!(validate_registration(&f.manifest, &participant, &f.enclave, Some(1)).is_err());
-
-        // Expecting a policy from an envelope that sealed none fails too.
-        let plain = fixture();
-        let mut participant = plain.participant.clone();
-        participant.payout_policy = Some(sealed);
-        assert!(
-            validate_registration(&plain.manifest, &participant, &plain.enclave, Some(1)).is_err()
-        );
-
-        // A malformed sealed policy is refused even without an expectation.
-        let bad = fixture_with_policy(Some(PayoutPolicy {
-            lightning_address: "nope".into(),
-            payee_node_id: "zz".into(),
-        }));
-        assert!(
-            validate_registration(&bad.manifest, &bad.participant, &bad.enclave, Some(1)).is_err()
-        );
-    }
-
     #[test]
     fn invitation_holder_cannot_import_a_key_without_matching_possession_proof() {
         let f = fixture();
@@ -239,7 +205,7 @@ pub(crate) mod tests {
             context: participant.registration_authorization.context.clone(),
             private_key: [22; 32].to_vec(),
             proof_signature: vec![0; 64],
-            payout_policy: None,
+            escrow: None,
         };
         participant.enclave_encrypted_data = hex::encode(
             SecureCrypto::ecies_encrypt(

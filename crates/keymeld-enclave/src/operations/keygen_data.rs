@@ -65,7 +65,7 @@ pub fn create_signing_musig_from_keygen(
                         ParticipantSettings {
                             auth_pubkey: user_session.auth_pubkey.clone(),
                             require_signing_approval: user_session.require_signing_approval,
-                            payout_policy: user_session.payout_policy.clone(),
+                            escrow: user_session.escrow.clone(),
                         },
                     )
                     .map_err(|e| {

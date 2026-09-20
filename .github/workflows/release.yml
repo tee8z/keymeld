@@ -92,6 +92,7 @@ jobs:
           bash scripts/test-locked-kms-policy.sh
           bash scripts/test-nitro-kms-e2e-mocks.sh
           bash scripts/test-aws-launchers.sh
+          bash scripts/test-build-enclave-eif.sh
 
   authorization-e2e:
     name: Test Authorization End to End (${{ matrix.enclaves }} enclaves)
@@ -129,12 +130,14 @@ jobs:
           retention-days: 7
 
   build-release:
-    name: Build Binaries (${{ matrix.target }})
+    name: Build Binaries (${{ matrix.target }}, ${{ matrix.variant }})
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        variant: [default, escrow]
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
@@ -150,26 +153,38 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ matrix.variant }}
       - name: Build release binaries
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked --workspace --target "$TARGET"
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          FEATURES=()
+          case "$VARIANT" in
+            default) ;;
+            escrow) FEATURES=(--features "keymeld-gateway/escrow,keymeld-enclave/escrow,keymeld-sdk/escrow") ;;
+            *) echo "Unknown build variant: $VARIANT" >&2; exit 1 ;;
+          esac
+          cargo build --release --locked --workspace --target "$TARGET" "${FEATURES[@]}"
       - name: Package binaries and source identity
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
           SOURCE_SHA: ${{ needs.prepare-release.outputs.sha }}
           TARGET: ${{ matrix.target }}
+          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
+          SUFFIX=""
+          if [[ "$VARIANT" != default ]]; then SUFFIX="-$VARIANT"; fi
           mkdir release
           for BINARY in keymeld-gateway keymeld-enclave; do
-            tar czf "release/$BINARY-$VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" "$BINARY"
+            tar czf "release/$BINARY$SUFFIX-$VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" "$BINARY"
           done
-          printf '%s\n' "$SOURCE_SHA" > "release/SOURCE-$TARGET.txt"
+          printf '%s\n' "$SOURCE_SHA" > "release/SOURCE$SUFFIX-$TARGET.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.target }}
+          name: binaries-${{ matrix.target }}-${{ matrix.variant }}
           path: release/*
           if-no-files-found: error
           retention-days: 7
@@ -190,7 +205,7 @@ jobs:
         with:
           key: release-wasm
       - name: Verify WASM library compilation
-        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client,dlctix --locked
+        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client,dlctix,escrow --locked
         env:
           CFLAGS_wasm32_unknown_unknown: "-Wno-error=implicit-function-declaration"
 
@@ -201,7 +216,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [gateway, enclave]
+        image: [gateway, enclave, gateway-escrow, enclave-escrow]
         include:
           - arch: amd64
             runner: ubuntu-latest
@@ -248,13 +263,16 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [gateway, enclave]
+        image: [gateway, enclave, gateway-escrow, enclave-escrow]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: docker-${{ matrix.image }}-*
+          name: docker-${{ matrix.image }}-amd64
           path: images
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-${{ matrix.image }}-arm64
+          path: images
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -320,7 +338,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [gateway, enclave]
+        image: [gateway, enclave, gateway-escrow, enclave-escrow]
     steps:
       - uses: docker/login-action@v3
         with:

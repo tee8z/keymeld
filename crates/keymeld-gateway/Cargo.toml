@@ -24,7 +24,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }
 aws-config = { workspace = true }
-aws-sdk-kms = "1.98.0"
+# Modern Hyper 1 / rustls 0.23 connector; the SDK default also enables legacy TLS.
+aws-sdk-kms = { version = "1.98.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 secp256k1 = { workspace = true }
 hex = { workspace = true }
 subtle = "2.5.0"
@@ -52,6 +53,11 @@ utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
 [dev-dependencies]
 tempfile = "3.15.0"
+
+[features]
+# Escrow ships in the built binaries.
+default = ["escrow"]
+escrow = ["keymeld-core/escrow", "keymeld-sdk/escrow"]
 
 [build-dependencies]
 minify-js = "0.6"

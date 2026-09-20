@@ -1118,35 +1118,3 @@ mod session_secret_tests {
         assert_eq!(message, decrypted);
     }
 }
-
-/// Domain tag for [`derive_payout_preimage`].
-const PAYOUT_PREIMAGE_TAG: &[u8] = b"keymeld/payout-preimage/v1";
-
-/// A participant's payout preimage, derived from their private key with a
-/// BIP-340 style tagged hash. Clients and enclaves must agree on this so that
-/// an enclave holding the key can release the preimage on the participant's
-/// behalf (see `payout`). Revealing the preimage reveals nothing about the
-/// key.
-pub fn derive_payout_preimage(private_key: &[u8; 32]) -> [u8; 32] {
-    let tag = Sha256::digest(PAYOUT_PREIMAGE_TAG);
-    Sha256::new()
-        .chain_update(tag)
-        .chain_update(tag)
-        .chain_update(private_key)
-        .finalize()
-        .into()
-}
-
-#[cfg(test)]
-mod payout_preimage_tests {
-    use super::derive_payout_preimage;
-
-    #[test]
-    fn payout_preimage_is_deterministic_and_not_the_key() {
-        let key = [7u8; 32];
-        let preimage = derive_payout_preimage(&key);
-        assert_eq!(preimage, derive_payout_preimage(&key));
-        assert_ne!(preimage, key);
-        assert_ne!(preimage, derive_payout_preimage(&[8u8; 32]));
-    }
-}

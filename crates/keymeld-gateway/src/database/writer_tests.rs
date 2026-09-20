@@ -426,6 +426,7 @@ async fn rejected_and_canceled_reservations_cannot_publish_an_uncommitted_roster
             metrics: Arc::new(Metrics),
             gateway_limits: GatewayLimits::default(),
             nonce_cache: NonceCache::new(),
+            escrow_capabilities: Default::default(),
         }),
         Path(session_id.clone()),
         Json(initialize),

@@ -17,10 +17,7 @@ use axum::{
 use axum_extra::TypedHeader;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::{
-        Command, EnclaveCommand, EnclaveOutcome, KeygenCommand, KeygenOutcome, KeygenStatusKind,
-        MusigCommand, MusigOutcome, ReleasePayoutPreimageCommand, SigningStatusKind,
-    },
+    protocol::{Command, EnclaveCommand, EnclaveOutcome, KeygenStatusKind, SigningStatusKind},
     AttestationDocument,
 };
 use keymeld_sdk::{
@@ -31,12 +28,11 @@ use keymeld_sdk::{
     EnclaveId, EnclavePublicKeyResponse, ErrorResponse, GetAvailableSlotsResponse,
     HealthCheckResponse, ImportUserKeyRequest, ImportUserKeyResponse,
     InitializeKeygenSessionRequest, InitializeKeygenSessionResponse, KeyId,
-    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse, PayoutReleaseRequest,
-    PayoutReleaseResponse, RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse,
-    ReserveKeySlotRequest, ReserveKeySlotResponse, ReserveKeygenSessionRequest,
-    ReserveKeygenSessionResponse, SignSingleRequest, SignSingleResponse,
-    SigningSessionStatusResponse, SingleSigningStatus, SingleSigningStatusResponse,
-    StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
+    KeygenSessionStatusResponse, ListEnclavesResponse, ListUserKeysResponse,
+    RegisterKeygenParticipantRequest, RegisterKeygenParticipantResponse, ReserveKeySlotRequest,
+    ReserveKeySlotResponse, ReserveKeygenSessionRequest, ReserveKeygenSessionResponse,
+    SignSingleRequest, SignSingleResponse, SigningSessionStatusResponse, SingleSigningStatus,
+    SingleSigningStatusResponse, StoreKeyFromKeygenRequest, StoreKeyFromKeygenResponse,
 };
 use log::error;
 use moka::sync::Cache;
@@ -55,6 +51,7 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub gateway_limits: GatewayLimits,
     pub nonce_cache: NonceCache,
+    pub escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities,
 }
 
 /// A bounded cache accelerates replay rejection. SQLite remains authoritative
@@ -618,24 +615,22 @@ pub async fn register_keygen_participant(
         ));
     }
     // Decrypt and validate in the assigned enclave before a database slot is consumed.
+    let registration = keymeld_core::protocol::ValidateRegistrationCommand {
+        authorization_manifest: collecting.authorization_manifest.clone(),
+        participant: keymeld_core::protocol::ParticipantRegistrationData {
+            user_id: request.user_id.clone(),
+            enclave_encrypted_data: request.encrypted_private_key.clone(),
+            auth_pubkey: request.auth_pubkey.clone(),
+            require_signing_approval: request.require_signing_approval,
+            registration_authorization: request.registration_authorization.clone(),
+        },
+    };
     let outcome = state
         .enclave_manager
         .send_command_to_enclave(
             &assigned_enclave,
             keymeld_core::protocol::Command::new(keymeld_core::protocol::EnclaveCommand::System(
-                keymeld_core::protocol::SystemCommand::ValidateRegistration(
-                    keymeld_core::protocol::ValidateRegistrationCommand {
-                        authorization_manifest: collecting.authorization_manifest.clone(),
-                        participant: keymeld_core::protocol::ParticipantRegistrationData {
-                            user_id: request.user_id.clone(),
-                            enclave_encrypted_data: request.encrypted_private_key.clone(),
-                            auth_pubkey: request.auth_pubkey.clone(),
-                            require_signing_approval: request.require_signing_approval,
-                            registration_authorization: request.registration_authorization.clone(),
-                            payout_policy: request.payout_policy.clone(),
-                        },
-                    },
-                ),
+                keymeld_core::protocol::SystemCommand::ValidateRegistration(registration),
             )),
         )
         .await
@@ -1013,91 +1008,6 @@ pub async fn approve_signing_session(
 }
 
 /// Validate session signature using database-stored public key
-/// Release a participant's payout preimage against proof of a Lightning payment.
-#[utoipa::path(
-    post,
-    path = "/keygen/{keygen_session_id}/payout-release",
-    tag = "keygen",
-    summary = "Release a participant's payout preimage",
-    description = "The session's signing authority presents the signed batch, the settlement commitment and attestation, and proof that the participant's Lightning Address was paid. The participant's enclave verifies the claim and returns the payout preimage encrypted to the session secret. Requires X-Session-Signature header.",
-    params(
-        ("keygen_session_id" = String, Path, description = "Keygen session ID")
-    ),
-    request_body = PayoutReleaseRequest,
-    security(
-        ("SessionSignature" = [])
-    ),
-    responses(
-        (status = 200, description = "Encrypted payout preimage", body = PayoutReleaseResponse),
-        (status = 400, description = "Claim rejected by the enclave", body = ErrorResponse),
-        (status = 401, description = "Missing or invalid X-Session-Signature header", body = ErrorResponse),
-        (status = 404, description = "Session or participant not found", body = ErrorResponse),
-        (status = 500, description = "Internal error", body = ErrorResponse),
-    )
-)]
-pub async fn release_payout_preimage(
-    State(state): State<AppState>,
-    Path(keygen_session_id): Path<SessionId>,
-    TypedHeader(session_signature): TypedHeader<SessionSignature>,
-    Json(request): Json<PayoutReleaseRequest>,
-) -> ApiResult<Json<PayoutReleaseResponse>> {
-    if request.claim.keygen_session_id != keygen_session_id {
-        return Err(ApiError::bad_request(
-            "Claim names a different keygen session",
-        ));
-    }
-    validate_session_signature(&state, &keygen_session_id, session_signature.value()).await?;
-
-    // The participant's key lives on exactly one enclave.
-    let participant = state
-        .db
-        .get_keygen_participant(&keygen_session_id, &request.claim.user_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Participant not found in keygen session"))?;
-    let user_id = request.claim.user_id.clone();
-    info!(
-        "Forwarding payout release claim for participant {} in session {} to enclave {}",
-        user_id,
-        keygen_session_id,
-        participant.enclave_id.as_u32()
-    );
-
-    let command = Command::new(EnclaveCommand::Musig(MusigCommand::Keygen(
-        KeygenCommand::ReleasePayoutPreimage(ReleasePayoutPreimageCommand {
-            claim: request.claim,
-            authorization: request.authorization,
-        }),
-    )));
-    let outcome = state
-        .enclave_manager
-        .send_command_to_enclave(&participant.enclave_id, command)
-        .await
-        .map_err(|e| ApiError::enclave_communication(e.to_string()))?;
-
-    match outcome.response {
-        EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::PayoutPreimageReleased(
-            released,
-        ))) => {
-            if released.keygen_session_id != keygen_session_id || released.user_id != user_id {
-                return Err(ApiError::enclave_communication(
-                    "Enclave released a preimage for a different participant",
-                ));
-            }
-            Ok(Json(PayoutReleaseResponse {
-                keygen_session_id: released.keygen_session_id,
-                user_id: released.user_id,
-                encrypted_payout_preimage: released.encrypted_payout_preimage,
-            }))
-        }
-        EnclaveOutcome::Error(error) => Err(ApiError::bad_request(format!(
-            "Enclave rejected the payout claim: {error:?}"
-        ))),
-        other => Err(ApiError::enclave_communication(format!(
-            "Unexpected enclave response to a payout claim: {other}"
-        ))),
-    }
-}
-
 async fn validate_session_signature(
     state: &AppState,
     session_id: &SessionId,
@@ -1338,6 +1248,48 @@ pub async fn api_version() -> ApiResult<Json<ApiVersionResponse>> {
         },
     };
     Ok(Json(response))
+}
+
+/// Generic capabilities are confirmed by every assigned enclave, independently
+/// of the gateway binary's compiled feature set.
+#[utoipa::path(
+    get,
+    path = "/escrow/capabilities",
+    tag = "health",
+    responses((status = 200, description = "Effective generic escrow capabilities", body = keymeld_core::escrow_capabilities::EscrowCapabilities))
+)]
+pub async fn escrow_capabilities(
+    State(state): State<AppState>,
+) -> ApiResult<Json<keymeld_core::escrow_capabilities::EscrowCapabilities>> {
+    use keymeld_core::protocol::{SystemCommand, SystemOutcome};
+    let mut capabilities = state.escrow_capabilities;
+    if !capabilities.escrow {
+        return Ok(Json(capabilities));
+    }
+    let enclave_ids = state.enclave_manager.get_all_enclave_ids();
+    if enclave_ids.is_empty() {
+        return Ok(Json(Default::default()));
+    }
+    for enclave_id in enclave_ids {
+        let response = state
+            .enclave_manager
+            .send_command_to_enclave(
+                &enclave_id,
+                Command::new(EnclaveCommand::System(SystemCommand::GetEscrowCapabilities)),
+            )
+            .await?;
+        match response.response {
+            EnclaveOutcome::System(SystemOutcome::EscrowCapabilities(enclave_capabilities)) => {
+                capabilities = capabilities.intersection(enclave_capabilities);
+            }
+            _ => {
+                return Err(ApiError::enclave_communication(
+                    "Enclave did not advertise escrow capabilities",
+                ))
+            }
+        }
+    }
+    Ok(Json(capabilities))
 }
 
 #[utoipa::path(

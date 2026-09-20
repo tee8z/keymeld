@@ -1,3 +1,5 @@
+pub mod batch;
+pub use batch::{BatchSigningItem, BatchSigningMode, SignatureResult};
 pub mod config;
 pub mod credentials;
 pub mod error;
@@ -26,15 +28,11 @@ pub use error::{
 pub use types::*;
 
 pub use keymeld_core::attestation::AttestationPolicy;
-pub use keymeld_core::authorization::{PayoutClaim, PayoutPolicy, PayoutReleaseAuthorization};
-pub use keymeld_core::crypto::{
-    derive_payout_preimage, EncryptedData, SecureCrypto, SessionSecret,
-};
+pub use keymeld_core::crypto::{EncryptedData, SecureCrypto, SessionSecret};
 pub use keymeld_core::hash_message;
-#[cfg(feature = "dlctix")]
-pub use keymeld_core::payout;
 pub use keymeld_core::request_auth;
 pub use keymeld_core::validation;
+pub use keymeld_core::{escrow, escrow_capabilities, escrow_protocol};
 
 #[cfg(feature = "client")]
 pub use http::HttpClient;
@@ -42,17 +40,15 @@ pub use http::HttpClient;
 #[cfg(feature = "client")]
 pub use client::{KeyMeldClient, KeyMeldClientBuilder};
 
-#[cfg(feature = "dlctix")]
-pub use managers::PayoutProof;
 #[cfg(feature = "client")]
 pub use managers::{
-    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
-    BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager, KeygenOptions,
-    KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult, SigningManager,
-    SigningOptions, SigningSession, SingleSignerOps,
+    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, HealthManager, JoinOptions,
+    KeySlotReservation, KeygenManager, KeygenOptions, KeygenSession, ParticipantInvitation,
+    RegisterOptions, SigningManager, SigningOptions, SigningSession, SingleSignerOps,
 };
 
 pub mod prelude {
+    pub use crate::batch::{BatchSigningItem, BatchSigningMode, SignatureResult};
     pub use crate::config::{HttpConfig, PollingConfig};
     pub use crate::credentials::{AuthorizationCredentials, SessionCredentials, UserCredentials};
     pub use crate::error::SdkError;
@@ -62,8 +58,7 @@ pub mod prelude {
         UserKeyInfo,
     };
     pub use keymeld_core::attestation::AttestationPolicy;
-    pub use keymeld_core::authorization::{PayoutClaim, PayoutPolicy, PayoutReleaseAuthorization};
-    pub use keymeld_core::crypto::{derive_payout_preimage, SecureCrypto, SessionSecret};
+    pub use keymeld_core::crypto::{SecureCrypto, SessionSecret};
 
     #[cfg(feature = "client")]
     pub use crate::client::{KeyMeldClient, KeyMeldClientBuilder};
@@ -73,9 +68,16 @@ pub mod prelude {
 
     #[cfg(feature = "client")]
     pub use crate::managers::{
-        AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
-        BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager,
-        KeygenOptions, KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult,
-        SigningManager, SigningOptions, SigningSession, SingleSignerOps,
+        AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, HealthManager,
+        JoinOptions, KeySlotReservation, KeygenManager, KeygenOptions, KeygenSession,
+        ParticipantInvitation, RegisterOptions, SigningManager, SigningOptions, SigningSession,
+        SingleSignerOps,
     };
 }
+
+pub mod confidential;
+
+#[cfg(feature = "client")]
+pub mod confidential_session;
+
+pub mod confidential_scope;

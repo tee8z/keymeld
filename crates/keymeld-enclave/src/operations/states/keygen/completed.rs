@@ -124,7 +124,7 @@ impl TryFrom<Completed> for Initialized {
                             user_session.coordinator,
                             user_session.auth_pubkey,
                             user_session.require_signing_approval,
-                            user_session.payout_policy,
+                            user_session.escrow,
                         ),
                     );
                 }
@@ -150,10 +150,8 @@ impl TryFrom<Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (
-            user_id,
-            (private_key, coordinator, auth_pubkey, require_signing_approval, payout_policy),
-        ) in user_private_keys
+        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval, escrow)) in
+            user_private_keys
         {
             let signer_index = session_metadata
                 .expected_participants
@@ -170,7 +168,7 @@ impl TryFrom<Completed> for Initialized {
                     ParticipantSettings {
                         auth_pubkey,
                         require_signing_approval,
-                        payout_policy,
+                        escrow,
                     },
                 )
                 .map_err(|e| {
@@ -224,7 +222,7 @@ impl TryFrom<&Completed> for Initialized {
                             user_session.coordinator,
                             user_session.auth_pubkey,
                             user_session.require_signing_approval,
-                            user_session.payout_policy,
+                            user_session.escrow,
                         ),
                     );
                 }
@@ -250,10 +248,8 @@ impl TryFrom<&Completed> for Initialized {
             })?;
 
         // Store user private keys
-        for (
-            user_id,
-            (private_key, coordinator, auth_pubkey, require_signing_approval, payout_policy),
-        ) in user_private_keys
+        for (user_id, (private_key, coordinator, auth_pubkey, require_signing_approval, escrow)) in
+            user_private_keys
         {
             let signer_index = session_metadata
                 .expected_participants
@@ -270,7 +266,7 @@ impl TryFrom<&Completed> for Initialized {
                     ParticipantSettings {
                         auth_pubkey,
                         require_signing_approval,
-                        payout_policy,
+                        escrow,
                     },
                 )
                 .map_err(|e| {

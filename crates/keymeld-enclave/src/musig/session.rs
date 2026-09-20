@@ -55,6 +55,9 @@ impl SessionMetadata {
 
         Ok(SessionMetadata {
             session_id: new_session_id,
+
+            #[cfg(feature = "escrow")]
+            escrow_state: self.escrow_state.clone(),
             authorization_manifest: self.authorization_manifest.clone(),
             registrations: self.registrations.clone(),
             expected_participants,
@@ -80,6 +83,8 @@ impl SessionMetadata {
         // The actual key ordering is determined by get_all_participants() which
         // sorts by compressed public key bytes (BIP327) after all participants register.
         SessionMetadata {
+            #[cfg(feature = "escrow")]
+            escrow_state: std::sync::Arc::new(Default::default()),
             session_id,
             authorization_manifest: None,
             registrations: BTreeMap::new(),

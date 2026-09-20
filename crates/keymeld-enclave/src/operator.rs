@@ -102,18 +102,68 @@ pub struct EnclaveOperator {
     keys_initialized: AtomicBool,
     configure_lock: tokio::sync::Mutex<()>,
     pub(crate) development_mode: bool,
+    pub(crate) confidential: crate::confidential::ConfidentialDispatcher,
 }
 
 impl EnclaveOperator {
     pub async fn handle_command(&self, command: Command) -> Result<Outcome, EnclaveError> {
+        if let EnclaveCommand::Confidential(envelope) = &command.command {
+            return self.handle_confidential(command.clone(), envelope).await;
+        }
+        let mut ids = crate::confidential::referenced_sessions(&command.command);
+        ids.sort();
+        ids.dedup();
+        let mut _session_gates = Vec::with_capacity(ids.len());
+        for id in &ids {
+            _session_gates.push(self.confidential.lock(id).await?);
+        }
+        if ids.iter().any(|id| {
+            self.sessions.get(id).is_some_and(|session| {
+                session
+                    .enclave_context
+                    .read()
+                    .map(|context| context.confidential_dispatch)
+                    .unwrap_or(true)
+            })
+        }) {
+            return Err(crate::confidential::rejected());
+        }
+        self.confidential.reject_legacy(&command.command)?;
+        self.handle_native_command(command, false).await
+    }
+
+    pub(crate) fn confidential_key_epoch(&self) -> u64 {
+        self.key_epoch.load(Ordering::Relaxed) as u64
+    }
+
+    pub(crate) async fn handle_native_command(
+        &self,
+        command: Command,
+        confidential: bool,
+    ) -> Result<Outcome, EnclaveError> {
         info!("command: {}", command.command);
 
+        if matches!(
+            &command.command,
+            EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(_)))
+        ) {
+            self.escrow_capabilities()
+                .require_escrow()
+                .map_err(|error| {
+                    EnclaveError::Validation(keymeld_core::protocol::ValidationError::Other(
+                        error.to_string(),
+                    ))
+                })?;
+        }
+
         let enclave_outcome = match &command.command {
+            EnclaveCommand::Confidential(_) => return Err(crate::confidential::rejected()),
             EnclaveCommand::System(system_cmd) => {
-                self.handle_system_command(system_cmd.clone()).await
+                self.handle_system_command(system_cmd.clone(), confidential)
+                    .await
             }
             EnclaveCommand::Musig(musig_cmd) => {
-                self.handle_musig_command(command.clone(), musig_cmd.clone())
+                self.handle_musig_command(command.clone(), musig_cmd.clone(), confidential)
                     .await
             }
             EnclaveCommand::UserKey(user_key_cmd) => {
@@ -139,8 +189,20 @@ impl EnclaveOperator {
     async fn handle_system_command(
         &self,
         command: SystemCommand,
+        confidential: bool,
     ) -> Result<EnclaveOutcome, EnclaveError> {
         match command {
+            SystemCommand::DescribeEscrowVerifiers => {
+                if !confidential {
+                    return Err(crate::confidential::rejected());
+                }
+                Ok(EnclaveOutcome::System(SystemOutcome::EscrowVerifiers(
+                    self.context.read().unwrap().escrow_verifiers.describe()?,
+                )))
+            }
+            SystemCommand::GetEscrowCapabilities => Ok(EnclaveOutcome::System(
+                SystemOutcome::EscrowCapabilities(self.escrow_capabilities()),
+            )),
             SystemCommand::CheckKeygenSession {
                 keygen_session_id,
                 recipient_authorization,
@@ -166,7 +228,8 @@ impl EnclaveOperator {
                 )))
             }
             SystemCommand::ValidateRegistration(cmd) => {
-                let context = self.context.read().unwrap();
+                let mut context = self.context.read().unwrap().clone();
+                context.confidential_dispatch = confidential;
                 let envelope = crate::operations::registration::validate_registration(
                     &cmd.authorization_manifest,
                     &cmd.participant,
@@ -182,6 +245,7 @@ impl EnclaveOperator {
                     ),
                 ))
             }
+
             SystemCommand::Ping => Ok(EnclaveOutcome::System(SystemOutcome::Pong)),
             SystemCommand::Configure(cmd) => {
                 self.handle_configure(cmd)
@@ -213,6 +277,7 @@ impl EnclaveOperator {
         &self,
         command: Command,
         musig_command: MusigCommand,
+        confidential: bool,
     ) -> Result<EnclaveOutcome, EnclaveError> {
         let session_id = command.command.session_id()?;
 
@@ -222,7 +287,8 @@ impl EnclaveOperator {
         );
 
         if !self.sessions.contains_key(&session_id) {
-            self.create_session_if_init_command(&musig_command).await?;
+            self.create_session_if_init_command(&musig_command, confidential)
+                .await?;
         }
 
         self.queue
@@ -236,13 +302,14 @@ impl EnclaveOperator {
     async fn create_session_if_init_command(
         &self,
         command: &MusigCommand,
+        confidential: bool,
     ) -> Result<(), EnclaveError> {
         match command {
             MusigCommand::Signing(SigningCommand::InitSession(cmd)) => {
                 self.create_signing_session(cmd).await
             }
             MusigCommand::Keygen(KeygenCommand::InitSession(cmd)) => {
-                self.create_keygen_session(cmd).await
+                self.create_keygen_session(cmd, confidential).await
             }
             _ => {
                 // Non-init commands expect session to already exist
@@ -288,7 +355,7 @@ impl EnclaveOperator {
             ContextAwareSession::new(
                 OperatorStatus::Signing(SigningStatus::Initialized(initial_state)),
                 SessionContext::Signing(Box::new(signing_context)),
-                self.context.clone(),
+                keygen_session.enclave_context.clone(),
             )
             // keygen_session lock is dropped here at end of block
         };
@@ -303,10 +370,18 @@ impl EnclaveOperator {
     async fn create_keygen_session(
         &self,
         cmd: &InitKeygenSessionCommand,
+        confidential: bool,
     ) -> Result<(), EnclaveError> {
         info!("Creating new keygen session: {}", cmd.keygen_session_id);
 
-        let keygen_context = KeygenSessionContext::from((cmd, &self.context));
+        let context = if confidential {
+            let mut context = self.context.read().unwrap().clone();
+            context.confidential_dispatch = true;
+            Arc::new(RwLock::new(context))
+        } else {
+            self.context.clone()
+        };
+        let keygen_context = KeygenSessionContext::from((cmd, &context));
         let session_context = SessionContext::Keygen(Box::new(keygen_context));
 
         let initial_state = KeygenInitialized::new(cmd.keygen_session_id.clone());
@@ -314,7 +389,7 @@ impl EnclaveOperator {
         let session = ContextAwareSession::new(
             OperatorStatus::Keygen(KeygenStatus::Initialized(initial_state)),
             session_context,
-            self.context.clone(),
+            context,
         );
 
         self.sessions.insert(cmd.keygen_session_id.clone(), session);
@@ -328,6 +403,28 @@ impl EnclaveOperator {
         session_id: &SessionId,
         command: &MusigCommand,
     ) -> Result<EnclaveOutcome, EnclaveError> {
+        #[cfg(feature = "escrow")]
+        if let MusigCommand::Keygen(KeygenCommand::Escrow(command)) = command {
+            let snapshot = {
+                let session = self.sessions.get(session_id).ok_or_else(|| {
+                    EnclaveError::Session(SessionError::NotFound(session_id.clone()))
+                })?;
+                crate::operations::escrow::EscrowSessionSnapshot::new(completed_keygen_session(
+                    &session,
+                )?)
+            };
+            let context = self.context.read().unwrap().clone();
+            let response = crate::operations::escrow::handle_snapshot(
+                &snapshot,
+                &context,
+                command,
+                self.key_epoch.load(Ordering::Relaxed) as u64,
+            )
+            .await?;
+            return Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
+                KeygenOutcome::Escrow(Box::new(response)),
+            )));
+        }
         let session = self
             .sessions
             .get(session_id)
@@ -429,20 +526,22 @@ impl EnclaveOperator {
                     }),
                 )))
             }
-            KeygenCommand::ReleasePayoutPreimage(cmd) => match &session.status {
-                OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => {
-                    let response = crate::operations::payout_release::release(completed, cmd)?;
-                    Ok(EnclaveOutcome::Musig(MusigOutcome::Keygen(
-                        KeygenOutcome::PayoutPreimageReleased(response),
-                    )))
-                }
-                _ => Err(EnclaveError::Validation(
-                    keymeld_core::protocol::ValidationError::Other(
-                        "Payout preimages are released only from a completed keygen session"
-                            .to_string(),
-                    ),
-                )),
-            },
+            #[cfg(feature = "escrow")]
+            KeygenCommand::Escrow(_) => Err(EnclaveError::Validation(
+                keymeld_core::protocol::ValidationError::Other(
+                    "Escrow dispatch requires an owned session snapshot".into(),
+                ),
+            )),
+            #[cfg(not(feature = "escrow"))]
+            // Report the canonical capability error so a build without escrow
+            // answers with the same message everywhere it is refused.
+            KeygenCommand::Escrow(_) => Err(EnclaveError::Validation(
+                keymeld_core::protocol::ValidationError::Other(
+                    keymeld_core::escrow_capabilities::EscrowCapabilityError::EscrowNotCompiled
+                        .to_string(),
+                ),
+            )),
+
             KeygenCommand::AddParticipantsBatch(_cmd) => {
                 // Extract batch response data from the session state
                 match &session.status {
@@ -799,6 +898,10 @@ impl EnclaveOperator {
     }
 
     pub fn new(enclave_id: EnclaveId) -> Result<Self, EnclaveError> {
+        let escrow_capabilities =
+            keymeld_core::escrow_capabilities::EscrowCapabilities::for_service(cfg!(
+                feature = "escrow"
+            ));
         let startup_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| {
@@ -825,7 +928,7 @@ impl EnclaveOperator {
             None,       // Attestation manager will be set during Configure command
             keymeld_core::managed_socket::config::TimeoutConfig::default(),
         )));
-
+        context.write().unwrap().escrow_capabilities = escrow_capabilities;
         Ok(EnclaveOperator {
             enclave_id,
             sessions,
@@ -843,11 +946,40 @@ impl EnclaveOperator {
             keys_initialized: AtomicBool::new(false),
             configure_lock: tokio::sync::Mutex::new(()),
             development_mode: false,
+            confidential: Default::default(),
         })
+    }
+
+    pub fn with_verifiers(
+        enclave_id: EnclaveId,
+        registry: crate::escrow_verifier::VerifierRegistry,
+    ) -> Result<Self, EnclaveError> {
+        let operator = Self::new(enclave_id)?;
+        operator.context.write().unwrap().escrow_verifiers = Arc::new(registry);
+        Ok(operator)
+    }
+
+    /// Install deterministic keys for in-process protocol fixtures only.
+    /// Production enclave images must not enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_keys(&self, secret: [u8; 32]) {
+        let key = secp256k1::SecretKey::from_byte_array(secret).unwrap();
+        let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &key)
+            .serialize()
+            .to_vec();
+        *self.private_key.write().unwrap() = secret.to_vec();
+        *self.public_key.write().unwrap() = public.clone();
+        let mut context = self.context.write().unwrap();
+        context.private_key = secret.to_vec();
+        context.public_key = public;
     }
 
     pub fn get_public_key(&self) -> Vec<u8> {
         self.public_key.read().unwrap().clone()
+    }
+
+    pub fn escrow_capabilities(&self) -> keymeld_core::escrow_capabilities::EscrowCapabilities {
+        self.context.read().unwrap().escrow_capabilities
     }
 
     async fn handle_configure(
@@ -1358,6 +1490,20 @@ impl EnclaveOperator {
     }
 }
 
+#[cfg(feature = "escrow")]
+fn completed_keygen_session(
+    session: &ContextAwareSession,
+) -> Result<&crate::operations::states::keygen::Completed, EnclaveError> {
+    match &session.status {
+        OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => Ok(completed),
+        _ => Err(EnclaveError::Validation(
+            keymeld_core::protocol::ValidationError::Other(
+                "Escrow operations require a completed keygen session".into(),
+            ),
+        )),
+    }
+}
+
 impl Drop for EnclaveOperator {
     fn drop(&mut self) {
         info!("Dropping EnclaveOperator and zeroizing sensitive data");
@@ -1368,6 +1514,75 @@ impl Drop for EnclaveOperator {
             if let Some(ref mut dek) = *master_dek {
                 dek.zeroize();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod escrow_capability_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn generic_escrow_gate_uses_its_own_build_feature() {
+        use keymeld_core::escrow::{
+            protocol::{EscrowCommand, Operation, Payload, RequestContext},
+            ApplicationContext, EscrowContext,
+        };
+        let operator = EnclaveOperator::new(EnclaveId::new(1)).unwrap();
+        let caps = operator
+            .handle_command(Command::new(EnclaveCommand::System(
+                SystemCommand::GetEscrowCapabilities,
+            )))
+            .await
+            .unwrap();
+        let EnclaveOutcome::System(SystemOutcome::EscrowCapabilities(caps)) = caps.response else {
+            panic!("missing generic capabilities")
+        };
+        assert_eq!(caps.escrow, cfg!(feature = "escrow"));
+        let command = EscrowCommand {
+            context: RequestContext {
+                schema_version: keymeld_core::escrow::SCHEMA_VERSION,
+                operation: Operation::Bind,
+                escrow: EscrowContext {
+                    keygen_session_id: SessionId::new_v7(),
+                    user_id: keymeld_core::UserId::new_v7(),
+                    escrow_id: uuid::Uuid::now_v7(),
+                    manifest_digest: [0; 32],
+                    application: ApplicationContext::commit("example".into(), 1, b"scope").unwrap(),
+                },
+                policy_digest: [0; 32],
+                request_id: uuid::Uuid::now_v7(),
+                action_id: None,
+                attempt: None,
+            },
+            encrypted_request: Payload::new(vec![1]).unwrap(),
+            authorization: vec![],
+        };
+        let result = operator
+            .handle_command(Command::new(EnclaveCommand::Musig(MusigCommand::Keygen(
+                KeygenCommand::Escrow(command),
+            ))))
+            .await;
+        if cfg!(feature = "escrow") {
+            // An enabled generic build reaches ordinary session validation. It
+            // must route independently of application verifier registration.
+            match result {
+                Err(error) => assert!(
+                    !error.to_string().contains("Unsupported capability"),
+                    "{error}"
+                ),
+                Ok(outcome) => assert!(matches!(outcome.response, EnclaveOutcome::Error(_))),
+            }
+        } else {
+            // A build without escrow must refuse the command. The message stays
+            // generic because the confidential transport rejects this malformed
+            // ciphertext before capability routing is reached; the compiled-in
+            // capability itself is asserted above through GetEscrowCapabilities.
+            let error = result.unwrap_err().to_string();
+            assert!(
+                !error.contains("Escrow operations require a completed keygen session"),
+                "escrow routing must not run in a build without the feature: {error}"
+            );
         }
     }
 }

@@ -182,6 +182,7 @@ pub enum EnclaveCommandKind {
     System(SystemCommandKind),
     Musig(MusigCommandKind),
     UserKey(UserKeyCommandKind),
+    Confidential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -193,6 +194,8 @@ pub enum SystemCommandKind {
     GetPublicInfo,
     GetAttestation,
     ClearSession,
+    GetEscrowCapabilities,
+    DescribeEscrowVerifiers,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -208,7 +211,7 @@ pub enum KeygenCommandKind {
     AddParticipantsBatch,
     DistributeParticipantPublicKeysBatch,
     GetAggregatePublicKey,
-    ReleasePayoutPreimage,
+    Escrow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -234,6 +237,7 @@ pub enum EnclaveOutcomeKind {
     Musig(MusigOutcomeKind),
     UserKey(UserKeyOutcomeKind),
     Error,
+    Confidential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -245,6 +249,8 @@ pub enum SystemOutcomeKind {
     PublicInfo,
     Attestation,
     Configured,
+    EscrowCapabilities,
+    EscrowVerifiers,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -260,7 +266,7 @@ pub enum KeygenOutcomeKind {
     KeygenInitialized,
     KeysInitialized,
     AggregatePublicKey,
-    PayoutPreimageReleased,
+    Escrow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -303,6 +309,7 @@ pub enum EnclaveCommand {
     System(SystemCommand),
     Musig(MusigCommand),
     UserKey(UserKeyCommand),
+    Confidential(Box<crate::confidential::EnclaveEnvelope>),
 }
 
 impl Command {
@@ -330,6 +337,8 @@ pub enum SystemCommand {
         nonce: Vec<u8>,
     },
     ClearSession(ClearSessionCommand),
+    GetEscrowCapabilities,
+    DescribeEscrowVerifiers,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,7 +353,7 @@ pub enum KeygenCommand {
     AddParticipantsBatch(AddParticipantsBatchCommand),
     DistributeParticipantPublicKeysBatch(DistributeParticipantPublicKeysBatchCommand),
     GetAggregatePublicKey(GetAggregatePublicKeyCommand),
-    ReleasePayoutPreimage(ReleasePayoutPreimageCommand),
+    Escrow(crate::escrow::protocol::EscrowCommand),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,6 +393,7 @@ impl From<Command> for EnclaveCommand {
 impl From<&EnclaveCommand> for EnclaveCommandKind {
     fn from(command: &EnclaveCommand) -> Self {
         match command {
+            EnclaveCommand::Confidential(_) => EnclaveCommandKind::Confidential,
             EnclaveCommand::System(system_cmd) => EnclaveCommandKind::System(system_cmd.into()),
             EnclaveCommand::Musig(musig_cmd) => EnclaveCommandKind::Musig(musig_cmd.into()),
             EnclaveCommand::UserKey(user_key_cmd) => {
@@ -416,6 +426,8 @@ impl From<&SystemCommand> for SystemCommandKind {
             SystemCommand::GetPublicInfo => SystemCommandKind::GetPublicInfo,
             SystemCommand::GetAttestation { .. } => SystemCommandKind::GetAttestation,
             SystemCommand::ClearSession(_) => SystemCommandKind::ClearSession,
+            SystemCommand::GetEscrowCapabilities => SystemCommandKind::GetEscrowCapabilities,
+            SystemCommand::DescribeEscrowVerifiers => SystemCommandKind::DescribeEscrowVerifiers,
         }
     }
 }
@@ -438,7 +450,7 @@ impl From<&KeygenCommand> for KeygenCommandKind {
                 KeygenCommandKind::DistributeParticipantPublicKeysBatch
             }
             KeygenCommand::GetAggregatePublicKey(_) => KeygenCommandKind::GetAggregatePublicKey,
-            KeygenCommand::ReleasePayoutPreimage(_) => KeygenCommandKind::ReleasePayoutPreimage,
+            KeygenCommand::Escrow(_) => KeygenCommandKind::Escrow,
         }
     }
 }
@@ -473,6 +485,7 @@ impl SigningCommand {
 impl fmt::Display for EnclaveCommand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            EnclaveCommand::Confidential(_) => write!(f, "confidential"),
             EnclaveCommand::System(system_cmd) => match system_cmd {
                 SystemCommand::CheckKeygenSession { .. } => write!(f, "check_keygen_session"),
                 SystemCommand::ValidateRegistration(_) => write!(f, "validate_registration"),
@@ -481,6 +494,8 @@ impl fmt::Display for EnclaveCommand {
                 SystemCommand::GetPublicInfo => write!(f, "get_public_info"),
                 SystemCommand::GetAttestation { .. } => write!(f, "get_attestation"),
                 SystemCommand::ClearSession(_) => write!(f, "clear_session"),
+                SystemCommand::GetEscrowCapabilities => write!(f, "get_escrow_capabilities"),
+                SystemCommand::DescribeEscrowVerifiers => write!(f, "describe_escrow_verifiers"),
             },
             EnclaveCommand::Musig(musig_cmd) => match musig_cmd {
                 MusigCommand::Keygen(keygen_cmd) => match keygen_cmd {
@@ -492,9 +507,7 @@ impl fmt::Display for EnclaveCommand {
                     KeygenCommand::GetAggregatePublicKey(_) => {
                         write!(f, "get_aggregate_public_key")
                     }
-                    KeygenCommand::ReleasePayoutPreimage(_) => {
-                        write!(f, "release_payout_preimage")
-                    }
+                    KeygenCommand::Escrow(_) => write!(f, "escrow"),
                 },
                 MusigCommand::Signing(signing_cmd) => match signing_cmd {
                     SigningCommand::InitSession(_) => write!(f, "init_signing"),
@@ -521,6 +534,9 @@ impl fmt::Display for EnclaveCommand {
 impl EnclaveCommand {
     pub fn session_id(&self) -> Result<SessionId, EnclaveError> {
         match self {
+            EnclaveCommand::Confidential(_) => Err(EnclaveError::Session(SessionError::InvalidId(
+                "Confidential transport has no public session ID".into(),
+            ))),
             EnclaveCommand::System(system_cmd) => match system_cmd {
                 SystemCommand::ClearSession(cmd) => cmd
                     .keygen_session_id
@@ -542,9 +558,7 @@ impl EnclaveCommand {
                         Ok(cmd.keygen_session_id.clone())
                     }
                     KeygenCommand::GetAggregatePublicKey(cmd) => Ok(cmd.keygen_session_id.clone()),
-                    KeygenCommand::ReleasePayoutPreimage(cmd) => {
-                        Ok(cmd.claim.keygen_session_id.clone())
-                    }
+                    KeygenCommand::Escrow(cmd) => Ok(cmd.context.escrow.keygen_session_id.clone()),
                 },
                 MusigCommand::Signing(signing_cmd) => match signing_cmd {
                     SigningCommand::InitSession(cmd) => Ok(cmd.signing_session_id.clone()),
@@ -586,6 +600,7 @@ pub enum EnclaveOutcome {
     Musig(MusigOutcome),
     UserKey(UserKeyOutcome),
     Error(ErrorResponse),
+    Confidential(Box<crate::confidential::EnclaveEnvelope>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -598,6 +613,8 @@ pub enum SystemOutcome {
     Attestation(AttestationDocument),
     /// Response from Configure command with KMS-encrypted keys
     Configured(ConfiguredResponse),
+    EscrowCapabilities(crate::escrow_capabilities::EscrowCapabilities),
+    EscrowVerifiers(Vec<crate::escrow::protocol::VerifierInfo>),
 }
 
 /// Response from Configure command containing KMS-encrypted enclave keys
@@ -626,7 +643,7 @@ pub enum KeygenOutcome {
     KeygenInitialized(KeygenInitializedResponse),
     KeysInitialized(KeysInitializedResponse),
     AggregatePublicKey(AggregatePublicKeyResponse),
-    PayoutPreimageReleased(PayoutPreimageReleasedResponse),
+    Escrow(Box<crate::escrow::protocol::EscrowResponse>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -682,6 +699,7 @@ impl From<&EnclaveOutcome> for EnclaveOutcomeKind {
                 EnclaveOutcomeKind::UserKey(user_key_outcome.into())
             }
             EnclaveOutcome::Error(_) => EnclaveOutcomeKind::Error,
+            EnclaveOutcome::Confidential(_) => EnclaveOutcomeKind::Confidential,
         }
     }
 }
@@ -710,6 +728,8 @@ impl From<&SystemOutcome> for SystemOutcomeKind {
             SystemOutcome::PublicInfo(_) => SystemOutcomeKind::PublicInfo,
             SystemOutcome::Attestation(_) => SystemOutcomeKind::Attestation,
             SystemOutcome::Configured(_) => SystemOutcomeKind::Configured,
+            SystemOutcome::EscrowCapabilities(_) => SystemOutcomeKind::EscrowCapabilities,
+            SystemOutcome::EscrowVerifiers(_) => SystemOutcomeKind::EscrowVerifiers,
         }
     }
 }
@@ -733,7 +753,7 @@ impl From<&KeygenOutcome> for KeygenOutcomeKind {
             KeygenOutcome::KeygenInitialized(_) => KeygenOutcomeKind::KeygenInitialized,
             KeygenOutcome::KeysInitialized(_) => KeygenOutcomeKind::KeysInitialized,
             KeygenOutcome::AggregatePublicKey(_) => KeygenOutcomeKind::AggregatePublicKey,
-            KeygenOutcome::PayoutPreimageReleased(_) => KeygenOutcomeKind::PayoutPreimageReleased,
+            KeygenOutcome::Escrow(_) => KeygenOutcomeKind::Escrow,
         }
     }
 }
@@ -760,6 +780,8 @@ impl fmt::Display for EnclaveOutcome {
                 SystemOutcome::PublicInfo(_) => write!(f, "public_info"),
                 SystemOutcome::Attestation(_) => write!(f, "attestation"),
                 SystemOutcome::Configured(_) => write!(f, "configured"),
+                SystemOutcome::EscrowCapabilities(_) => write!(f, "escrow_capabilities"),
+                SystemOutcome::EscrowVerifiers(_) => write!(f, "escrow_verifiers"),
                 SystemOutcome::RegistrationValidated(_) => write!(f, "registration_validated"),
             },
             EnclaveOutcome::Musig(musig_outcome) => match musig_outcome {
@@ -775,9 +797,7 @@ impl fmt::Display for EnclaveOutcome {
                     KeygenOutcome::AggregatePublicKey(_) => {
                         write!(f, "aggregate_public_key")
                     }
-                    KeygenOutcome::PayoutPreimageReleased(_) => {
-                        write!(f, "payout_preimage_released")
-                    }
+                    KeygenOutcome::Escrow(_) => write!(f, "escrow"),
                 },
                 MusigOutcome::Signing(signing_outcome) => match signing_outcome {
                     SigningOutcome::Success => write!(f, "signing_success"),
@@ -803,6 +823,7 @@ impl fmt::Display for EnclaveOutcome {
                 UserKeyOutcome::KeyRestored(_) => write!(f, "key_restored"),
             },
             EnclaveOutcome::Error(_) => write!(f, "error"),
+            EnclaveOutcome::Confidential(_) => write!(f, "confidential"),
         }
     }
 }
@@ -946,11 +967,6 @@ pub struct ParticipantRegistrationData {
     pub auth_pubkey: Vec<u8>,
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
-    /// The payout policy the registering party expects to find sealed in the
-    /// envelope, if it will rely on one. Registration fails on a mismatch, so
-    /// a claimant never pays an address the enclave will not honour.
-    #[serde(default)]
-    pub payout_policy: Option<crate::authorization::PayoutPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -981,14 +997,6 @@ pub struct DistributeParticipantPublicKeysBatchCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetAggregatePublicKeyCommand {
     pub keygen_session_id: SessionId,
-}
-
-/// Release a participant's payout preimage against proof of payment. Handled
-/// by the enclave holding the participant's key; see `payout`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleasePayoutPreimageCommand {
-    pub claim: crate::authorization::PayoutClaim,
-    pub authorization: crate::authorization::PayoutReleaseAuthorization,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1198,14 +1206,6 @@ pub struct FinalSignatureResponse {
 pub enum FinalizedData {
     FinalSignature(Vec<u8>),
     AdaptorSignatures(Vec<(uuid::Uuid, Vec<u8>)>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PayoutPreimageReleasedResponse {
-    pub keygen_session_id: SessionId,
-    pub user_id: UserId,
-    /// `EncryptedData` hex, session secret, context `payout_preimage`.
-    pub encrypted_payout_preimage: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1586,6 +1586,10 @@ pub enum EnclaveError {
     Musig(String),
     #[error("KeyMeld error: {0}")]
     KeyMeld(String),
+    /// A bounded preparation resource is exhausted. Existing authenticated
+    /// executions and paid candidates remain eligible for release/recovery.
+    #[error("Escrow preparation exhausted: {reason}")]
+    EscrowPreparationExhausted { reason: String },
 }
 
 impl From<hex::FromHexError> for EnclaveError {
@@ -1628,3 +1632,7 @@ impl crate::managed_socket::pool::HealthCheckable for EnclaveHealthCheck {
 
 #[cfg(feature = "networking")]
 pub type SocketClient = crate::managed_socket::SocketClient<Command, Outcome>;
+
+#[cfg(test)]
+#[path = "registration_wire_tests.rs"]
+mod registration_wire_tests;

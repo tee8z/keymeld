@@ -1,5 +1,8 @@
 # Participant and signing authorization
 
+This page describes the published legacy protocol and its gateway-visible metadata.
+New escrow applications use [confidential authorization](CONFIDENTIAL_AUTHORIZATION.md), which encrypts the complete native exchange.
+
 The `0.4.0` release separates participant registration and signing authority from the shared session secret.
 See the [finding inventory](#finding-inventory) and [0.4.0 upgrade notes](releases/0.4.0.md).
 

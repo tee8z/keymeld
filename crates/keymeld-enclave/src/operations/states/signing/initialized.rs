@@ -228,6 +228,13 @@ impl Initialized {
 
         self.verify_authorization(init_cmd)?;
 
+        #[cfg(feature = "escrow")]
+        crate::operations::escrow::verify_signing_batch(
+            &self.musig_processor,
+            &self.session_secret,
+            init_cmd,
+        )?;
+
         let max_size = enclave_ctx
             .read()
             .ok()

@@ -1,4 +1,3 @@
-use keymeld_core::authorization::PayoutPolicy;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
     protocol::{SubsetDefinition, TaprootTweak},
@@ -39,12 +38,12 @@ pub enum SessionPhase {
 
 /// What a participant's registration fixes for the session: the key that
 /// authorizes their signatures, whether they must approve each batch, and
-/// where they are paid.
+/// where their winnings go.
 #[derive(Debug, Clone, Default)]
 pub struct ParticipantSettings {
     pub auth_pubkey: Option<Vec<u8>>,
     pub require_signing_approval: bool,
-    pub payout_policy: Option<PayoutPolicy>,
+    pub escrow: Option<std::sync::Arc<keymeld_core::escrow::EscrowRegistration>>,
 }
 
 pub struct UserMusigSession {
@@ -56,9 +55,7 @@ pub struct UserMusigSession {
     pub auth_pubkey: Option<Vec<u8>>,
     /// Whether this user requires explicit approval before signing
     pub require_signing_approval: bool,
-    /// How this participant is paid out, from their registration envelope.
-    /// Needed to release their payout preimage; see `operations::payout_release`.
-    pub payout_policy: Option<PayoutPolicy>,
+    pub escrow: Option<std::sync::Arc<keymeld_core::escrow::EscrowRegistration>>,
 
     // === Batch signing MuSig2 state ===
     // Single messages are treated as a batch of 1
@@ -100,6 +97,8 @@ impl std::fmt::Debug for UserMusigSession {
 
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {
+    #[cfg(feature = "escrow")]
+    pub escrow_state: std::sync::Arc<crate::operations::escrow::EscrowSessionState>,
     pub session_id: SessionId,
     pub authorization_manifest: Option<keymeld_core::authorization::SignedSessionManifest>,
     pub registrations: BTreeMap<UserId, keymeld_core::authorization::RegistrationAuthorization>,

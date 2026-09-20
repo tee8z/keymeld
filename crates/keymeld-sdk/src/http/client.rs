@@ -87,6 +87,70 @@ impl HttpClient {
         self.handle_response(response).await
     }
 
+    /// Bounded, uncompressed confidential transport. Never include response
+    /// bodies in public transport errors; native error details are encrypted.
+    pub(crate) async fn post_bounded<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &Req,
+        max_bytes: usize,
+    ) -> Result<Res, SdkError> {
+        let bytes = serde_json::to_vec(body)?;
+        if bytes.len() > max_bytes {
+            return Err(SdkError::InvalidInput(
+                "Confidential request exceeds transport limit".into(),
+            ));
+        }
+        let response = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(bytes)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(SdkError::Internal(
+                "Confidential relay rejected request".into(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(SdkError::InvalidInput(
+                "Confidential response exceeds transport limit".into(),
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = {
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+                    return Err(SdkError::InvalidInput(
+                        "Confidential response exceeds transport limit".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            bytes
+        };
+        #[cfg(target_arch = "wasm32")]
+        let bytes = {
+            // Browser fetch owns the response buffering; reject before decoding.
+            let bytes = response.bytes().await?;
+            if bytes.len() > max_bytes {
+                return Err(SdkError::InvalidInput(
+                    "Confidential response exceeds transport limit".into(),
+                ));
+            }
+            bytes
+        };
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SdkError::InvalidInput("Invalid confidential response".into()))
+    }
+
     pub async fn post_empty<Res: DeserializeOwned>(
         &self,
         url: &str,

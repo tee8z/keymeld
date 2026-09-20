@@ -7,6 +7,7 @@ use tracing::info;
 
 pub mod attestation;
 pub mod channel;
+pub mod escrow_verifier;
 pub mod kms_transport;
 pub mod musig;
 pub mod operations;
@@ -24,8 +25,17 @@ pub fn init_enclave_logging() {
 }
 
 pub fn create_enclave_operator(enclave_id: EnclaveId) -> Result<EnclaveOperator> {
+    create_enclave_operator_with_verifiers(enclave_id, escrow_verifier::VerifierRegistry::default())
+}
+
+/// Initialize a measured application enclave with statically registered rules.
+/// Both entrypoints use the same attestation policy and development opt-in.
+pub fn create_enclave_operator_with_verifiers(
+    enclave_id: EnclaveId,
+    verifiers: escrow_verifier::VerifierRegistry,
+) -> Result<EnclaveOperator> {
     info!("Creating enclave operator for enclave {}", enclave_id);
-    let mut operator = EnclaveOperator::new(enclave_id)
+    let mut operator = EnclaveOperator::with_verifiers(enclave_id, verifiers)
         .map_err(|e| anyhow::anyhow!("Failed to create enclave operator: {e}"))?;
     let development =
         std::env::var("KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES").as_deref() == Ok("true");
@@ -75,3 +85,5 @@ mod tests {
         init_enclave_logging();
     }
 }
+
+mod confidential;

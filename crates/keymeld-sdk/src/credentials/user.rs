@@ -14,6 +14,27 @@ pub struct UserCredentials {
 }
 
 impl UserCredentials {
+    /// Seal participant-signed escrow permissions and named secrets to an
+    /// authenticated enclave key. Signing does not imply permission to export.
+    #[cfg(feature = "escrow")]
+    pub fn prepare_registration_with_escrow(
+        &self,
+        context: keymeld_core::authorization::RegistrationContext,
+        enclave_public_key_hex: &str,
+        escrow: keymeld_core::escrow::EscrowRegistration,
+    ) -> Result<String, SdkError> {
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::with_escrow(
+            context,
+            &self.private_key_bytes(),
+            escrow,
+        )?;
+        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
+        Ok(hex::encode(SecureCrypto::ecies_encrypt_from_hex(
+            enclave_public_key_hex,
+            &plaintext,
+        )?))
+    }
+
     /// Prepare a context-bound key envelope. A slot owner can authorize it later,
     /// without exposing the slot credential to the participant preparing the key.
     pub fn prepare_registration(
@@ -21,29 +42,17 @@ impl UserCredentials {
         context: keymeld_core::authorization::RegistrationContext,
         enclave_public_key_hex: &str,
     ) -> Result<String, SdkError> {
-        self.prepare_registration_with_policy(context, enclave_public_key_hex, None)
-    }
-
-    /// Like [`Self::prepare_registration`], also sealing how this participant
-    /// is paid out. The policy travels inside the encrypted envelope, so the
-    /// application relaying it cannot change the address.
-    pub fn prepare_registration_with_policy(
-        &self,
-        context: keymeld_core::authorization::RegistrationContext,
-        enclave_public_key_hex: &str,
-        payout_policy: Option<keymeld_core::authorization::PayoutPolicy>,
-    ) -> Result<String, SdkError> {
-        use zeroize::Zeroize;
-        let envelope = keymeld_core::authorization::RegistrationEnvelope::with_payout_policy(
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::new(
             context,
             &self.private_key_bytes(),
-            payout_policy,
         )?;
-        let mut plaintext = serde_json::to_vec(&envelope)?;
-        let result = SecureCrypto::ecies_encrypt_from_hex(enclave_public_key_hex, &plaintext);
-        plaintext.zeroize();
-        Ok(hex::encode(result?))
+        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
+        Ok(hex::encode(SecureCrypto::ecies_encrypt_from_hex(
+            enclave_public_key_hex,
+            &plaintext,
+        )?))
     }
+
     pub fn from_private_key(private_key: &[u8]) -> Result<Self, SdkError> {
         let private_key_array: [u8; 32] = private_key.try_into().map_err(|_| {
             SdkError::Crypto(CryptoError::InvalidKeyFormat(
@@ -78,6 +87,17 @@ impl UserCredentials {
 
     pub fn private_key_bytes(&self) -> [u8; 32] {
         self.private_key.secret_bytes()
+    }
+
+    /// Open an authenticated ECIES payload addressed to this participant.
+    pub fn decrypt_ecies(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+        Ok(zeroize::Zeroizing::new(SecureCrypto::ecies_decrypt(
+            &self.private_key,
+            ciphertext,
+        )?))
     }
 
     pub fn auth_public_key(&self) -> &PublicKey {
@@ -181,6 +201,22 @@ impl std::fmt::Debug for UserCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ecies_release_requires_the_authorized_recipient() {
+        let recipient = UserCredentials::from_private_key(&[7; 32]).unwrap();
+        let other = UserCredentials::from_private_key(&[8; 32]).unwrap();
+        let ciphertext = SecureCrypto::ecies_encrypt_from_hex(
+            &hex::encode(recipient.public_key_bytes()),
+            b"authorized secret release",
+        )
+        .unwrap();
+        assert_eq!(
+            recipient.decrypt_ecies(&ciphertext).unwrap().as_slice(),
+            b"authorized secret release"
+        );
+        assert!(other.decrypt_ecies(&ciphertext).is_err());
+    }
 
     #[test]
     fn test_from_private_key() {

@@ -336,3 +336,21 @@ Per-item taproot tweak configuration (encrypted with session key):
 {"type": "taproot_with_merkle_root", "merkle_root": "hex"}
 {"type": "plain_tweak", "tweak": "hex"}
 ```
+
+
+## Generic escrow and confidential transport
+
+`GET /api/v1/escrow/capabilities` reports generic build support.
+Application verifier descriptions use an authenticated encrypted `DescribeEscrowVerifiers` command.
+
+`POST /api/v1/confidential` forwards a bounded opaque envelope to its destination enclave.
+The enclave authenticates the complete native command and encrypts its signed response to the authorized reply key.
+Bind, prepare, execute, registration, and native MuSig2 rounds all use this route for confidential sessions.
+The former plaintext `/keygen/{id}/escrow` route is removed.
+
+Use `ConfidentialTransport` for individual commands or `ConfidentialSession` for durable native orchestration.
+Persist the private journal in authenticated encrypted application storage before transmitting commands.
+Exact retries reuse the saved ciphertext and request identity.
+The SDK verifies each reply against a separately attested enclave key and the original request.
+
+See [Generic escrow](ESCROW.md) and [Confidential authorization](CONFIDENTIAL_AUTHORIZATION.md) for permissions and visibility guarantees.

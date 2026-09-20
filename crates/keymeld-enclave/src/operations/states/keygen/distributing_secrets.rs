@@ -441,7 +441,12 @@ impl DistributingSecrets {
                 ParticipantSettings {
                     auth_pubkey: Some(derived_auth.serialize().to_vec()),
                     require_signing_approval: participant.require_signing_approval,
-                    payout_policy: envelope.payout_policy.clone(),
+                    escrow: envelope.escrow.as_ref().map(|escrow| {
+                        std::sync::Arc::new(keymeld_core::escrow::EscrowRegistration {
+                            policy: escrow.policy.clone(),
+                            secrets: escrow.secrets.clone(),
+                        })
+                    }),
                 },
             )
             .map_err(|e| invalid_registration(e.to_string()))?;

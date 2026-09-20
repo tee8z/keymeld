@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 hkdf = { workspace = true }
 aes-gcm = { workspace = true }
 hex = { workspace = true }
+base64 = "0.22"
 subtle = "2.5.0"
 coset = "0.3.8"
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
@@ -35,9 +36,6 @@ time = { workspace = true }
 dashmap = { workspace = true }
 utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
 sqlx = { workspace = true, optional = true }
-# Payout preimage release: settlement-rule checks (dlctix) and BOLT11 proofs.
-dlctix = { version = "0.1.0", optional = true }
-lightning-invoice = { version = "0.33", features = ["std"], optional = true }
 
 # Networking dependencies - not available on WASM
 tokio = { workspace = true, features = ["rt", "macros", "sync", "io-util", "net"], optional = true }
@@ -53,8 +51,8 @@ gateway = ["sqlite", "openapi", "networking"]
 enclave = ["networking"]
 openapi = ["utoipa"]
 sqlite = ["sqlx"]
-# Enclave-side payout release (see `payout`).
-payout = ["dep:dlctix", "dep:lightning-invoice"]
+# Generic policy, exact signing scopes, and hashlock-conditioned secret release.
+escrow = []
 # Networking feature enables tokio and managed_socket module
 # Disable this for WASM builds
 networking = ["tokio", "tokio-vsock"]

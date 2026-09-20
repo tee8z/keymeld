@@ -1413,7 +1413,6 @@ impl KeyMeldE2ETest {
             enclave_key_epoch: enclave.key_epoch,
             require_signing_approval,
             auth_pubkey: context.auth_pubkey,
-            payout_policy: None,
         };
         let response = self
             .client

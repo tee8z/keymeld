@@ -55,6 +55,29 @@ pub struct SigningSessionContext {
     pub command_history: Vec<Command>, // Track processed commands for idempotency
 }
 
+/// A completed protocol stage may be replayed only with its original inputs.
+/// Comparing command kind alone can hide a changed nonce or signing transcript.
+fn verify_exact_retry(
+    current: &EnclaveCommand,
+    previous: &EnclaveCommand,
+) -> Result<bool, EnclaveError> {
+    let encode = |command: &EnclaveCommand| {
+        bincode::serialize(command).map_err(|_| {
+            EnclaveError::Validation(keymeld_core::protocol::ValidationError::Other(
+                "Cannot authenticate command retry".into(),
+            ))
+        })
+    };
+    if encode(current)? != encode(previous)? {
+        return Err(EnclaveError::Validation(
+            keymeld_core::protocol::ValidationError::Other(
+                "Processed command retry contains different inputs".into(),
+            ),
+        ));
+    }
+    Ok(true)
+}
+
 impl SessionContext {
     pub fn new_keygen(session_id: SessionId) -> Self {
         Self::Keygen(Box::new(KeygenSessionContext {
@@ -127,7 +150,7 @@ impl SessionContext {
                                 &processed_cmd.command
                             {
                                 if signing_kind == prev_signing.into() {
-                                    return Ok(true); // Already processed this type of signing command
+                                    return verify_exact_retry(cmd, &processed_cmd.command);
                                 }
                             }
                         }
@@ -141,7 +164,7 @@ impl SessionContext {
                                 KeygenCommand::InitSession(_),
                             )) = &processed_cmd.command
                             {
-                                return Ok(true); // Already processed init keygen command
+                                return verify_exact_retry(cmd, &processed_cmd.command);
                             }
                         }
                         Ok(false)
@@ -160,7 +183,7 @@ impl SessionContext {
                                 if keygen_kind == prev_kind {
                                     if let Some(prev_user) = prev_keygen.user_id() {
                                         if current_user == Some(prev_user) {
-                                            return Ok(true); // Already processed this command type for this user
+                                            return verify_exact_retry(cmd, &processed_cmd.command);
                                         }
                                     }
                                 }
@@ -172,6 +195,7 @@ impl SessionContext {
             }
 
             // System commands are handled at operator level, not here
+            EnclaveCommand::Confidential(_) => Ok(false),
             EnclaveCommand::System(_) => Ok(false),
             // UserKey commands will be handled separately (not session-based)
             EnclaveCommand::UserKey(_) => Ok(false),
@@ -224,7 +248,7 @@ impl SigningSessionContext {
                                 &processed_cmd.command
                             {
                                 if signing_kind == prev_signing.into() {
-                                    return Ok(true); // Already processed this type of signing command
+                                    return verify_exact_retry(cmd, &processed_cmd.command);
                                 }
                             }
                         }
@@ -233,6 +257,7 @@ impl SigningSessionContext {
                     _ => Ok(false), // Other MuSig commands not relevant for signing sessions
                 }
             }
+            EnclaveCommand::Confidential(_) => Ok(false),
             EnclaveCommand::System(_) => Ok(false), // System commands handled at operator level
             EnclaveCommand::UserKey(_) => Ok(false), // UserKey commands handled separately
         }
@@ -396,4 +421,87 @@ pub fn decrypt_coordinator_data_from_enclave(
         user_id: coordinator_user_id.clone(),
         private_key: KeyMaterial::new(decrypted_key),
     })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use keymeld_core::protocol::{
+        DistributeNoncesCommand, FinalizeSignatureCommand, SigningCommand,
+    };
+
+    fn nonce_command(session: &SessionId, value: &str) -> EnclaveCommand {
+        EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::DistributeNonces(
+            DistributeNoncesCommand {
+                signing_session_id: session.clone(),
+                nonces: vec![(UserId::new_v7(), value.into())],
+            },
+        )))
+    }
+
+    #[test]
+    fn exact_retry_is_accepted_by_both_context_entrypoints() {
+        let session = SessionId::new_v7();
+        let command = nonce_command(&session, "encrypted-nonce");
+        let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
+        assert!(!context.check_command_idempotency(&command).unwrap());
+        context.add_processed_command(Command::new(command.clone()));
+        assert!(context.check_command_idempotency(&command).unwrap());
+        let SessionContext::Signing(signing) = context else {
+            unreachable!()
+        };
+        assert!(signing.check_command_idempotency(&command).unwrap());
+    }
+
+    #[test]
+    fn changed_nonce_or_session_is_rejected_before_reusing_stage_output() {
+        let session = SessionId::new_v7();
+        let command = nonce_command(&session, "original-encrypted-nonce");
+        let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
+        context.add_processed_command(Command::new(command.clone()));
+        for change_session in [false, true] {
+            let mut changed = command.clone();
+            let EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::DistributeNonces(
+                ref mut inner,
+            ))) = changed
+            else {
+                unreachable!()
+            };
+            if change_session {
+                inner.signing_session_id = SessionId::new_v7();
+            } else {
+                inner.nonces[0].1 = "substituted-encrypted-nonce".into();
+            }
+            assert!(context.check_command_idempotency(&changed).is_err());
+            let SessionContext::Signing(ref signing) = context else {
+                unreachable!()
+            };
+            assert!(signing.check_command_idempotency(&changed).is_err());
+        }
+    }
+
+    #[test]
+    fn changed_partial_signatures_are_rejected_and_next_stage_is_not_a_retry() {
+        let session = SessionId::new_v7();
+        let nonce = nonce_command(&session, "encrypted-nonce");
+        let original = EnclaveCommand::Musig(MusigCommand::Signing(
+            SigningCommand::FinalizeSignature(FinalizeSignatureCommand {
+                signing_session_id: session.clone(),
+                partial_signatures: vec![(UserId::new_v7(), "encrypted-partial".into())],
+            }),
+        ));
+        let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
+        context.add_processed_command(Command::new(nonce));
+        assert!(!context.check_command_idempotency(&original).unwrap());
+        context.add_processed_command(Command::new(original.clone()));
+        let mut changed = original;
+        let EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::FinalizeSignature(
+            ref mut inner,
+        ))) = changed
+        else {
+            unreachable!()
+        };
+        inner.partial_signatures.clear();
+        assert!(context.check_command_idempotency(&changed).is_err());
+    }
 }

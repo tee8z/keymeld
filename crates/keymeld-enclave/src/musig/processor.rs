@@ -378,7 +378,7 @@ impl MusigProcessor {
                 private_key: session.private_key.clone(),
                 auth_pubkey: session.auth_pubkey.clone(),
                 require_signing_approval: session.require_signing_approval,
-                payout_policy: session.payout_policy.clone(),
+                escrow: session.escrow.clone(),
                 batch_first_rounds: BTreeMap::new(),
                 batch_second_rounds: BTreeMap::new(),
                 batch_adaptor_first_rounds: BTreeMap::new(),
@@ -446,7 +446,7 @@ impl MusigProcessor {
                         coordinator: user_session.coordinator,
                         auth_pubkey: user_session.auth_pubkey.clone(),
                         require_signing_approval: user_session.require_signing_approval,
-                        payout_policy: user_session.payout_policy.clone(),
+                        escrow: user_session.escrow.clone(),
                         batch_first_rounds: BTreeMap::new(),
                         batch_second_rounds: BTreeMap::new(),
                         batch_adaptor_first_rounds: BTreeMap::new(),
@@ -473,7 +473,7 @@ impl MusigProcessor {
         let ParticipantSettings {
             auth_pubkey,
             require_signing_approval,
-            payout_policy,
+            escrow,
         } = settings;
         let user_session = UserMusigSession {
             user_id: user_id.clone(),
@@ -482,7 +482,7 @@ impl MusigProcessor {
             coordinator,
             auth_pubkey,
             require_signing_approval,
-            payout_policy,
+            escrow,
             batch_first_rounds: BTreeMap::new(),
             batch_second_rounds: BTreeMap::new(),
             batch_adaptor_first_rounds: BTreeMap::new(),

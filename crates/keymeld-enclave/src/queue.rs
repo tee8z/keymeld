@@ -10,7 +10,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::sleep,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument::WithSubscriber};
 
 pub struct Task {
     pub command: Command,
@@ -97,32 +97,40 @@ impl Queue {
         let sessions = self.sessions.clone();
         let session_id_clone = session_id.clone();
 
-        let task_handle = tokio::spawn(async move {
-            let mut command_rx: mpsc::UnboundedReceiver<Task> = command_rx;
-            info!("Session task started for session {}", session_id_clone);
+        // Enclave console output is visible to the host. Native commands and
+        // their detailed errors must never reach the process-wide subscriber.
+        // Apply the filter to the spawned future, since caller task context is
+        // not inherited by tokio::spawn.
+        let task_handle = tokio::spawn(
+            async move {
+                let mut command_rx: mpsc::UnboundedReceiver<Task> = command_rx;
+                info!("Session task started for session {}", session_id_clone);
 
-            while let Some(task) = command_rx.recv().await {
-                debug!(
-                    "Session {} processing command: {}",
-                    session_id_clone, task.command.command
-                );
-
-                let result =
-                    Self::process_session_command(&sessions, &session_id_clone, task.command).await;
-
-                if let Err(e) = &result {
-                    error!(
-                        "Session {} failed to process command: {}",
-                        session_id_clone, e
+                while let Some(task) = command_rx.recv().await {
+                    debug!(
+                        "Session {} processing command: {}",
+                        session_id_clone, task.command.command
                     );
+
+                    let result =
+                        Self::process_session_command(&sessions, &session_id_clone, task.command)
+                            .await;
+
+                    if let Err(e) = &result {
+                        error!(
+                            "Session {} failed to process command: {}",
+                            session_id_clone, e
+                        );
+                    }
+
+                    // Send response back (ignore if receiver dropped)
+                    let _ = task.response_tx.send(result);
                 }
 
-                // Send response back (ignore if receiver dropped)
-                let _ = task.response_tx.send(result);
+                info!("Session task ended for session {}", session_id_clone);
             }
-
-            info!("Session task ended for session {}", session_id_clone);
-        });
+            .with_subscriber(tracing::subscriber::NoSubscriber::default()),
+        );
 
         let handle = Handle {
             command_tx: command_tx.clone(),
@@ -272,7 +280,7 @@ impl Queue {
         if !to_remove.is_empty() {
             let mut tasks = self.session_tasks.write().unwrap();
             for session_id in to_remove {
-                debug!("Cleaning up finished task for session {}", session_id);
+                debug!("Cleaning up finished session task");
                 tasks.remove(&session_id);
             }
         }
