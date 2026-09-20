@@ -172,6 +172,7 @@ async fn prepared_registration(
         enclave_key_epoch: enclave.key_epoch,
         require_signing_approval: false,
         auth_pubkey: context.auth_pubkey,
+        payout_policy: None,
     })
 }
 
@@ -566,6 +567,7 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
         )?,
         context: bad_auth_context.clone(),
         private_key: victim_private_key.to_vec(),
+        payout_policy: None,
     };
     let mut request = honest.clone();
     request.auth_pubkey = bad_auth_context.auth_pubkey;
