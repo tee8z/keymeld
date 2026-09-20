@@ -1,4 +1,6 @@
-# Keep the native library patched independently of the Rust openssl crate.
+# A patched libssl for the keymeld binaries only. This deliberately does not
+# replace pkgs.openssl: overriding it globally rebuilt curl, python3 and the
+# rest of the closure from source on every CI job.
 # Release and checksum: https://openssl-library.org/source/
 # https://github.com/openssl/openssl/releases/download/openssl-3.6.4/openssl-3.6.4.tar.gz.sha256
 final: prev:
@@ -6,12 +8,15 @@ let
   version = "3.6.4";
 in
 {
-  openssl_3_6 =
+  opensslPatched =
     if prev.lib.versionAtLeast prev.openssl_3_6.version version then
       prev.openssl_3_6
     else
       prev.openssl_3_6.overrideAttrs (old: {
         inherit version;
+        # Upstream tests the release; 90-test_sslapi.t is timing-sensitive and
+        # fails under the sandbox on aarch64 runners.
+        doCheck = false;
         # The bootstrap fetcher avoids a curl -> OpenSSL -> fetchurl cycle.
         src = prev.stdenv.fetchurlBoot {
           url = "https://github.com/openssl/openssl/releases/download/openssl-${version}/openssl-${version}.tar.gz";
@@ -35,5 +40,4 @@ in
           changelog = "https://github.com/openssl/openssl/blob/openssl-${version}/CHANGES.md";
         };
       });
-  openssl = final.openssl_3_6;
 }

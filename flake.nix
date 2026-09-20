@@ -59,7 +59,9 @@
         # System dependencies that all services need
         commonDeps = with pkgs; [
           pkg-config
-          openssl
+          # Patched libssl for the keymeld binaries; everything else keeps the
+          # cached stock openssl.
+          opensslPatched
           cmake
           protobuf
           sqlite
@@ -210,11 +212,11 @@
             # OpenSSL, pkg-config, and dynamic-linker overrides built against a
             # different glibc than this shell's nixpkgs. Pin them to this shell so
             # builds, tests, curl, aws, and moto resolve one consistent toolchain.
-            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
-            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export OPENSSL_LIB_DIR="${pkgs.opensslPatched.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.opensslPatched.dev}/include"
             unset OPENSSL_DIR
-            export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH_FOR_TARGET:-${pkgs.openssl.dev}/lib/pkgconfig}"
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.openssl ]}"
+            export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH_FOR_TARGET:-${pkgs.opensslPatched.dev}/lib/pkgconfig}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.opensslPatched ]}"
             # A host sccache wrapper refuses incremental artifacts, which
             # .cargo/config.toml enables; keep plain cargo usable with it.
             if [ -n "''${RUSTC_WRAPPER:-}" ]; then
