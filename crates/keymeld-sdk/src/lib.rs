@@ -1,3 +1,5 @@
+pub mod batch;
+pub use batch::{BatchSigningItem, BatchSigningMode, SignatureResult};
 pub mod config;
 pub mod credentials;
 pub mod error;
@@ -30,6 +32,7 @@ pub use keymeld_core::crypto::{EncryptedData, SecureCrypto, SessionSecret};
 pub use keymeld_core::hash_message;
 pub use keymeld_core::request_auth;
 pub use keymeld_core::validation;
+pub use keymeld_core::{escrow, escrow_capabilities, escrow_protocol};
 
 #[cfg(feature = "client")]
 pub use http::HttpClient;
@@ -39,13 +42,13 @@ pub use client::{KeyMeldClient, KeyMeldClientBuilder};
 
 #[cfg(feature = "client")]
 pub use managers::{
-    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
-    BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager, KeygenOptions,
-    KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult, SigningManager,
-    SigningOptions, SigningSession, SingleSignerOps,
+    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, HealthManager, JoinOptions,
+    KeySlotReservation, KeygenManager, KeygenOptions, KeygenSession, ParticipantInvitation,
+    RegisterOptions, SigningManager, SigningOptions, SigningSession, SingleSignerOps,
 };
 
 pub mod prelude {
+    pub use crate::batch::{BatchSigningItem, BatchSigningMode, SignatureResult};
     pub use crate::config::{HttpConfig, PollingConfig};
     pub use crate::credentials::{AuthorizationCredentials, SessionCredentials, UserCredentials};
     pub use crate::error::SdkError;
@@ -65,9 +68,16 @@ pub mod prelude {
 
     #[cfg(feature = "client")]
     pub use crate::managers::{
-        AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, BatchSigningItem,
-        BatchSigningMode, HealthManager, JoinOptions, KeySlotReservation, KeygenManager,
-        KeygenOptions, KeygenSession, ParticipantInvitation, RegisterOptions, SignatureResult,
-        SigningManager, SigningOptions, SigningSession, SingleSignerOps,
+        AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, HealthManager,
+        JoinOptions, KeySlotReservation, KeygenManager, KeygenOptions, KeygenSession,
+        ParticipantInvitation, RegisterOptions, SigningManager, SigningOptions, SigningSession,
+        SingleSignerOps,
     };
 }
+
+pub mod confidential;
+
+#[cfg(feature = "client")]
+pub mod confidential_session;
+
+pub mod confidential_scope;

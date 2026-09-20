@@ -118,6 +118,7 @@ SDK ──HTTP──▶ Gateway ──VSock──▶ Enclaves
 | **Adaptor Signatures** | Single-point adaptors for atomic swaps and conditional payments; `And` and `Or` are rejected |
 | **Single-Signer Mode** | Import keys for non-MuSig signing (ECDSA & Schnorr) |
 | **Taproot Support** | Flexible tweaking modes for Bitcoin compatibility |
+| **Generic Escrow** | Optional participant-authorized conditional signing; separate permissions for secret and key release |
 | **Encrypted Storage** | Gateway stores encrypted key and session payloads; see the [KMS trust boundary](docs/KMS.md#current-trust-boundary) |
 
 ## Commands
@@ -172,6 +173,8 @@ Interactive docs available at `http://localhost:8080/api/v1/docs` after starting
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, state machines, security model |
 | [docs/API.md](docs/API.md) | Complete API reference |
 | [docs/ADAPTORS.md](docs/ADAPTORS.md) | Adaptor signatures guide |
+| [docs/ESCROW.md](docs/ESCROW.md) | Generic escrow permissions, protocol, and optional adapters |
+| [docs/PAYOUT_ESCROW.md](docs/PAYOUT_ESCROW.md) | DLC settlement and automatic Lightning Address adapter |
 | [docs/SETUP.md](docs/SETUP.md) | Development environment setup |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | AWS Nitro Enclave deployment |
 | [docs/VSOCK.md](docs/VSOCK.md) | VSock architecture |

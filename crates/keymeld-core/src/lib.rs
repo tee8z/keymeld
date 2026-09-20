@@ -18,6 +18,9 @@ pub mod attestation;
 pub mod authorization;
 pub mod crypto;
 pub mod enclave_channel;
+pub mod escrow;
+pub mod escrow_capabilities;
+pub use escrow::protocol as escrow_protocol;
 pub mod identifiers;
 pub mod logging;
 #[cfg(feature = "networking")]
@@ -108,3 +111,5 @@ pub fn hash_message(message: &[u8]) -> Vec<u8> {
     hasher.update(message);
     hasher.finalize().to_vec()
 }
+
+pub mod confidential;

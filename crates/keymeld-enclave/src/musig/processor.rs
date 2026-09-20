@@ -1,3 +1,4 @@
+use super::types::ParticipantSettings;
 use musig2::secp256k1::PublicKey;
 use musig2::KeyAggContext;
 use std::collections::{BTreeMap, HashMap};
@@ -377,6 +378,7 @@ impl MusigProcessor {
                 private_key: session.private_key.clone(),
                 auth_pubkey: session.auth_pubkey.clone(),
                 require_signing_approval: session.require_signing_approval,
+                escrow: session.escrow.clone(),
                 batch_first_rounds: BTreeMap::new(),
                 batch_second_rounds: BTreeMap::new(),
                 batch_adaptor_first_rounds: BTreeMap::new(),
@@ -444,6 +446,7 @@ impl MusigProcessor {
                         coordinator: user_session.coordinator,
                         auth_pubkey: user_session.auth_pubkey.clone(),
                         require_signing_approval: user_session.require_signing_approval,
+                        escrow: user_session.escrow.clone(),
                         batch_first_rounds: BTreeMap::new(),
                         batch_second_rounds: BTreeMap::new(),
                         batch_adaptor_first_rounds: BTreeMap::new(),
@@ -465,9 +468,13 @@ impl MusigProcessor {
         private_key: KeyMaterial,
         signer_index: usize,
         coordinator: bool,
-        auth_pubkey: Option<Vec<u8>>,
-        require_signing_approval: bool,
+        settings: ParticipantSettings,
     ) -> Result<(), MusigError> {
+        let ParticipantSettings {
+            auth_pubkey,
+            require_signing_approval,
+            escrow,
+        } = settings;
         let user_session = UserMusigSession {
             user_id: user_id.clone(),
             signer_index,
@@ -475,6 +482,7 @@ impl MusigProcessor {
             coordinator,
             auth_pubkey,
             require_signing_approval,
+            escrow,
             batch_first_rounds: BTreeMap::new(),
             batch_second_rounds: BTreeMap::new(),
             batch_adaptor_first_rounds: BTreeMap::new(),

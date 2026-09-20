@@ -7,14 +7,15 @@ use utoipa::ToSchema;
 
 // Re-export core types that are part of the API
 pub use keymeld_core::authorization::{
-    ParticipantApproval, ParticipantRoster, RegistrationAuthorization, RegistrationContext,
-    RegistrationEnvelope, SessionAuthorizationManifest, SignedRoster, SignedSessionManifest,
-    SigningAuthorization,
+    EnclaveRecipientAuthorization, ParticipantApproval, ParticipantRoster,
+    RegistrationAuthorization, RegistrationContext, RegistrationEnvelope,
+    SessionAuthorizationManifest, SignedRoster, SignedSessionManifest, SigningAuthorization,
 };
 pub use keymeld_core::identifiers::{EnclaveId, KeyId, SessionId, UserId};
 pub use keymeld_core::protocol::{
-    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, KeygenStatusKind,
-    SignatureType, SigningStatusKind, TaprootTweak, UserKeyInfo,
+    AdaptorConfig, AdaptorHint, AdaptorSignatureResult, AdaptorType, EnclaveBatchItem,
+    EnclaveBatchResult, KeygenStatusKind, ParticipantRegistrationData, SignatureType,
+    SigningStatusKind, TaprootTweak, UserKeyInfo,
 };
 pub use keymeld_core::AggregatePublicKey;
 
@@ -46,6 +47,18 @@ impl SubsetDefinition {
 
     pub fn id(&self) -> Uuid {
         self.subset_id
+    }
+}
+
+/// The SDK type mirrors the protocol type; a session manifest carries the
+/// protocol form, so callers building one directly can convert without
+/// restating the fields.
+impl From<SubsetDefinition> for keymeld_core::protocol::SubsetDefinition {
+    fn from(value: SubsetDefinition) -> Self {
+        Self {
+            subset_id: value.subset_id,
+            participants: value.participants,
+        }
     }
 }
 
@@ -221,6 +234,15 @@ pub struct CreateSigningSessionRequest {
     pub keygen_session_id: SessionId,
     pub timeout_secs: u64,
     pub batch_items: Vec<SigningBatchItem>,
+}
+
+/// The exact authorized batch submitted to the signing enclaves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningReceipt {
+    pub keygen_session_id: SessionId,
+    pub signing_session_id: SessionId,
+    pub batch_items: Vec<keymeld_core::protocol::EnclaveBatchItem>,
+    pub signing_authorization: SigningAuthorization,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

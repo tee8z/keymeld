@@ -771,7 +771,7 @@ impl EnclaveManager {
         match self.send_command_to_enclave(enclave_id, command).await {
             Ok(outcome) => match outcome.response {
                 EnclaveOutcome::System(SystemOutcome::PublicInfo(response))
-                    if response.authorization_protocol_version == 1 =>
+                    if response.authorization_protocol_version == 2 =>
                 {
                     Ok((
                         response.public_key,

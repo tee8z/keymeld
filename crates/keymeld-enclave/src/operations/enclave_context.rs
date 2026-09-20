@@ -21,12 +21,15 @@ use crate::attestation::AttestationManager;
 /// Shared enclave context - read-only data accessible by all sessions
 pub struct EnclaveSharedContext {
     pub enclave_id: EnclaveId,
+    pub(crate) confidential_dispatch: bool,
     pub public_key: Vec<u8>,
     pub private_key: Vec<u8>,
     pub master_dek: Option<[u8; 32]>, // Data Encryption Key from KMS, never persisted in plaintext
     pub enclave_public_keys: DashMap<EnclaveId, String>, // Other enclaves' public keys
     pub attestation_manager: Option<AttestationManager>,
     pub config: TimeoutConfig,
+    pub escrow_verifiers: std::sync::Arc<crate::escrow_verifier::VerifierRegistry>,
+    pub escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities,
 }
 
 impl EnclaveSharedContext {
@@ -39,12 +42,17 @@ impl EnclaveSharedContext {
     ) -> Self {
         Self {
             enclave_id,
+            confidential_dispatch: false,
             public_key,
             private_key,
             master_dek: None, // Will be initialized via init_keys_with_kms()
             enclave_public_keys: DashMap::new(),
             attestation_manager,
             config,
+            escrow_verifiers: std::sync::Arc::new(Default::default()),
+            escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities::for_service(
+                cfg!(feature = "escrow"),
+            ),
         }
     }
 
@@ -381,12 +389,15 @@ impl Clone for EnclaveSharedContext {
     fn clone(&self) -> Self {
         Self {
             enclave_id: self.enclave_id,
+            confidential_dispatch: self.confidential_dispatch,
             public_key: self.public_key.clone(),
             private_key: self.private_key.clone(),
             master_dek: self.master_dek,
             enclave_public_keys: self.enclave_public_keys.clone(),
             attestation_manager: self.attestation_manager.clone(),
             config: self.config.clone(),
+            escrow_verifiers: self.escrow_verifiers.clone(),
+            escrow_capabilities: self.escrow_capabilities,
         }
     }
 }

@@ -164,6 +164,9 @@ impl RegisterOptions {
     }
 }
 
+/// Legacy gateway-orchestrated keygen. Its gateway can inspect participant and
+/// aggregate metadata. New confidential sessions use `ConfidentialSession` and
+/// cannot be accessed through this legacy API.
 pub struct KeygenManager<'a> {
     client: &'a KeyMeldClient,
 }
@@ -545,6 +548,7 @@ impl<'a> KeygenSession<'a> {
     ) -> Option<&keymeld_core::authorization::EnclaveRecipientAuthorization> {
         self.recipient_authorization.as_ref()
     }
+
     pub fn authorization_manifest(&self) -> &SignedSessionManifest {
         &self.authorization_manifest
     }

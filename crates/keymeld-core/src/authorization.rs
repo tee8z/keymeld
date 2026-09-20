@@ -122,14 +122,16 @@ pub fn authorization_digest<T: Serialize + ?Sized>(
     domain: &str,
     payload: &T,
 ) -> Result<[u8; 32], KeyMeldError> {
-    let bytes =
-        serde_json::to_vec(payload).map_err(|e| KeyMeldError::SerializationError(e.to_string()))?;
+    // Registration payloads may contain participant secret deposits.
+    let bytes = zeroize::Zeroizing::new(
+        serde_json::to_vec(payload).map_err(|e| KeyMeldError::SerializationError(e.to_string()))?,
+    );
     let mut digest = Sha256::new();
     digest.update(b"keymeld-authorization-v1");
     digest.update((domain.len() as u64).to_be_bytes());
     digest.update(domain.as_bytes());
     digest.update((bytes.len() as u64).to_be_bytes());
-    digest.update(bytes);
+    digest.update(bytes.as_slice());
     Ok(digest.finalize().into())
 }
 
@@ -285,6 +287,10 @@ pub struct RegistrationEnvelope {
     pub context: RegistrationContext,
     pub private_key: Vec<u8>,
     pub proof_signature: Vec<u8>,
+    /// Application-independent permissions and secret deposits, encrypted with
+    /// the participant key. Absence preserves the original registration proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow: Option<crate::escrow::EscrowRegistration>,
 }
 
 impl std::fmt::Debug for RegistrationEnvelope {
@@ -308,6 +314,26 @@ impl RegistrationEnvelope {
             proof_signature: sign_authorization(private_key, "registration-possession", &context)?,
             context,
             private_key: private_key.to_vec(),
+            escrow: None,
+        };
+        envelope.verify()?;
+        Ok(envelope)
+    }
+
+    pub fn with_escrow(
+        context: RegistrationContext,
+        private_key: &[u8; 32],
+        escrow: crate::escrow::EscrowRegistration,
+    ) -> Result<Self, KeyMeldError> {
+        let envelope = Self {
+            proof_signature: sign_authorization(
+                private_key,
+                "registration-escrow-possession-v1",
+                &(&context, &escrow),
+            )?,
+            context,
+            private_key: private_key.to_vec(),
+            escrow: Some(escrow),
         };
         envelope.verify()?;
         Ok(envelope)
@@ -333,6 +359,22 @@ impl RegistrationEnvelope {
                 return Err(invalid(
                     "Registration keys do not match the encrypted private key",
                 ));
+            }
+            if let Some(escrow) = &self.escrow {
+                let context = &escrow.policy.policy.context;
+                if context.keygen_session_id != self.context.keygen_session_id
+                    || context.user_id != self.context.user_id
+                    || context.manifest_digest.as_slice() != self.context.manifest_hash
+                {
+                    return Err(invalid("Escrow policy differs from registration context"));
+                }
+                escrow.verify(context, &self.context.public_key)?;
+                return verify_authorization(
+                    &self.context.public_key,
+                    "registration-escrow-possession-v1",
+                    &(&self.context, escrow),
+                    &self.proof_signature,
+                );
             }
             verify_authorization(
                 &self.context.public_key,
@@ -1039,3 +1081,7 @@ mod tests {
         assert!(changed.roster.verify_aggregates().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "escrow_registration_tests.rs"]
+mod escrow_registration_tests;

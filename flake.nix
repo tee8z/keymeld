@@ -35,7 +35,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-        overlays = [ (import rust-overlay) ];
+        overlays = [ (import rust-overlay) (import ./nix/openssl.nix) ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
@@ -51,14 +51,17 @@
         commonEnvs = {
           SQLX_OFFLINE = "true";
           RUST_LOG = "info";
-          # Enable incremental compilation for faster rebuilds
-          CARGO_INCREMENTAL = "1";
+          OPENSSL_NO_VENDOR = "1";
+          # Derivations reuse Cargo artifacts without mutable incremental state.
+          CARGO_INCREMENTAL = "0";
         };
 
         # System dependencies that all services need
         commonDeps = with pkgs; [
           pkg-config
-          openssl
+          # Patched libssl for the keymeld binaries; everything else keeps the
+          # cached stock openssl.
+          opensslPatched
           cmake
           protobuf
           sqlite
@@ -68,7 +71,7 @@
 
         # Build workspace dependencies once (shared across all crates)
         # Use fixed hash to improve caching and avoid eval conflicts
-        workspaceDeps = craneLib.buildDepsOnly {
+        workspaceDeps = craneLib.buildDepsOnly (commonEnvs // {
           pname = "keymeld-workspace-deps";
           version = workspaceVersion;
           src = craneLib.path ./.;
@@ -77,7 +80,7 @@
           # Allow substitutes for faster dependency downloads from cache
           preferLocalBuild = false;
           allowSubstitutes = true;
-        };
+        });
 
         # Filter source for each crate to only include relevant files
         gatewaySrc = pkgs.lib.cleanSourceWith {
@@ -110,14 +113,15 @@
         };
 
         # Individual service builds with filtered sources
-        keymeld-gateway = craneLib.buildPackage {
-          pname = "keymeld-gateway";
+        mkGateway = variant: features: craneLib.buildPackage (commonEnvs // {
+          pname = "keymeld-gateway" + pkgs.lib.optionalString (variant != "") "-${variant}";
+          meta.mainProgram = "keymeld-gateway";
           version = workspaceVersion;
           src = gatewaySrc;
           cargoArtifacts = workspaceDeps;
           buildInputs = commonDeps;
           nativeBuildInputs = commonDeps;
-          cargoExtraArgs = "--bin keymeld-gateway";
+          cargoExtraArgs = "-p keymeld-gateway --bin keymeld-gateway" + pkgs.lib.optionalString (features != "") " --features ${features}";
 
           # Allow parallel builds and caching for speed
           preferLocalBuild = false;
@@ -130,23 +134,30 @@
             cp -r crates/keymeld-gateway/static $out/share/keymeld-gateway/
             cp -r config $out/share/keymeld-gateway/
           '';
-        } // commonEnvs;
+        });
 
-        keymeld-enclave = craneLib.buildPackage {
-          pname = "keymeld-enclave";
+        keymeld-gateway = mkGateway "" "";
+        keymeld-gateway-escrow = mkGateway "escrow" "escrow";
+
+        mkEnclave = variant: features: craneLib.buildPackage (commonEnvs // {
+          pname = "keymeld-enclave" + pkgs.lib.optionalString (variant != "") "-${variant}";
+          meta.mainProgram = "keymeld-enclave";
           version = workspaceVersion;
           src = enclaveSrc;
           cargoArtifacts = workspaceDeps;
           buildInputs = commonDeps;
           nativeBuildInputs = commonDeps;
-          cargoExtraArgs = "--bin keymeld-enclave";
+          cargoExtraArgs = "-p keymeld-enclave --bin keymeld-enclave" + pkgs.lib.optionalString (features != "") " --features ${features}";
 
           # Allow parallel builds and caching for speed
           preferLocalBuild = false;
           allowSubstitutes = true;
-        } // commonEnvs;
+        });
 
-        keymeld-demo = craneLib.buildPackage {
+        keymeld-enclave = mkEnclave "" "";
+        keymeld-enclave-escrow = mkEnclave "escrow" "escrow";
+
+        keymeld-demo = craneLib.buildPackage (commonEnvs // {
           pname = "keymeld-demo";
           version = workspaceVersion;
           src = demoSrc;
@@ -163,7 +174,7 @@
             mkdir -p $out/share/keymeld-demo
             cp -r config $out/share/keymeld-demo/
           '';
-        } // commonEnvs;
+        });
 
         # SQLean UUID extension for SQLite (optional for now)
         # TODO: Add proper SQLean extension when needed
@@ -201,11 +212,11 @@
             # OpenSSL, pkg-config, and dynamic-linker overrides built against a
             # different glibc than this shell's nixpkgs. Pin them to this shell so
             # builds, tests, curl, aws, and moto resolve one consistent toolchain.
-            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
-            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export OPENSSL_LIB_DIR="${pkgs.opensslPatched.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.opensslPatched.dev}/include"
             unset OPENSSL_DIR
-            export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH_FOR_TARGET:-${pkgs.openssl.dev}/lib/pkgconfig}"
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.openssl ]}"
+            export PKG_CONFIG_PATH="''${PKG_CONFIG_PATH_FOR_TARGET:-${pkgs.opensslPatched.dev}/lib/pkgconfig}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.opensslPatched ]}"
             # A host sccache wrapper refuses incremental artifacts, which
             # .cargo/config.toml enables; keep plain cargo usable with it.
             if [ -n "''${RUSTC_WRAPPER:-}" ]; then
@@ -236,7 +247,7 @@
             fi
           '';
 
-          inherit (commonEnvs) SQLX_OFFLINE RUST_LOG;
+          inherit (commonEnvs) SQLX_OFFLINE RUST_LOG OPENSSL_NO_VENDOR;
         };
 
         # VSock setup script for local development
@@ -760,101 +771,7 @@ EOF
 
         # CI/CD Pipeline: Build Enclave EIF
         build-enclave-eif = pkgs.writeShellScriptBin "build-enclave-eif" ''
-          set -euo pipefail
-
-          echo "CI/CD: Building KeyMeld Enclave EIF for AWS Nitro"
-
-          # Configuration
-          EIF_NAME="''${EIF_NAME:-keymeld-enclave}"
-          VERSION="''${VERSION:-$(git rev-parse --short HEAD 2>/dev/null || echo 'latest')}"
-          ENCLAVE_ID="''${ENCLAVE_ID:-0}"
-          OUTPUT_FILE="''${OUTPUT_FILE:-$EIF_NAME-$ENCLAVE_ID-$VERSION.eif}"
-
-          # Check prerequisites
-          if ! command -v nitro-cli &> /dev/null; then
-            echo "nitro-cli not found. Install AWS Nitro CLI first:"
-            echo "   https://docs.aws.amazon.com/enclaves/latest/user/nitro-cli-install.html"
-            exit 1
-          fi
-
-          echo "Build Configuration:"
-          echo "   EIF Name: $EIF_NAME"
-          echo "   Version: $VERSION"
-          echo "   Output: $OUTPUT_FILE"
-
-          # These public settings become part of the measured enclave image.
-          : "''${ENCLAVE_GATEWAY_PUBLIC_KEY:?Set the provisioned gateway verification key}"
-          : "''${ENCLAVE_KMS_KEY_ID:?Set the KMS key allowed for this enclave}"
-          : "''${AWS_REGION:?Set the enclave AWS region}"
-          ENCLAVE_KMS_ENDPOINT="''${ENCLAVE_KMS_ENDPOINT:-aws-kms}"
-          [[ "$ENCLAVE_GATEWAY_PUBLIC_KEY" =~ ^(02|03)[0-9a-fA-F]{64}$ ]] || { echo "Invalid gateway public key" >&2; exit 1; }
-          [[ "$ENCLAVE_ID" =~ ^(0|[1-9][0-9]{0,9})$ ]] && (( ENCLAVE_ID <= 4294967295 )) || { echo "Invalid enclave ID" >&2; exit 1; }
-          [[ ! -e "$OUTPUT_FILE" && ! -e "$OUTPUT_FILE.manifest.json" ]] || { echo "Refusing to overwrite an EIF artifact" >&2; exit 1; }
-          command -v jq >/dev/null
-          signing_args=()
-          if [[ -n "''${EIF_SIGNING_KEY:-}" || -n "''${EIF_SIGNING_CERTIFICATE:-}" ]]; then
-            : "''${EIF_SIGNING_KEY:?Set the EIF signing key path or KMS ARN}"
-            : "''${EIF_SIGNING_CERTIFICATE:?Set the matching EIF signing certificate path}"
-            signing_args=(--private-key "$EIF_SIGNING_KEY" --signing-certificate "$EIF_SIGNING_CERTIFICATE")
-          fi
-          provisioned_image="$EIF_NAME-$ENCLAVE_ID:$VERSION"
-
-          # Include the Nix runtime closure; copying only the binary breaks its loader.
-          nix build .#docker-enclave
-          docker load < result
-          build_context=$(mktemp -d -t keymeld-eif.XXXXXXXX)
-          trap 'rm -rf -- "$build_context"' EXIT
-          cat > "$build_context/Dockerfile" <<'EOF'
-          FROM keymeld-enclave:latest
-          ARG ENCLAVE_GATEWAY_PUBLIC_KEY
-          ARG ENCLAVE_KMS_KEY_ID
-          ARG ENCLAVE_KMS_ENDPOINT
-          ARG ENCLAVE_ID
-          ARG AWS_REGION
-          ENV ENCLAVE_GATEWAY_PUBLIC_KEY=$ENCLAVE_GATEWAY_PUBLIC_KEY
-          ENV ENCLAVE_KMS_KEY_ID=$ENCLAVE_KMS_KEY_ID
-          ENV ENCLAVE_KMS_ENDPOINT=$ENCLAVE_KMS_ENDPOINT
-          ENV ENCLAVE_ID=$ENCLAVE_ID
-          ENV AWS_REGION=$AWS_REGION
-          ENV KEYMELD_DANGEROUS_TRUST_UNATTESTED_ENCLAVES=false
-          ENV TRANSPORT_MODE=vsock
-          EOF
-          docker build -t "$provisioned_image" \
-            --build-arg ENCLAVE_GATEWAY_PUBLIC_KEY="$ENCLAVE_GATEWAY_PUBLIC_KEY" \
-            --build-arg ENCLAVE_KMS_KEY_ID="$ENCLAVE_KMS_KEY_ID" \
-            --build-arg ENCLAVE_KMS_ENDPOINT="$ENCLAVE_KMS_ENDPOINT" \
-            --build-arg ENCLAVE_ID="$ENCLAVE_ID" --build-arg AWS_REGION="$AWS_REGION" \
-            "$build_context"
-
-          # Signing credentials are supplied only to Nitro CLI, never to Docker.
-          echo "Converting provisioned enclave image to EIF..."
-          nitro-cli build-enclave --docker-uri "$provisioned_image" \
-            --output-file "$OUTPUT_FILE" "''${signing_args[@]}"
-          nitro-cli describe-eif --eif-path "$OUTPUT_FILE" > "$build_context/measurements.json"
-          jq -e '.Measurements | [.PCR0, .PCR1, .PCR2] | all(.[];
-            type == "string" and test("^[0-9a-fA-F]{96}$") and test("[1-9a-fA-F]"))' \
-            "$build_context/measurements.json" >/dev/null
-          artifact_hash=$(sha256sum -- "$OUTPUT_FILE")
-          source_dirty=false
-          [[ -z "$(git status --porcelain --untracked-files=no)" ]] || source_dirty=true
-          jq -n --argjson enclave_id "$ENCLAVE_ID" --arg eif_path "$OUTPUT_FILE" \
-            --arg sha256 "''${artifact_hash%% *}" \
-            --arg version "$VERSION" --arg source_commit "$(git rev-parse HEAD)" \
-            --argjson source_dirty "$source_dirty" \
-            --arg kms_key_arn "$ENCLAVE_KMS_KEY_ID" --arg kms_endpoint "$ENCLAVE_KMS_ENDPOINT" \
-            --arg aws_region "$AWS_REGION" --arg gateway_public_key "$ENCLAVE_GATEWAY_PUBLIC_KEY" \
-            --slurpfile description "$build_context/measurements.json" \
-            '{enclave_id: $enclave_id, eif_path: $eif_path, sha256: $sha256,
-              version: $version, source_commit: $source_commit, source_dirty: $source_dirty,
-              kms_key_arn: $kms_key_arn, kms_endpoint: $kms_endpoint,
-              aws_region: $aws_region, gateway_public_key: $gateway_public_key,
-              pcr0: $description[0].Measurements.PCR0,
-              pcr1: $description[0].Measurements.PCR1,
-              pcr2: $description[0].Measurements.PCR2,
-              pcr8: ($description[0].Measurements.PCR8 // null)}' > "$OUTPUT_FILE.manifest.json"
-          echo "Built $OUTPUT_FILE and $OUTPUT_FILE.manifest.json. Review the measurements before publishing."
-          # This build helper does not publish artifacts or move mutable aliases.
-          docker rmi "$provisioned_image" 2>/dev/null || true
+          exec ${pkgs.bash}/bin/bash ${./scripts/build-enclave-eif.sh} "$@"
         '';
 
         # Production: Deploy reviewed per-enclave EIF artifacts
@@ -905,21 +822,21 @@ EOF
 
 
         # Docker images for k8s deployment
-        docker-gateway = pkgs.dockerTools.buildLayeredImage {
-          name = "keymeld-gateway";
+        mkDockerGateway = suffix: gateway: pkgs.dockerTools.buildLayeredImage {
+          name = "keymeld-gateway${suffix}";
           tag = "latest";
           contents = [
-            keymeld-gateway
+            gateway
             pkgs.cacert
             pkgs.tzdata
           ];
           config = {
-            Cmd = [ "${keymeld-gateway}/bin/keymeld-gateway" ];
+            Cmd = [ "${gateway}/bin/keymeld-gateway" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "RUST_LOG=info"
               "TEST_MODE=true"
-              "KEYMELD_STATIC_DIR=${keymeld-gateway}/share/keymeld-gateway/static"
+              "KEYMELD_STATIC_DIR=${gateway}/share/keymeld-gateway/static"
             ];
             ExposedPorts = {
               "8090/tcp" = {};
@@ -931,24 +848,27 @@ EOF
           };
         };
 
+        docker-gateway = mkDockerGateway "" keymeld-gateway;
+        docker-gateway-escrow = mkDockerGateway "-escrow" keymeld-gateway-escrow;
+
         nitro-entrypoint = pkgs.writeShellApplication {
           name = "keymeld-nitro-entrypoint";
           runtimeInputs = [ pkgs.socat pkgs.iproute2 pkgs.util-linux pkgs.coreutils ];
           text = builtins.readFile ./scripts/nitro-entrypoint.sh;
         };
 
-        docker-enclave = pkgs.dockerTools.buildLayeredImage {
-          name = "keymeld-enclave";
+        mkDockerEnclave = suffix: enclave: pkgs.dockerTools.buildLayeredImage {
+          name = "keymeld-enclave${suffix}";
           tag = "latest";
           contents = [
-            keymeld-enclave
+            enclave
             nitro-entrypoint
             pkgs.cacert
             pkgs.tzdata
           ];
           config = {
             Entrypoint = [ "${nitro-entrypoint}/bin/keymeld-nitro-entrypoint" ];
-            Cmd = [ "${keymeld-enclave}/bin/keymeld-enclave" ];
+            Cmd = [ "${enclave}/bin/keymeld-enclave" ];
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "RUST_LOG=info"
@@ -959,6 +879,8 @@ EOF
             };
           };
         };
+        docker-enclave = mkDockerEnclave "" keymeld-enclave;
+        docker-enclave-escrow = mkDockerEnclave "-escrow" keymeld-enclave-escrow;
 
       in
       {
@@ -972,6 +894,10 @@ EOF
           keymeld-enclave = keymeld-enclave;
           docker-gateway = docker-gateway;
           docker-enclave = docker-enclave;
+          inherit keymeld-gateway-escrow;
+          inherit keymeld-enclave-escrow;
+          inherit docker-gateway-escrow;
+          inherit docker-enclave-escrow;
           nitro-entrypoint = nitro-entrypoint;
           keymeld-demo = keymeld-demo;
 

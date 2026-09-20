@@ -245,6 +245,7 @@ impl MusigProcessor {
                 private_key: Some(private_key.clone()),
                 auth_pubkey: None,
                 require_signing_approval: false,
+                escrow: None,
                 batch_first_rounds,
                 batch_second_rounds: BTreeMap::new(),
                 batch_adaptor_first_rounds,

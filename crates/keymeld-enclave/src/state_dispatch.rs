@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, error, warn};
 
 use KeygenCommand::{
-    AddParticipantsBatch, DistributeParticipantPublicKeysBatch, GetAggregatePublicKey,
+    AddParticipantsBatch, DistributeParticipantPublicKeysBatch, Escrow, GetAggregatePublicKey,
     InitSession as KgInitSession,
 };
 use KeygenStatus::{
@@ -101,6 +101,9 @@ impl KeygenStatus {
 
             // Completed + GetAggregatePublicKey => Completed
             (KgCompleted(s), GetAggregatePublicKey(c)) => s.get_aggregate_key(c),
+
+            // Escrow operations preserve the completed MuSig key session.
+            (KgCompleted(s), Escrow(_)) => Ok(KgCompleted(s)),
 
             // Idempotent: late-arriving commands on completed session
             (KgCompleted(s), KgInitSession(_))

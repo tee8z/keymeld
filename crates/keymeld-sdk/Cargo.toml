@@ -43,6 +43,9 @@ openapi = ["dep:utoipa", "keymeld-core/openapi"]
 # DLC protocol utilities
 dlctix = ["dep:dlctix"]
 
+# Generic escrow authorization helpers.
+escrow = ["keymeld-core/escrow"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { workspace = true, features = ["v7", "serde"] }
 getrandom = { version = "0.2" }

@@ -18,6 +18,8 @@ pub enum SdkError {
     InvalidInput(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Escrow preparation capacity exhausted: {reason}")]
+    EscrowPreparationExhausted { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

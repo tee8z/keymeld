@@ -27,3 +27,5 @@ pub trait Advanceable<T> {
 
 // Re-export session types
 pub use session::{KeygenSessionStatus, Session, SigningSessionStatus};
+
+pub mod confidential;

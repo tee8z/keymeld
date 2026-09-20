@@ -166,7 +166,8 @@ pub(crate) async fn limit_admission(
 ) -> Response {
     // Polling stays available while creation, registration, approvals, key
     // changes, signing and fresh enclave attestation share admission budgets.
-    let attestation_request = request.uri().path().ends_with("/public-key");
+    let attestation_request = request.uri().path().ends_with("/public-key")
+        || request.uri().path().ends_with("/capabilities");
     if matches!(request.method(), &Method::GET | &Method::HEAD) && !attestation_request
         || request.method() == Method::OPTIONS
     {

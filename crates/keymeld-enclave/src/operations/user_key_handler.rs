@@ -471,6 +471,12 @@ async fn handle_store_from_keygen(
             )))
         })?;
 
+    if user_session.escrow.is_some() {
+        return Err(EnclaveError::Validation(ValidationError::Other(
+            "Escrow-authorized keys cannot be exported to an unrestricted signer".into(),
+        )));
+    }
+
     // Get the private key from the user session
     let private_key = user_session.private_key.clone().ok_or_else(|| {
         EnclaveError::Crypto(CryptoError::Other(format!(

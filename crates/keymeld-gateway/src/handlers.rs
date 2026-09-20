@@ -17,7 +17,7 @@ use axum::{
 use axum_extra::TypedHeader;
 use keymeld_core::{
     identifiers::{SessionId, UserId},
-    protocol::{KeygenStatusKind, SigningStatusKind},
+    protocol::{Command, EnclaveCommand, EnclaveOutcome, KeygenStatusKind, SigningStatusKind},
     AttestationDocument,
 };
 use keymeld_sdk::{
@@ -51,6 +51,7 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub gateway_limits: GatewayLimits,
     pub nonce_cache: NonceCache,
+    pub escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities,
 }
 
 /// A bounded cache accelerates replay rejection. SQLite remains authoritative
@@ -614,23 +615,22 @@ pub async fn register_keygen_participant(
         ));
     }
     // Decrypt and validate in the assigned enclave before a database slot is consumed.
+    let registration = keymeld_core::protocol::ValidateRegistrationCommand {
+        authorization_manifest: collecting.authorization_manifest.clone(),
+        participant: keymeld_core::protocol::ParticipantRegistrationData {
+            user_id: request.user_id.clone(),
+            enclave_encrypted_data: request.encrypted_private_key.clone(),
+            auth_pubkey: request.auth_pubkey.clone(),
+            require_signing_approval: request.require_signing_approval,
+            registration_authorization: request.registration_authorization.clone(),
+        },
+    };
     let outcome = state
         .enclave_manager
         .send_command_to_enclave(
             &assigned_enclave,
             keymeld_core::protocol::Command::new(keymeld_core::protocol::EnclaveCommand::System(
-                keymeld_core::protocol::SystemCommand::ValidateRegistration(
-                    keymeld_core::protocol::ValidateRegistrationCommand {
-                        authorization_manifest: collecting.authorization_manifest.clone(),
-                        participant: keymeld_core::protocol::ParticipantRegistrationData {
-                            user_id: request.user_id.clone(),
-                            enclave_encrypted_data: request.encrypted_private_key.clone(),
-                            auth_pubkey: request.auth_pubkey.clone(),
-                            require_signing_approval: request.require_signing_approval,
-                            registration_authorization: request.registration_authorization.clone(),
-                        },
-                    },
-                ),
+                keymeld_core::protocol::SystemCommand::ValidateRegistration(registration),
             )),
         )
         .await
@@ -1248,6 +1248,48 @@ pub async fn api_version() -> ApiResult<Json<ApiVersionResponse>> {
         },
     };
     Ok(Json(response))
+}
+
+/// Generic capabilities are confirmed by every assigned enclave, independently
+/// of the gateway binary's compiled feature set.
+#[utoipa::path(
+    get,
+    path = "/escrow/capabilities",
+    tag = "health",
+    responses((status = 200, description = "Effective generic escrow capabilities", body = keymeld_core::escrow_capabilities::EscrowCapabilities))
+)]
+pub async fn escrow_capabilities(
+    State(state): State<AppState>,
+) -> ApiResult<Json<keymeld_core::escrow_capabilities::EscrowCapabilities>> {
+    use keymeld_core::protocol::{SystemCommand, SystemOutcome};
+    let mut capabilities = state.escrow_capabilities;
+    if !capabilities.escrow {
+        return Ok(Json(capabilities));
+    }
+    let enclave_ids = state.enclave_manager.get_all_enclave_ids();
+    if enclave_ids.is_empty() {
+        return Ok(Json(Default::default()));
+    }
+    for enclave_id in enclave_ids {
+        let response = state
+            .enclave_manager
+            .send_command_to_enclave(
+                &enclave_id,
+                Command::new(EnclaveCommand::System(SystemCommand::GetEscrowCapabilities)),
+            )
+            .await?;
+        match response.response {
+            EnclaveOutcome::System(SystemOutcome::EscrowCapabilities(enclave_capabilities)) => {
+                capabilities = capabilities.intersection(enclave_capabilities);
+            }
+            _ => {
+                return Err(ApiError::enclave_communication(
+                    "Enclave did not advertise escrow capabilities",
+                ))
+            }
+        }
+    }
+    Ok(Json(capabilities))
 }
 
 #[utoipa::path(

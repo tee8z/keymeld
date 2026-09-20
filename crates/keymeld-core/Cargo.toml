@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 hkdf = { workspace = true }
 aes-gcm = { workspace = true }
 hex = { workspace = true }
+base64 = "0.22"
 subtle = "2.5.0"
 coset = "0.3.8"
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
@@ -50,6 +51,8 @@ gateway = ["sqlite", "openapi", "networking"]
 enclave = ["networking"]
 openapi = ["utoipa"]
 sqlite = ["sqlx"]
+# Generic policy, exact signing scopes, and hashlock-conditioned secret release.
+escrow = []
 # Networking feature enables tokio and managed_socket module
 # Disable this for WASM builds
 networking = ["tokio", "tokio-vsock"]

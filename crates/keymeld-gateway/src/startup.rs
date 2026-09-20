@@ -83,6 +83,7 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
         handlers::get_signing_status,
         handlers::get_enclave_public_key,
         handlers::api_version,
+        handlers::escrow_capabilities,
         // User key management
         handlers::reserve_key_slot,
         handlers::import_user_key,
@@ -105,6 +106,7 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             KeygenSessionStatusResponse,
             GetAvailableSlotsResponse,
             AvailableUserSlot,
+
             CreateSigningSessionRequest,
             CreateSigningSessionResponse,
             SigningSessionStatusResponse,
@@ -116,6 +118,7 @@ fn suggest_port_conflict_resolution(addr: SocketAddr) {
             ApiVersionResponse,
             DatabaseStats,
             ApiFeatures,
+            keymeld_core::escrow_capabilities::EscrowCapabilities,
             ErrorResponse,
             keymeld_sdk::EnclaveId,
             keymeld_sdk::SessionId,
@@ -232,6 +235,7 @@ struct ApplicationRuntime {
 
 impl Application {
     pub async fn build(config: Config) -> Result<Self> {
+        config.validate()?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let (signal_task, mut requested) = install_shutdown_signal()?;
         let mut signal_task = StartupSignalTask(Some(signal_task));
@@ -278,6 +282,7 @@ impl Application {
                     metrics: metrics.clone(),
                     gateway_limits: GatewayLimits::default(),
                     nonce_cache: NonceCache::new(),
+                    escrow_capabilities: config.escrow_capabilities()?,
                 },
                 &config,
             )?;
@@ -450,6 +455,12 @@ impl Application {
     fn build_router(state: AppState, config: &Config) -> Result<Router> {
         let admission = AdmissionLimiter::new(&config.server.rate_limit)?;
         let api_routes = Router::new()
+            .route(
+                "/confidential",
+                post(crate::confidential::forward).layer(axum::extract::DefaultBodyLimit::max(
+                    keymeld_core::confidential::MAX_WIRE_BYTES,
+                )),
+            )
             // Keygen routes
             .route("/keygen/reserve", post(handlers::reserve_keygen_session))
             .route(
@@ -508,6 +519,7 @@ impl Application {
             )
             // Health and utility routes
             .route("/version", get(handlers::api_version))
+            .route("/escrow/capabilities", get(handlers::escrow_capabilities))
             .route("/health", get(handlers::health_check))
             .route("/health/detail", get(handlers::health_check_detail))
             .route("/metrics", get(handlers::metrics))
@@ -948,6 +960,7 @@ mod tests {
                 metrics: Arc::new(Metrics),
                 gateway_limits: GatewayLimits::default(),
                 nonce_cache: NonceCache::new(),
+                escrow_capabilities: config.escrow_capabilities().unwrap(),
             },
             pool,
         )
@@ -1021,6 +1034,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_capabilities_are_explicit_without_contacting_enclaves() {
+        let (config, _directory) = create_test_config();
+        let (mut state, _) = http_test_state(&config).await;
+        state.escrow_capabilities = Default::default();
+        // The fixture's enclave is unreachable; a disabled gateway must still
+        // advertise an explicit negative response before any ticket is bought.
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        let (status, _, body) = server.request("GET", "/api/v1/escrow/capabilities").await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"escrow":false})
+        );
+    }
+
+    #[tokio::test]
     async fn admission_limits_sensitive_routes_ignores_spoofed_ips_and_recovers() {
         let (mut config, _directory) = create_test_config();
         config.server.rate_limit.per_ip_burst = 1;
@@ -1050,6 +1081,9 @@ mod tests {
             ("DELETE", "/api/v1/keys/user/key"),
             ("GET", "/api/v1/enclaves/1/public-key?nonce=00"),
             ("HEAD", "/api/v1/enclaves/1/public-key"),
+            ("POST", "/api/v1/confidential"),
+            ("GET", "/api/v1/escrow/capabilities"),
+            ("HEAD", "/api/v1/escrow/capabilities"),
         ] {
             let (status, headers, _) = server.request_with_body(
                 method, path,
@@ -1705,7 +1739,8 @@ mod tests {
             environment: Environment::Development,
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 0,
+                // This test stops at missing gateway credentials before bind.
+                port: 8090,
                 enable_cors: true,
                 enable_compression: true,
                 operator_token_file: None,

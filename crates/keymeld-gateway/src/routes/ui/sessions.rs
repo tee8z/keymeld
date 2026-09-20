@@ -247,7 +247,8 @@ fn signing_state_to_enum(
 fn format_timestamp(ts: i64) -> String {
     if let Ok(dt) = OffsetDateTime::from_unix_timestamp(ts) {
         let format =
-            time::format_description::parse("[year]-[month]-[day] [hour]:[minute]").unwrap();
+            time::format_description::parse_borrowed::<1>("[year]-[month]-[day] [hour]:[minute]")
+                .unwrap();
         dt.format(&format).unwrap_or_else(|_| ts.to_string())
     } else {
         ts.to_string()

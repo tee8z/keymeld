@@ -4,8 +4,7 @@ use crate::error::{SdkError, SigningError};
 use crate::managers::keygen::KeygenSession;
 use crate::types::{
     BatchItemResult, CreateSigningSessionRequest, CreateSigningSessionResponse, SessionId,
-    SigningBatchItem, SigningMode, SigningSessionStatusResponse, SigningStatusKind, TaprootTweak,
-    UserId,
+    SigningBatchItem, SigningMode, SigningSessionStatusResponse, SigningStatusKind, UserId,
 };
 use keymeld_core::authorization::{ParticipantApproval, SigningAuthorization};
 use uuid::Uuid;
@@ -51,82 +50,11 @@ impl SigningOptions {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BatchSigningItem {
-    pub(crate) id: Uuid,
-    pub(crate) message: [u8; 32],
-    pub(crate) mode: BatchSigningMode,
-    pub(crate) taproot_tweak: TaprootTweak,
-    pub(crate) subset_id: Option<Uuid>,
-}
+pub use crate::batch::{BatchSigningItem, BatchSigningMode, SignatureResult};
 
-impl BatchSigningItem {
-    pub fn id(&self) -> Uuid {
-        self.id
-    }
-    pub fn message(&self) -> &[u8; 32] {
-        &self.message
-    }
-    pub fn mode(&self) -> &BatchSigningMode {
-        &self.mode
-    }
-    pub fn taproot_tweak(&self) -> &TaprootTweak {
-        &self.taproot_tweak
-    }
-    pub fn subset_id(&self) -> Option<Uuid> {
-        self.subset_id
-    }
-
-    pub fn new(message: [u8; 32]) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            message,
-            mode: BatchSigningMode::Regular,
-            taproot_tweak: TaprootTweak::None,
-            subset_id: None,
-        }
-    }
-
-    pub fn adaptor(message: [u8; 32], configs: Vec<AdaptorConfig>) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            message,
-            mode: BatchSigningMode::Adaptor { configs },
-            taproot_tweak: TaprootTweak::None,
-            subset_id: None,
-        }
-    }
-
-    pub fn with_subset(mut self, subset_id: Uuid) -> Self {
-        self.subset_id = Some(subset_id);
-        self
-    }
-
-    pub fn with_tweak(mut self, tweak: TaprootTweak) -> Self {
-        self.taproot_tweak = tweak;
-        self
-    }
-
-    pub fn with_id(mut self, id: Uuid) -> Self {
-        self.id = id;
-        self
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub enum BatchSigningMode {
-    Regular,
-    Adaptor { configs: Vec<AdaptorConfig> },
-}
-
-#[derive(Debug, Clone)]
-pub struct SignatureResult {
-    pub batch_item_id: Uuid,
-    pub signature: Option<Vec<u8>>,
-    pub adaptor_signatures: Option<BTreeMap<Uuid, AdaptorSignatureResult>>,
-    pub error: Option<String>,
-}
-
+/// Legacy gateway-orchestrated signing. Its gateway can inspect public signing
+/// metadata and messages. Use `confidential_session::ConfidentialSession` for
+/// enclave-only transcript visibility and every new escrow signing flow.
 pub struct SigningManager<'a> {
     client: &'a KeyMeldClient,
 }
@@ -228,6 +156,7 @@ impl<'a> SigningManager<'a> {
             batch_items: request.batch_items,
             signing_session_id: response.signing_session_id,
             keygen_session_id: response.keygen_session_id,
+            signing_authorization: Some(request.signing_authorization.clone()),
             credentials,
             status: response.status,
             batch_results: vec![],
@@ -285,6 +214,7 @@ impl<'a> SigningManager<'a> {
             batch_items: status_response.batch_items,
             signing_session_id: status_response.signing_session_id,
             keygen_session_id: status_response.keygen_session_id,
+            signing_authorization: None,
             credentials,
             status: status_response.status,
             batch_results: status_response.batch_results,
@@ -353,6 +283,9 @@ pub struct SigningSession<'a> {
     batch_items: Vec<SigningBatchItem>,
     signing_session_id: SessionId,
     keygen_session_id: SessionId,
+    /// The authority's signature over the batch, kept only by the session that
+    /// created it; restored sessions do not carry it.
+    signing_authorization: Option<SigningAuthorization>,
     credentials: SessionCredentials,
     status: SigningStatusKind,
     batch_results: Vec<BatchItemResult>,
@@ -364,6 +297,22 @@ pub struct SigningSession<'a> {
 impl<'a> SigningSession<'a> {
     pub fn session_id(&self) -> &SessionId {
         &self.signing_session_id
+    }
+
+    /// The authorized batch exactly as the enclaves received it, for later
+    /// authorization checks. Persist it: only the session that created the batch has
+    /// it, and a claim must present the batch the authority signed.
+    pub fn receipt(&self) -> Option<crate::types::SigningReceipt> {
+        Some(crate::types::SigningReceipt {
+            keygen_session_id: self.keygen_session_id.clone(),
+            signing_session_id: self.signing_session_id.clone(),
+            batch_items: self
+                .batch_items
+                .iter()
+                .map(SigningBatchItem::to_enclave_batch_item)
+                .collect(),
+            signing_authorization: self.signing_authorization.clone()?,
+        })
     }
 
     pub fn keygen_session_id(&self) -> &SessionId {

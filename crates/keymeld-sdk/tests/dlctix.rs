@@ -292,3 +292,19 @@ fn batch_builder_rejects_missing_or_infinite_attestation_adaptors() {
         );
     }
 }
+
+#[test]
+fn persisted_batch_preserves_exact_ids_and_rejects_duplicate_split_keys() {
+    let (contract, _) = contract_fixture();
+    let signing = contract.signing_data().unwrap();
+    let batch = DlcBatchBuilder::new(&signing).build().unwrap();
+    let encoded = serde_json::to_value(&batch).unwrap();
+    let restored: keymeld_sdk::dlctix::DlcBatchItems =
+        serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), encoded);
+    let mut altered = encoded;
+    let splits = altered["split_batch_ids"].as_array_mut().unwrap();
+    assert!(!splits.is_empty());
+    splits.push(splits[0].clone());
+    assert!(serde_json::from_value::<keymeld_sdk::dlctix::DlcBatchItems>(altered).is_err());
+}

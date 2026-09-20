@@ -1,3 +1,4 @@
+use crate::musig::types::ParticipantSettings;
 use crate::musig::MusigProcessor;
 use keymeld_core::{
     authorization::RegistrationAuthorization,
@@ -437,8 +438,16 @@ impl DistributingSecrets {
                 KeyMaterial::new(envelope.private_key.clone()),
                 signer_index,
                 is_coordinator,
-                Some(derived_auth.serialize().to_vec()),
-                participant.require_signing_approval,
+                ParticipantSettings {
+                    auth_pubkey: Some(derived_auth.serialize().to_vec()),
+                    require_signing_approval: participant.require_signing_approval,
+                    escrow: envelope.escrow.as_ref().map(|escrow| {
+                        std::sync::Arc::new(keymeld_core::escrow::EscrowRegistration {
+                            policy: escrow.policy.clone(),
+                            secrets: escrow.secrets.clone(),
+                        })
+                    }),
+                },
             )
             .map_err(|e| invalid_registration(e.to_string()))?;
         self.musig_processor

@@ -382,6 +382,16 @@ pub struct DevelopmentConfig {
 }
 
 impl Config {
+    pub fn escrow_capabilities(
+        &self,
+    ) -> Result<keymeld_core::escrow_capabilities::EscrowCapabilities> {
+        Ok(
+            keymeld_core::escrow_capabilities::EscrowCapabilities::for_service(cfg!(
+                feature = "escrow"
+            )),
+        )
+    }
+
     pub async fn load(config_path: &str) -> Result<Self> {
         let config_str = tokio::fs::read_to_string(config_path)
             .await

@@ -36,6 +36,25 @@ pub fn validate_registration(
     let envelope: RegistrationEnvelope =
         serde_json::from_slice(&decrypted).map_err(|e| invalid(e.to_string()))?;
     envelope.verify().map_err(|e| invalid(e.to_string()))?;
+    if let Some(escrow) = &envelope.escrow {
+        if !enclave.confidential_dispatch {
+            return Err(invalid(
+                "Generic escrow registration requires confidential transport".into(),
+            ));
+        }
+        enclave
+            .escrow_capabilities
+            .require_escrow()
+            .map_err(|e| invalid(e.to_string()))?;
+        enclave.escrow_verifiers.validate_registration(
+            crate::escrow_verifier::RegistrationView {
+                manifest,
+                policy: &escrow.policy,
+                restoring: current_epoch.is_none(),
+            },
+        )?;
+    }
+
     if serde_json::to_vec(&envelope.context).map_err(|e| invalid(e.to_string()))?
         != serde_json::to_vec(context).map_err(|e| invalid(e.to_string()))?
     {
@@ -43,6 +62,7 @@ pub fn validate_registration(
             "Encrypted registration differs from authorized context".into(),
         ));
     }
+
     Ok(envelope)
 }
 
@@ -185,6 +205,7 @@ pub(crate) mod tests {
             context: participant.registration_authorization.context.clone(),
             private_key: [22; 32].to_vec(),
             proof_signature: vec![0; 64],
+            escrow: None,
         };
         participant.enclave_encrypted_data = hex::encode(
             SecureCrypto::ecies_encrypt(

@@ -150,6 +150,33 @@ jobs:
           bash scripts/test-nitro-kms-e2e-mocks.sh
           bash scripts/test-aws-launchers.sh
 
+  escrow-features:
+    name: Escrow (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: base
+            features: keymeld-enclave/escrow,keymeld-gateway/escrow,keymeld-sdk/escrow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: escrow-${{ matrix.variant }}
+      - name: Check independent escrow feature dependencies
+        run: bash scripts/test-escrow-feature-graph.sh
+      - name: Test generic escrow authorization
+        env:
+          ESCROW_FEATURES: ${{ matrix.features }}
+        run: >-
+          cargo test -p keymeld-core -p keymeld-enclave -p keymeld-gateway -p keymeld-sdk
+          --features "$ESCROW_FEATURES"
+          --locked
+      - name: Check measured escrow build selection
+        run: bash scripts/test-build-enclave-eif.sh
+
   # WASM SDK build check
   wasm:
     name: WASM SDK
@@ -174,7 +201,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-wasm-
 
       - name: Build SDK for WASM
-        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --features client,dlctix --locked
+        run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --features client,dlctix,escrow --locked
         env:
           # Workaround for secp256k1-sys WASM build with clang 16+
           # The wasm-sysroot in secp256k1-sys is missing memmove declaration in string.h
@@ -184,7 +211,7 @@ jobs:
   # End-to-end integration tests (uses pre-built binaries)
   e2e-test:
     runs-on: ubuntu-latest
-    needs: [build, fmt, clippy, machete, test, wasm]
+    needs: [build, fmt, clippy, machete, test, escrow-features, wasm]
     if: "!contains(github.event.pull_request.labels.*.name, 'skip-e2e')"
     strategy:
       fail-fast: false

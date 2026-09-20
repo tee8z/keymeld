@@ -43,3 +43,6 @@ pub struct InitConfig {
     pub expected_participants: Vec<UserId>,
     pub expected_participant_count: usize,
 }
+
+#[cfg(feature = "escrow")]
+pub mod escrow;

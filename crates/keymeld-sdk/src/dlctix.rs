@@ -1,5 +1,6 @@
+use crate::batch::{BatchSigningItem, SignatureResult};
 use crate::error::SdkError;
-use crate::managers::{AdaptorConfig, BatchSigningItem, SignatureResult};
+use crate::types::AdaptorConfig;
 use crate::types::{SubsetDefinition, UserId};
 pub use dlctix;
 use dlctix::musig2::{AdaptorSignature, CompactSignature};
@@ -243,9 +244,11 @@ impl<'a> DlcBatchBuilder<'a> {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct DlcBatchItems {
     pub items: Vec<BatchSigningItem>,
     pub outcome_batch_ids: BTreeMap<usize, Uuid>,
+    #[serde(with = "split_batch_id_pairs")]
     pub split_batch_ids: BTreeMap<WinCondition, Uuid>,
     pub expiry_batch_id: Option<Uuid>,
 }
@@ -320,5 +323,28 @@ impl DlcBatchItems {
             split_signatures,
             expiry_signature,
         })
+    }
+}
+
+mod split_batch_id_pairs {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    pub fn serialize<S: serde::Serializer>(
+        values: &BTreeMap<WinCondition, Uuid>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        values.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<WinCondition, Uuid>, D::Error> {
+        let pairs = Vec::<(WinCondition, Uuid)>::deserialize(deserializer)?;
+        let mut values = BTreeMap::new();
+        for (condition, id) in pairs {
+            if values.insert(condition, id).is_some() {
+                return Err(serde::de::Error::custom("Duplicate DLC split identifier"));
+            }
+        }
+        Ok(values)
     }
 }
