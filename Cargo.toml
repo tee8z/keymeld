@@ -14,7 +14,7 @@ uninlined_format_args = "allow"
 name = "keymeld"
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["tee8z <tee8z@protonmail.com>"]
 license = "MIT"
