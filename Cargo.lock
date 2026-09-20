@@ -1476,9 +1476,9 @@ checksum = "623c50081195a8a1ca7e214bb9f7517820d37e4e7e54312fc77eda19572184e8"
 dependencies = [
  "bitcoin",
  "hex",
- "musig2 0.4.1",
+ "musig2",
  "rand 0.9.5",
- "secp 0.7.0",
+ "secp",
  "serde",
  "serdect 0.4.3",
  "sha2",
@@ -2513,7 +2513,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hkdf",
- "musig2 0.3.1",
+ "musig2",
  "p384",
  "rand 0.9.5",
  "rcgen",
@@ -2558,7 +2558,7 @@ dependencies = [
  "der",
  "hex",
  "keymeld-core",
- "musig2 0.3.1",
+ "musig2",
  "openssl",
  "pkcs1",
  "rand 0.9.5",
@@ -2591,7 +2591,7 @@ dependencies = [
  "hex",
  "keymeld-core",
  "keymeld-sdk",
- "musig2 0.3.1",
+ "musig2",
  "rand 0.9.5",
  "reqwest",
  "secp256k1 0.31.1",
@@ -2936,23 +2936,6 @@ dependencies = [
 
 [[package]]
 name = "musig2"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c5ffeab912897e7577287c8f2b4efbc4be24912f77531b45ba4b18c93f8be21"
-dependencies = [
- "base16ct 0.2.0",
- "hmac",
- "once_cell",
- "secp 0.6.0",
- "secp256k1 0.31.1",
- "serde",
- "serdect 0.3.0",
- "sha2",
- "subtle",
-]
-
-[[package]]
-name = "musig2"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "183312a1f782d0e27c2e9aa4d68c151301caa39b38f48ea125c1d55ab1ff29f0"
@@ -2960,7 +2943,7 @@ dependencies = [
  "base16ct 0.2.0",
  "hmac",
  "rand 0.9.5",
- "secp 0.7.0",
+ "secp",
  "secp256k1 0.31.1",
  "serde",
  "serdect 0.3.0",
@@ -3936,20 +3919,6 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "secp"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d3b203895e8f18854c828d1cf7e5710683c3abc28d79330fe5ab723ce5b76e1"
-dependencies = [
- "base16ct 0.2.0",
- "once_cell",
- "secp256k1 0.31.1",
- "serde",
- "serdect 0.3.0",
- "subtle",
 ]
 
 [[package]]

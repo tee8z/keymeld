@@ -50,8 +50,8 @@ impl From<musig2::errors::SigningError> for Musig2LibError {
     }
 }
 
-impl From<musig2::errors::SignerIndexError> for Musig2LibError {
-    fn from(err: musig2::errors::SignerIndexError) -> Self {
+impl From<musig2::errors::RoundSetupError> for Musig2LibError {
+    fn from(err: musig2::errors::RoundSetupError) -> Self {
         Musig2LibError(err.to_string())
     }
 }
