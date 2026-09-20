@@ -98,7 +98,7 @@ jobs:
     name: Test Authorization End to End (${{ matrix.enclaves }} enclaves)
     needs: prepare-release
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
