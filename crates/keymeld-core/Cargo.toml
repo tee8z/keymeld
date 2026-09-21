@@ -43,7 +43,7 @@ tokio-vsock = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-rcgen = "0.13.2"
+rcgen = "0.14.10"
 
 [features]
 default = ["gateway"]
