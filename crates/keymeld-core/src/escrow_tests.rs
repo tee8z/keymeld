@@ -793,3 +793,129 @@ fn renewable_preparation_is_signed_separate_from_execution_and_restricted_to_fix
         .verify(&signed.policy.context, key(2).as_bytes())
         .is_err());
 }
+
+fn bip340_grant(repetition: crate::escrow::Repetition) -> ActionGrant {
+    ActionGrant {
+        preparation: crate::escrow::PreparationPolicy::Single,
+        repetition,
+        condition: Condition::VerifierRule {
+            rule: "spend_approved".into(),
+        },
+        operation: Permission::SignBip340,
+    }
+}
+fn bip340_scope(public_key: PublicKeyBytes, items: usize) -> Bip340Scope {
+    Bip340Scope {
+        public_key,
+        items: (0..items)
+            .map(|index| Bip340Item {
+                item_id: Uuid::now_v7(),
+                digest: sha256(&[index as u8]),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn bip340_permission_is_verifier_authorized_and_signs_only_with_the_participant_key() {
+    let mut policy = fixture();
+    policy.verifier = Some(VerifierPolicy {
+        id: "spend-approval".into(),
+        version: 1,
+        policy_data: Payload::default(),
+    });
+    policy.grants.insert(
+        "spend".into(),
+        bip340_grant(crate::escrow::Repetition::VerifierAuthorizedAttempts),
+    );
+    policy.validate().unwrap();
+
+    let grant = &policy.grants["spend"];
+    let action = Action::SignBip340 {
+        scope: bip340_scope(key(2), 3),
+    };
+    grant.operation.validate_action(&action, &policy).unwrap();
+    // It is not a MuSig2 permit, a release, or another participant's key.
+    let musig = policy.grants["sign"].operation.exact().unwrap();
+    assert!(grant.operation.validate_action(musig, &policy).is_err());
+    let release = policy.grants["release"].operation.exact().unwrap();
+    assert!(grant.operation.validate_action(release, &policy).is_err());
+    for scope in [
+        bip340_scope(key(9), 1),
+        bip340_scope(key(2), 0),
+        bip340_scope(key(2), MAX_BATCH_ITEMS + 1),
+    ] {
+        assert!(grant
+            .operation
+            .validate_action(&Action::SignBip340 { scope }, &policy)
+            .is_err());
+    }
+    let mut duplicate = bip340_scope(key(2), 2);
+    duplicate.items[1].item_id = duplicate.items[0].item_id;
+    assert!(policy
+        .validate_action(&Action::SignBip340 { scope: duplicate })
+        .is_err());
+
+    // A BIP340 attempt has no MuSig2 signing session.
+    assert!(attempt(false).validate(&action, &policy.context).is_ok());
+    assert!(attempt(true).validate(&action, &policy.context).is_err());
+
+    // Without a verifier rule, only an exact scope can be granted.
+    policy.grants.get_mut("spend").unwrap().condition = Condition::Unconditional;
+    assert!(policy.validate().is_err());
+}
+
+#[test]
+fn per_attempt_repetition_is_only_for_verifier_authorized_signing() {
+    let mut policy = fixture();
+    policy.verifier = Some(VerifierPolicy {
+        id: "spend-approval".into(),
+        version: 1,
+        policy_data: Payload::default(),
+    });
+    policy.grants.insert(
+        "spend".into(),
+        bip340_grant(crate::escrow::Repetition::VerifierAuthorizedAttempts),
+    );
+    policy.validate().unwrap();
+
+    // Verifier-authorized MuSig2 signing may also repeat per attempt, each in its own session.
+    let exact_sign = policy.grants["sign"].clone();
+    let sign = policy.grants.get_mut("sign").unwrap();
+    sign.repetition = crate::escrow::Repetition::VerifierAuthorizedAttempts;
+    sign.condition = Condition::VerifierRule {
+        rule: "document_approved".into(),
+    };
+    sign.operation = Permission::Sign;
+    policy.validate().unwrap();
+    // An exact MuSig2 scope cannot: there is nothing left to verify.
+    let mut exact = exact_sign;
+    exact.repetition = crate::escrow::Repetition::VerifierAuthorizedAttempts;
+    policy.grants.insert("exact_sign".into(), exact);
+    assert!(policy.validate().is_err());
+    policy.grants.remove("exact_sign");
+
+    // Releases never repeat per attempt.
+    policy.grants.get_mut("release").unwrap().repetition =
+        crate::escrow::Repetition::VerifierAuthorizedAttempts;
+    assert!(policy.validate().is_err());
+    policy.grants.get_mut("release").unwrap().repetition = crate::escrow::Repetition::Once;
+
+    // An exact BIP340 scope cannot repeat per attempt either: there is nothing left to verify.
+    policy.grants.insert(
+        "exact".into(),
+        ActionGrant {
+            preparation: crate::escrow::PreparationPolicy::Single,
+            repetition: crate::escrow::Repetition::VerifierAuthorizedAttempts,
+            condition: Condition::HashlockSha256 {
+                commitment: sha256(&[4; 32]),
+            },
+            operation: Permission::Exact {
+                action: Action::SignBip340 {
+                    scope: bip340_scope(key(2), 1),
+                },
+            },
+        },
+    );
+    assert!(policy.validate().is_err());
+}

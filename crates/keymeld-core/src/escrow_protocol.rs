@@ -342,6 +342,15 @@ impl EscrowResponse {
 }
 
 /// Generic encrypted execution results contain only explicitly authorized data.
+/// A BIP340 signature over one item of a [`crate::escrow::Bip340Scope`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bip340Signature {
+    pub item_id: Uuid,
+    /// 64 bytes. The caller verifies it against the scope's key and the item's digest.
+    pub signature: Vec<u8>,
+}
+
 /// A signing action installs a permit for one session; it never exports a key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -349,6 +358,11 @@ pub enum ExecutionOutput {
     SigningPermit {
         signing_session_id: SessionId,
         scope_digest: [u8; 32],
+    },
+    /// One signature per authorized item, in scope order.
+    Bip340Signatures {
+        public_key: PublicKeyBytes,
+        signatures: Vec<Bip340Signature>,
     },
     ReleasedSecret {
         name: String,

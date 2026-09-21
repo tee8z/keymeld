@@ -365,6 +365,44 @@ impl SigningScope {
     }
 }
 
+/// One BIP340 signature by the participant's own key over a 32-byte digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bip340Item {
+    pub item_id: Uuid,
+    pub digest: [u8; 32],
+}
+/// Plain BIP340 signatures by the participant's untweaked key, outside any MuSig2 session.
+///
+/// For a taproot script-path spend, each digest is that input's BIP341 sighash.
+/// A late-bound permission lets the verifier compute every digest from the transaction it authorizes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bip340Scope {
+    /// The signing key, which must be the participant's own.
+    pub public_key: PublicKeyBytes,
+    pub items: Vec<Bip340Item>,
+}
+impl Bip340Scope {
+    pub fn validate(&self, participant_key: &PublicKeyBytes) -> Result<(), KeyMeldError> {
+        if &self.public_key != participant_key {
+            return Err(invalid("BIP340 scope names another participant's key"));
+        }
+        if self.items.is_empty() || self.items.len() > MAX_BATCH_ITEMS {
+            return Err(invalid("Invalid BIP340 signing batch size"));
+        }
+        let mut ids = BTreeSet::new();
+        if self
+            .items
+            .iter()
+            .any(|item| item.item_id.is_nil() || !ids.insert(item.item_id))
+        {
+            return Err(invalid("Invalid or duplicate BIP340 item identity"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipient {
@@ -375,6 +413,9 @@ pub struct Recipient {
 pub enum Action {
     Sign {
         scope: SigningScope,
+    },
+    SignBip340 {
+        scope: Bip340Scope,
     },
     ReleaseSecret {
         name: String,
@@ -393,6 +434,8 @@ pub enum Permission {
         action: Action,
     },
     Sign,
+    /// BIP340 signatures by the participant's key over digests the verifier resolves.
+    SignBip340,
     ReleaseSecret {
         name: String,
         recipient: Recipient,
@@ -425,6 +468,7 @@ impl Permission {
         let allowed = match (self, action) {
             (Self::Exact { action: expected }, actual) => expected == actual,
             (Self::Sign, Action::Sign { .. }) => true,
+            (Self::SignBip340, Action::SignBip340 { .. }) => true,
             (
                 Self::ReleaseSecret { name, recipient },
                 Action::ReleaseSecret {
@@ -465,6 +509,10 @@ pub enum Repetition {
     #[default]
     Once,
     RepeatIdenticalSigningScope,
+    /// Each fresh attempt may prepare and execute once, with its own messages.
+    /// Only for a verifier-authorized signing permission, BIP340 or MuSig2: the verifier checks
+    /// every attempt's messages, and a MuSig2 attempt still needs its own signing session.
+    VerifierAuthorizedAttempts,
 }
 /// Preparation renewal does not authorize a second execution. It permits
 /// independently verifiable candidates for the same fixed-recipient release.
@@ -539,6 +587,14 @@ impl EscrowPolicy {
                     "Only an explicit signing permission can authorize identical-scope repetition",
                 ));
             }
+            if grant.repetition == Repetition::VerifierAuthorizedAttempts
+                && !(matches!(grant.operation, Permission::SignBip340 | Permission::Sign)
+                    && matches!(grant.condition, Condition::VerifierRule { .. }))
+            {
+                return Err(invalid(
+                    "Per-attempt repetition requires a verifier-authorized signing permission",
+                ));
+            }
             if let Condition::VerifierRule { rule } = &grant.condition {
                 name(rule)?;
                 if self.verifier.is_none() {
@@ -553,7 +609,7 @@ impl EscrowPolicy {
             }
             match &grant.operation {
                 Permission::Exact { action } => self.validate_action(action)?,
-                Permission::Sign => {}
+                Permission::Sign | Permission::SignBip340 => {}
                 Permission::ReleaseSecret { name, recipient } => {
                     self.validate_action(&Action::ReleaseSecret {
                         name: name.clone(),
@@ -581,6 +637,7 @@ impl EscrowPolicy {
     pub fn validate_action(&self, action: &Action) -> Result<(), KeyMeldError> {
         match action {
             Action::Sign { scope } => scope.validate(&self.context, &self.participant_public_key),
+            Action::SignBip340 { scope } => scope.validate(&self.participant_public_key),
             Action::ReleaseSecret { name: secret, .. } => {
                 name(secret)?;
                 if !self.secrets.contains_key(secret) {
@@ -748,7 +805,12 @@ impl ActionAttempt {
             {
                 Ok(())
             }
-            (Action::ReleaseSecret { .. } | Action::ReleaseSigningKey { .. }, None) => Ok(()),
+            (
+                Action::SignBip340 { .. }
+                | Action::ReleaseSecret { .. }
+                | Action::ReleaseSigningKey { .. },
+                None,
+            ) => Ok(()),
             _ => Err(invalid(
                 "Escrow action has an invalid target signing session",
             )),

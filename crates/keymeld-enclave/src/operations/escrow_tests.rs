@@ -49,6 +49,16 @@ fn fixture_with_preparation(
     repeat: bool,
     renewable: bool,
 ) -> Fixture {
+    fixture_with_grants(exports, application, repeat, renewable, vec![])
+}
+/// `extra` grants are added as given, after application mode converts the built-in ones.
+fn fixture_with_grants(
+    exports: bool,
+    application: bool,
+    repeat: bool,
+    renewable: bool,
+    extra: Vec<(&str, ActionGrant)>,
+) -> Fixture {
     let original = registration_fixture();
     let user = original.participant.user_id;
     let maker = UserId::new_v7();
@@ -190,6 +200,7 @@ fn fixture_with_preparation(
             };
             grant.operation = match grant.operation.exact().unwrap() {
                 Action::Sign { .. } => escrow::Permission::Sign,
+                Action::SignBip340 { .. } => escrow::Permission::SignBip340,
                 Action::ReleaseSecret { name, recipient } => escrow::Permission::ReleaseSecret {
                     name: name.clone(),
                     recipient: recipient.clone(),
@@ -213,6 +224,9 @@ fn fixture_with_preparation(
             grants.get_mut(id).unwrap().preparation =
                 escrow::PreparationPolicy::RenewableIdenticalAction;
         }
+    }
+    for (id, grant) in extra {
+        grants.insert(id.into(), grant);
     }
     let policy = SignedEscrowPolicy::sign(
         EscrowPolicy {
