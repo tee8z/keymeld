@@ -51,6 +51,7 @@ fn fixture() -> EscrowPolicy {
                 ActionGrant {
                     preparation: crate::escrow::PreparationPolicy::Single,
                     repetition: crate::escrow::Repetition::Once,
+                    unbound: false,
                     condition: Condition::HashlockSha256 {
                         commitment: sha256(&[4; 32]),
                     },
@@ -64,6 +65,7 @@ fn fixture() -> EscrowPolicy {
                 ActionGrant {
                     preparation: crate::escrow::PreparationPolicy::Single,
                     repetition: crate::escrow::Repetition::Once,
+                    unbound: false,
                     condition: Condition::HashlockSha256 {
                         commitment: sha256(&[4; 32]),
                     },
@@ -205,6 +207,7 @@ fn signing_permission_never_implies_key_or_secret_export() {
         ActionGrant {
             preparation: crate::escrow::PreparationPolicy::Single,
             repetition: crate::escrow::Repetition::Once,
+            unbound: false,
             condition: Condition::HashlockSha256 {
                 commitment: sha256(&[4; 32]),
             },
@@ -798,6 +801,7 @@ fn bip340_grant(repetition: crate::escrow::Repetition) -> ActionGrant {
     ActionGrant {
         preparation: crate::escrow::PreparationPolicy::Single,
         repetition,
+        unbound: false,
         condition: Condition::VerifierRule {
             rule: "spend_approved".into(),
         },
@@ -907,6 +911,7 @@ fn per_attempt_repetition_is_only_for_verifier_authorized_signing() {
         ActionGrant {
             preparation: crate::escrow::PreparationPolicy::Single,
             repetition: crate::escrow::Repetition::VerifierAuthorizedAttempts,
+            unbound: false,
             condition: Condition::HashlockSha256 {
                 commitment: sha256(&[4; 32]),
             },

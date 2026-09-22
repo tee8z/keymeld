@@ -409,9 +409,7 @@ impl EnclaveOperator {
                 let session = self.sessions.get(session_id).ok_or_else(|| {
                     EnclaveError::Session(SessionError::NotFound(session_id.clone()))
                 })?;
-                crate::operations::escrow::EscrowSessionSnapshot::new(completed_keygen_session(
-                    &session,
-                )?)
+                escrow_session_snapshot(&session)?
             };
             let context = self.context.read().unwrap().clone();
             let response = crate::operations::escrow::handle_snapshot(
@@ -1490,15 +1488,22 @@ impl EnclaveOperator {
     }
 }
 
+/// The escrow view of a keygen session. A completed session serves every escrow operation;
+/// one whose participants are still registering serves only unbound permissions.
 #[cfg(feature = "escrow")]
-fn completed_keygen_session(
+fn escrow_session_snapshot(
     session: &ContextAwareSession,
-) -> Result<&crate::operations::states::keygen::Completed, EnclaveError> {
+) -> Result<crate::operations::escrow::EscrowSessionSnapshot, EnclaveError> {
     match &session.status {
-        OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => Ok(completed),
+        OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => {
+            Ok(crate::operations::escrow::EscrowSessionSnapshot::new(completed))
+        }
+        OperatorStatus::Keygen(KeygenStatus::Distributing(distributing)) => Ok(
+            crate::operations::escrow::EscrowSessionSnapshot::registering(distributing),
+        ),
         _ => Err(EnclaveError::Validation(
             keymeld_core::protocol::ValidationError::Other(
-                "Escrow operations require a completed keygen session".into(),
+                "Escrow operations require an initialized keygen session".into(),
             ),
         )),
     }

@@ -154,6 +154,7 @@ fn fixture_with_grants(
         ActionGrant {
             preparation: keymeld_core::escrow::PreparationPolicy::Single,
             repetition: escrow::Repetition::Once,
+            unbound: false,
             condition: condition.clone(),
             operation: keymeld_core::escrow::Permission::Exact {
                 action: Action::Sign { scope },
@@ -169,6 +170,7 @@ fn fixture_with_grants(
             ActionGrant {
                 preparation: keymeld_core::escrow::PreparationPolicy::Single,
                 repetition: escrow::Repetition::Once,
+                unbound: false,
                 condition: condition.clone(),
                 operation: keymeld_core::escrow::Permission::Exact {
                     action: Action::ReleaseSecret {
@@ -183,6 +185,7 @@ fn fixture_with_grants(
             ActionGrant {
                 preparation: keymeld_core::escrow::PreparationPolicy::Single,
                 repetition: escrow::Repetition::Once,
+                unbound: false,
                 condition,
                 operation: keymeld_core::escrow::Permission::Exact {
                     action: Action::ReleaseSigningKey {

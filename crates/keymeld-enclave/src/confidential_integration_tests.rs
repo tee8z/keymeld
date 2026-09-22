@@ -646,6 +646,7 @@ fn document_policy(
                 ActionGrant {
                     preparation: escrow::PreparationPolicy::Single,
                     repetition: escrow::Repetition::Once,
+                    unbound: false,
                     condition: Condition::VerifierRule {
                         rule: "approved_document".into(),
                     },

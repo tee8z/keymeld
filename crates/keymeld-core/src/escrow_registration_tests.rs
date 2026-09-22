@@ -70,6 +70,7 @@ fn fixture() -> (SignedSessionManifest, RegistrationEnvelope) {
                 ActionGrant {
                     preparation: crate::escrow::PreparationPolicy::Single,
                     repetition: crate::escrow::Repetition::Once,
+                    unbound: false,
                     condition: Condition::HashlockSha256 {
                         commitment: sha256(&[18; 32]),
                     },

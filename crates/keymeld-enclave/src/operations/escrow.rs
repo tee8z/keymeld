@@ -489,12 +489,38 @@ fn validate_binding(binding: &Binding, command: &EscrowCommand) -> Result<(), En
     Ok(())
 }
 
+/// The binding of an unbound permission: the participant's own registered policy, with no
+/// application roster or state. Validation derives it again rather than trusting a receipt.
+fn unbound_binding(
+    policy: &SignedEscrowPolicy,
+    enclave_id: keymeld_core::EnclaveId,
+) -> Result<Binding, EnclaveError> {
+    Ok(Binding {
+        context: policy.policy.context.clone(),
+        policy_digest: policy.policy.digest().map_err(invalid)?,
+        enclave_id,
+        participant_policy_digests: BTreeMap::new(),
+        application_state: Payload::default(),
+    })
+}
+
 fn validate_prepared(
     prepared: &PreparedAction,
     command: &EscrowCommand,
     policy: &SignedEscrowPolicy,
 ) -> Result<(), EnclaveError> {
     validate_binding(&prepared.binding, command)?;
+    let unbound = policy
+        .policy
+        .grants
+        .get(&prepared.action_id)
+        .is_some_and(|grant| grant.unbound);
+    // Prepare derives this binding only for an unbound permission, never from a receipt.
+    if unbound && prepared.binding != unbound_binding(policy, prepared.binding.enclave_id)? {
+        return Err(invalid(
+            "An unbound permission acts only under its derived binding",
+        ));
+    }
     if command.context.action_id.as_ref() != Some(&prepared.action_id)
         || command.context.attempt.as_ref() != Some(&prepared.attempt)
         || policy
@@ -899,13 +925,38 @@ pub(crate) struct EscrowSessionSnapshot {
     session_id: SessionId,
     session_secret: SessionSecret,
     processor: MusigProcessor,
+    /// Before keygen completes, only unbound permissions may prepare or execute.
+    keygen_complete: bool,
 }
 impl EscrowSessionSnapshot {
     pub(crate) fn new(completed: &Completed) -> Self {
-        let source = completed.musig_processor();
+        Self::from_parts(
+            &completed.session_id,
+            completed.session_secret(),
+            completed.musig_processor(),
+            true,
+        )
+    }
+    /// A session whose participants are still registering, as in a pool that never fills.
+    pub(crate) fn registering(
+        distributing: &crate::operations::states::keygen::DistributingSecrets,
+    ) -> Self {
+        Self::from_parts(
+            &distributing.session_id,
+            distributing.session_secret(),
+            distributing.musig_processor(),
+            false,
+        )
+    }
+    fn from_parts(
+        session_id: &SessionId,
+        session_secret: &SessionSecret,
+        source: &MusigProcessor,
+        keygen_complete: bool,
+    ) -> Self {
         let metadata = source.get_session_metadata_public().clone();
         let mut processor = MusigProcessor::new(
-            &completed.session_id,
+            session_id,
             metadata.taproot_tweak.clone(),
             metadata.expected_participant_count,
             metadata.expected_participants.clone(),
@@ -917,9 +968,10 @@ impl EscrowSessionSnapshot {
             }
         }
         Self {
-            session_id: completed.session_id.clone(),
-            session_secret: completed.session_secret().clone(),
+            session_id: session_id.clone(),
+            session_secret: session_secret.clone(),
             processor,
+            keygen_complete,
         }
     }
     fn musig_processor(&self) -> &MusigProcessor {
@@ -990,6 +1042,24 @@ pub(crate) async fn handle_snapshot(
             policy,
             restoring: true,
         })?;
+    if !completed.keygen_complete {
+        let unbound = command
+            .context
+            .action_id
+            .as_ref()
+            .and_then(|id| policy.policy.grants.get(id))
+            .is_some_and(|grant| grant.unbound);
+        if !unbound
+            || !matches!(
+                command.context.operation,
+                Operation::Prepare | Operation::Execute
+            )
+        {
+            return Err(invalid(
+                "Before keygen completes, only an unbound permission may prepare or execute",
+            ));
+        }
+    }
     if command.context.escrow != policy.policy.context
         || command.context.policy_digest != policy.policy.digest().map_err(invalid)?
     {
@@ -1193,12 +1263,21 @@ pub(crate) async fn handle_snapshot(
             let request: PrepareEscrowRequest =
                 decrypt_request(completed.session_secret(), &command.encrypted_request)?;
             request.validate(&policy.policy).map_err(invalid)?;
-            let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)? else {
-                return Err(invalid("Expected bound escrow receipt"));
+            let grant = &policy.policy.grants[&request.action_id];
+            let binding = if grant.unbound {
+                if !request.binding_receipt.as_bytes().is_empty() {
+                    return Err(invalid("An unbound permission takes no binding receipt"));
+                }
+                unbound_binding(policy, context.enclave_id)?
+            } else {
+                let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)?
+                else {
+                    return Err(invalid("Expected bound escrow receipt"));
+                };
+                binding
             };
             validate_binding(&binding, command)?;
             validate_roster(processor, &binding)?;
-            let grant = &policy.policy.grants[&request.action_id];
             let mut prior = BTreeMap::new();
             let mut repeated = None;
             for receipt in &request.prior_preparation_receipts {
@@ -1348,7 +1427,9 @@ pub(crate) async fn handle_snapshot(
                     prepared: prepared.clone(),
                 },
             )?;
-            (reply, Some(prepared.binding.clone()), Some(prepared), None)
+            // An unbound permission's binding is derived, never installed.
+            let binding = (!grant.unbound).then(|| prepared.binding.clone());
+            (reply, binding, Some(prepared), None)
         }
         Operation::Execute => {
             let request: ExecuteEscrowRequest =
@@ -1483,9 +1564,14 @@ pub(crate) async fn handle_snapshot(
                 Payload::encode(&executed.output).map_err(invalid)?,
                 canonical_receipt,
             )?;
+            let unbound = policy
+                .policy
+                .grants
+                .get(&executed.prepared.action_id)
+                .is_some_and(|grant| grant.unbound);
             (
                 reply,
-                Some(executed.prepared.binding.clone()),
+                (!unbound).then(|| executed.prepared.binding.clone()),
                 Some(executed.prepared.clone()),
                 Some(executed),
             )

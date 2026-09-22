@@ -1071,6 +1071,7 @@ fn bip340_fixture(repetition: escrow::Repetition) -> Fixture {
             escrow::ActionGrant {
                 preparation: escrow::PreparationPolicy::Single,
                 repetition,
+                unbound: false,
                 condition: Condition::VerifierRule {
                     rule: "document_approved".into(),
                 },
@@ -1253,6 +1254,7 @@ fn verifier_authorized_musig_signing_repeats_in_fresh_sessions() {
             escrow::ActionGrant {
                 preparation: escrow::PreparationPolicy::Single,
                 repetition: escrow::Repetition::VerifierAuthorizedAttempts,
+                unbound: false,
                 condition: Condition::VerifierRule {
                     rule: "document_approved".into(),
                 },

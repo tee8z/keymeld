@@ -530,6 +530,12 @@ pub struct ActionGrant {
     pub preparation: PreparationPolicy,
     #[serde(default)]
     pub repetition: Repetition,
+    /// The grant needs no application binding: its verifier authorizes each action from the
+    /// participant's registered policy alone, even before the session's keygen completes. For
+    /// example, refunding an escrow that a pool which never filled did not use. Only for BIP340
+    /// signing under a verifier rule.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unbound: bool,
     pub condition: Condition,
     pub operation: Permission,
 }
@@ -593,6 +599,14 @@ impl EscrowPolicy {
             {
                 return Err(invalid(
                     "Per-attempt repetition requires a verifier-authorized signing permission",
+                ));
+            }
+            if grant.unbound
+                && !(matches!(grant.operation, Permission::SignBip340)
+                    && matches!(grant.condition, Condition::VerifierRule { .. }))
+            {
+                return Err(invalid(
+                    "An unbound permission requires verifier-authorized BIP340 signing",
                 ));
             }
             if let Condition::VerifierRule { rule } = &grant.condition {
