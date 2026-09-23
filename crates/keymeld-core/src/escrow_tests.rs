@@ -821,6 +821,54 @@ fn bip340_scope(public_key: PublicKeyBytes, items: usize) -> Bip340Scope {
 }
 
 #[test]
+fn only_an_unbound_permission_prepares_without_a_binding_receipt() {
+    use crate::escrow::protocol::PrepareEscrowRequest;
+
+    let mut policy = fixture();
+    policy.verifier = Some(VerifierPolicy {
+        id: "spend-approval".into(),
+        version: 1,
+        policy_data: Payload::default(),
+    });
+    policy.grants.insert(
+        "spend".into(),
+        bip340_grant(crate::escrow::Repetition::VerifierAuthorizedAttempts),
+    );
+    policy.grants.insert(
+        "refund".into(),
+        ActionGrant {
+            unbound: true,
+            ..bip340_grant(crate::escrow::Repetition::VerifierAuthorizedAttempts)
+        },
+    );
+    policy.validate().unwrap();
+
+    let request = |action_id: &str, binding_receipt: Payload| PrepareEscrowRequest {
+        schema_version: crate::escrow::SCHEMA_VERSION,
+        binding_receipt,
+        action_id: action_id.into(),
+        attempt: ActionAttempt {
+            attempt_id: Uuid::now_v7(),
+            signing_session_id: None,
+        },
+        action: None,
+        action_parameters: Payload::encode(&"parameters").unwrap(),
+        prior_preparation_receipts: vec![],
+    };
+    let receipt = Payload::encode(&"a sealed binding").unwrap();
+
+    // A bound permission acts under the binding it is given.
+    request("spend", receipt.clone()).validate(&policy).unwrap();
+    assert!(request("spend", Payload::default()).validate(&policy).is_err());
+
+    // An unbound one acts under a binding the enclave derives, so it is given none.
+    request("refund", Payload::default())
+        .validate(&policy)
+        .unwrap();
+    assert!(request("refund", receipt).validate(&policy).is_err());
+}
+
+#[test]
 fn bip340_permission_is_verifier_authorized_and_signs_only_with_the_participant_key() {
     let mut policy = fixture();
     policy.verifier = Some(VerifierPolicy {

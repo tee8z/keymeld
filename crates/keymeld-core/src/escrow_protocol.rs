@@ -223,13 +223,19 @@ impl PrepareEscrowRequest {
             return Err(invalid("Too many prior preparations"));
         }
         name(&self.action_id)?;
-        if self.binding_receipt.as_bytes().is_empty() {
-            return Err(invalid("Escrow binding receipt is required"));
-        }
         let grant = policy
             .grants
             .get(&self.action_id)
             .ok_or_else(|| invalid("Unknown escrow permission"))?;
+        // An unbound permission acts under a binding the enclave derives, so a caller that
+        // supplies one is proposing to act under something else.
+        if grant.unbound {
+            if !self.binding_receipt.as_bytes().is_empty() {
+                return Err(invalid("An unbound permission takes no binding receipt"));
+            }
+        } else if self.binding_receipt.as_bytes().is_empty() {
+            return Err(invalid("Escrow binding receipt is required"));
+        }
         match (&grant.condition, &self.action) {
             (Condition::VerifierRule { .. }, None) => {
                 if self.attempt.attempt_id.is_nil() {
