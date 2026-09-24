@@ -112,16 +112,31 @@
             (builtins.match ".*config/.*" path != null);
         };
 
+        # Each image's dependencies, built with that image's exact cargo arguments.
+        # workspaceDeps resolves features for the whole workspace, so a -p build
+        # with other features recompiled much of it; with matching arguments a
+        # cached dependency build is reused as is.
+        gatewayArgs = features: "-p keymeld-gateway --bin keymeld-gateway" + pkgs.lib.optionalString (features != "") " --features ${features}";
+        enclaveArgs = features: "-p keymeld-enclave --bin keymeld-enclave" + pkgs.lib.optionalString (features != "") " --features ${features}";
+        mkDeps = pname: src: cargoExtraArgs: craneLib.buildDepsOnly (commonEnvs // {
+          inherit pname src cargoExtraArgs;
+          version = workspaceVersion;
+          buildInputs = commonDeps;
+          nativeBuildInputs = commonDeps;
+        });
+
         # Individual service builds with filtered sources
         mkGateway = variant: features: craneLib.buildPackage (commonEnvs // {
           pname = "keymeld-gateway" + pkgs.lib.optionalString (variant != "") "-${variant}";
           meta.mainProgram = "keymeld-gateway";
           version = workspaceVersion;
           src = gatewaySrc;
-          cargoArtifacts = workspaceDeps;
+          cargoArtifacts = mkDeps "keymeld-gateway${pkgs.lib.optionalString (variant != "") "-${variant}"}-deps" gatewaySrc (gatewayArgs features);
           buildInputs = commonDeps;
           nativeBuildInputs = commonDeps;
-          cargoExtraArgs = "-p keymeld-gateway --bin keymeld-gateway" + pkgs.lib.optionalString (features != "") " --features ${features}";
+          cargoExtraArgs = gatewayArgs features;
+          # CI runs the test suite; the release packages only build.
+          doCheck = false;
 
           # Allow parallel builds and caching for speed
           preferLocalBuild = false;
@@ -144,10 +159,12 @@
           meta.mainProgram = "keymeld-enclave";
           version = workspaceVersion;
           src = enclaveSrc;
-          cargoArtifacts = workspaceDeps;
+          cargoArtifacts = mkDeps "keymeld-enclave${pkgs.lib.optionalString (variant != "") "-${variant}"}-deps" enclaveSrc (enclaveArgs features);
           buildInputs = commonDeps;
           nativeBuildInputs = commonDeps;
-          cargoExtraArgs = "-p keymeld-enclave --bin keymeld-enclave" + pkgs.lib.optionalString (features != "") " --features ${features}";
+          cargoExtraArgs = enclaveArgs features;
+          # CI runs the test suite; the release packages only build.
+          doCheck = false;
 
           # Allow parallel builds and caching for speed
           preferLocalBuild = false;

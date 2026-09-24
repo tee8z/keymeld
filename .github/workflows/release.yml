@@ -108,11 +108,22 @@ jobs:
         with:
           ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
+      # The lab's attic cache keeps what earlier runs built, including each image's
+      # dependency build. Set the ATTIC_ENDPOINT, ATTIC_CACHE and ATTIC_PUBLIC_KEY
+      # variables and the ATTIC_TOKEN secret to turn it on. Determinate Nix owns
+      # /etc/nix/nix.conf, so extra-conf is the only place these settings stick.
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          extra-conf: |
+            ${{ vars.ATTIC_ENDPOINT != '' && format('extra-substituters = {0}/{1}', vars.ATTIC_ENDPOINT, vars.ATTIC_CACHE) || '' }}
+            ${{ vars.ATTIC_ENDPOINT != '' && format('extra-trusted-public-keys = {0}', vars.ATTIC_PUBLIC_KEY) || '' }}
+      - name: Confirm the lab's Nix cache is in use
+        if: vars.ATTIC_ENDPOINT != ''
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+        run: |
+          nix config show | grep -F "$ATTIC_ENDPOINT" \
+            || echo "::warning::Nix is not using $ATTIC_ENDPOINT; this job builds from scratch"
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-authorization
@@ -232,11 +243,22 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
+      # The lab's attic cache keeps what earlier runs built, including each image's
+      # dependency build. Set the ATTIC_ENDPOINT, ATTIC_CACHE and ATTIC_PUBLIC_KEY
+      # variables and the ATTIC_TOKEN secret to turn it on. Determinate Nix owns
+      # /etc/nix/nix.conf, so extra-conf is the only place these settings stick.
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          extra-conf: |
+            ${{ vars.ATTIC_ENDPOINT != '' && format('extra-substituters = {0}/{1}', vars.ATTIC_ENDPOINT, vars.ATTIC_CACHE) || '' }}
+            ${{ vars.ATTIC_ENDPOINT != '' && format('extra-trusted-public-keys = {0}', vars.ATTIC_PUBLIC_KEY) || '' }}
+      - name: Confirm the lab's Nix cache is in use
+        if: vars.ATTIC_ENDPOINT != ''
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+        run: |
+          nix config show | grep -F "$ATTIC_ENDPOINT" \
+            || echo "::warning::Nix is not using $ATTIC_ENDPOINT; this job builds from scratch"
       - name: Build image archive without registry credentials
         env:
           IMAGE: ${{ matrix.image }}
@@ -245,6 +267,26 @@ jobs:
           set -euo pipefail
           nix build ".#docker-$IMAGE" --print-build-logs --no-update-lock-file
           cp --dereference result "$RUNNER_TEMP/$IMAGE-$ARCH.tar.gz"
+      # Best effort: a slow or unreachable lab never fails a release.
+      - name: Push this build's store paths to the lab's Nix cache
+        if: vars.ATTIC_ENDPOINT != ''
+        continue-on-error: true
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          [ -n "$ATTIC_TOKEN" ] || { echo "No ATTIC_TOKEN; not pushing"; exit 0; }
+          nix profile install --inputs-from . nixpkgs#attic-client
+          attic login lab "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
+          # Everything the image needed that this runner has, the dependency build
+          # included. attic skips paths cache.nixos.org already serves. Each upload
+          # holds a server database connection until it finishes, so keep few in flight.
+          mapfile -t DRVS < <(nix path-info --derivation ".#docker-$IMAGE")
+          nix-store --query --requisites --include-outputs "${DRVS[@]}" \
+            | grep -v '\.drv$' | while read -r path; do [ -e "$path" ] && echo "$path"; done \
+            | xargs -r attic push --jobs 2 "lab:$ATTIC_CACHE"
       - uses: actions/upload-artifact@v4
         with:
           name: docker-${{ matrix.image }}-${{ matrix.arch }}
