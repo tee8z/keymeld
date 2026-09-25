@@ -694,3 +694,7 @@ mod tests {
 #[cfg(test)]
 #[path = "confidential_integration_tests.rs"]
 mod integration_tests;
+
+#[cfg(all(test, feature = "escrow"))]
+#[path = "partial_roster_tests.rs"]
+mod partial_roster_tests;

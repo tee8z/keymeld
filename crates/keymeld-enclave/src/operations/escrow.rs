@@ -489,12 +489,38 @@ fn validate_binding(binding: &Binding, command: &EscrowCommand) -> Result<(), En
     Ok(())
 }
 
+/// The binding of an unbound permission: the participant's own registered policy, with no
+/// application roster or state. Validation derives it again rather than trusting a receipt.
+fn unbound_binding(
+    policy: &SignedEscrowPolicy,
+    enclave_id: keymeld_core::EnclaveId,
+) -> Result<Binding, EnclaveError> {
+    Ok(Binding {
+        context: policy.policy.context.clone(),
+        policy_digest: policy.policy.digest().map_err(invalid)?,
+        enclave_id,
+        participant_policy_digests: BTreeMap::new(),
+        application_state: Payload::default(),
+    })
+}
+
 fn validate_prepared(
     prepared: &PreparedAction,
     command: &EscrowCommand,
     policy: &SignedEscrowPolicy,
 ) -> Result<(), EnclaveError> {
     validate_binding(&prepared.binding, command)?;
+    let unbound = policy
+        .policy
+        .grants
+        .get(&prepared.action_id)
+        .is_some_and(|grant| grant.unbound);
+    // Prepare derives this binding only for an unbound permission, never from a receipt.
+    if unbound && prepared.binding != unbound_binding(policy, prepared.binding.enclave_id)? {
+        return Err(invalid(
+            "An unbound permission acts only under its derived binding",
+        ));
+    }
     if command.context.action_id.as_ref() != Some(&prepared.action_id)
         || command.context.attempt.as_ref() != Some(&prepared.attempt)
         || policy
@@ -537,6 +563,23 @@ fn validate_prepared(
 fn preparation_digest(prepared: &PreparedAction) -> Result<[u8; 32], EnclaveError> {
     authorization_digest("escrow-prepared-action-v2", prepared).map_err(invalid)
 }
+/// Whether `prepared` is a fresh attempt of a per-attempt permission, and so may replace `old`.
+///
+/// Every attempt is separately authorized by the verifier, which checks that attempt's messages.
+fn fresh_attempt(
+    policy: &SignedEscrowPolicy,
+    old: &PreparedAction,
+    prepared: &PreparedAction,
+) -> bool {
+    policy
+        .policy
+        .grants
+        .get(&prepared.action_id)
+        .is_some_and(|grant| grant.repetition == Repetition::VerifierAuthorizedAttempts)
+        && old.binding == prepared.binding
+        && old.attempt.attempt_id != prepared.attempt.attempt_id
+}
+
 fn install_preparation(
     state: &mut SessionState,
     prepared: &PreparedAction,
@@ -573,7 +616,7 @@ fn install_preparation(
                     && matches!(prepared.action, Action::Sign { .. })
                     && old.attempt.signing_session_id != prepared.attempt.signing_session_id
             };
-            if !same_action || !allowed {
+            if !fresh_attempt(policy, old, prepared) && (!same_action || !allowed) {
                 return Err(invalid(
                     "Escrow action was already prepared for another attempt",
                 ));
@@ -587,6 +630,7 @@ fn install_preparation(
 fn validate_live_execution(
     state: &EscrowSessionState,
     prepared: &PreparedAction,
+    policy: &SignedEscrowPolicy,
 ) -> Result<(), EnclaveError> {
     let state = state
         .inner
@@ -597,6 +641,7 @@ fn validate_live_execution(
         prepared.action_id.clone(),
     )) {
         if old.prepared != *prepared
+            && !fresh_attempt(policy, &old.prepared, prepared)
             && !(prepared.predecessor.is_some()
                 && matches!(prepared.action, Action::Sign { .. })
                 && old.prepared.action == prepared.action
@@ -613,6 +658,7 @@ fn validate_live_execution(
 fn install_execution(
     state: &mut SessionState,
     executed: &ExecutedAction,
+    policy: &SignedEscrowPolicy,
 ) -> Result<(), EnclaveError> {
     let prepared = &executed.prepared;
     let key = (
@@ -621,6 +667,7 @@ fn install_execution(
     );
     if let Some(old) = state.executions.get(&key) {
         if (old.prepared != *prepared || old.execution_digest != executed.execution_digest)
+            && !fresh_attempt(policy, &old.prepared, prepared)
             && !(prepared.predecessor.is_some()
                 && matches!(prepared.action, Action::Sign { .. })
                 && old.prepared.action == prepared.action
@@ -878,13 +925,38 @@ pub(crate) struct EscrowSessionSnapshot {
     session_id: SessionId,
     session_secret: SessionSecret,
     processor: MusigProcessor,
+    /// Before keygen completes, only unbound permissions may prepare or execute.
+    keygen_complete: bool,
 }
 impl EscrowSessionSnapshot {
     pub(crate) fn new(completed: &Completed) -> Self {
-        let source = completed.musig_processor();
+        Self::from_parts(
+            &completed.session_id,
+            completed.session_secret(),
+            completed.musig_processor(),
+            true,
+        )
+    }
+    /// A session whose participants are still registering, as in a pool that never fills.
+    pub(crate) fn registering(
+        distributing: &crate::operations::states::keygen::DistributingSecrets,
+    ) -> Self {
+        Self::from_parts(
+            &distributing.session_id,
+            distributing.session_secret(),
+            distributing.musig_processor(),
+            false,
+        )
+    }
+    fn from_parts(
+        session_id: &SessionId,
+        session_secret: &SessionSecret,
+        source: &MusigProcessor,
+        keygen_complete: bool,
+    ) -> Self {
         let metadata = source.get_session_metadata_public().clone();
         let mut processor = MusigProcessor::new(
-            &completed.session_id,
+            session_id,
             metadata.taproot_tweak.clone(),
             metadata.expected_participant_count,
             metadata.expected_participants.clone(),
@@ -896,9 +968,10 @@ impl EscrowSessionSnapshot {
             }
         }
         Self {
-            session_id: completed.session_id.clone(),
-            session_secret: completed.session_secret().clone(),
+            session_id: session_id.clone(),
+            session_secret: session_secret.clone(),
             processor,
+            keygen_complete,
         }
     }
     fn musig_processor(&self) -> &MusigProcessor {
@@ -969,6 +1042,24 @@ pub(crate) async fn handle_snapshot(
             policy,
             restoring: true,
         })?;
+    if !completed.keygen_complete {
+        let unbound = command
+            .context
+            .action_id
+            .as_ref()
+            .and_then(|id| policy.policy.grants.get(id))
+            .is_some_and(|grant| grant.unbound);
+        if !unbound
+            || !matches!(
+                command.context.operation,
+                Operation::Prepare | Operation::Execute
+            )
+        {
+            return Err(invalid(
+                "Before keygen completes, only an unbound permission may prepare or execute",
+            ));
+        }
+    }
     if command.context.escrow != policy.policy.context
         || command.context.policy_digest != policy.policy.digest().map_err(invalid)?
     {
@@ -1172,12 +1263,21 @@ pub(crate) async fn handle_snapshot(
             let request: PrepareEscrowRequest =
                 decrypt_request(completed.session_secret(), &command.encrypted_request)?;
             request.validate(&policy.policy).map_err(invalid)?;
-            let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)? else {
-                return Err(invalid("Expected bound escrow receipt"));
+            let grant = &policy.policy.grants[&request.action_id];
+            let binding = if grant.unbound {
+                if !request.binding_receipt.as_bytes().is_empty() {
+                    return Err(invalid("An unbound permission takes no binding receipt"));
+                }
+                unbound_binding(policy, context.enclave_id)?
+            } else {
+                let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)?
+                else {
+                    return Err(invalid("Expected bound escrow receipt"));
+                };
+                binding
             };
             validate_binding(&binding, command)?;
             validate_roster(processor, &binding)?;
-            let grant = &policy.policy.grants[&request.action_id];
             let mut prior = BTreeMap::new();
             let mut repeated = None;
             for receipt in &request.prior_preparation_receipts {
@@ -1241,7 +1341,10 @@ pub(crate) async fn handle_snapshot(
                     .preparations
                     .get(&(user.clone(), request.action_id.clone()))
                 {
-                    if repeated.as_ref() != Some(old) {
+                    let fresh = grant.repetition == Repetition::VerifierAuthorizedAttempts
+                        && old.binding == binding
+                        && old.attempt.attempt_id != request.attempt.attempt_id;
+                    if !fresh && repeated.as_ref() != Some(old) {
                         return Err(invalid("Permission already prepared; retry original request or present its exact preparation"));
                     }
                 }
@@ -1324,7 +1427,9 @@ pub(crate) async fn handle_snapshot(
                     prepared: prepared.clone(),
                 },
             )?;
-            (reply, Some(prepared.binding.clone()), Some(prepared), None)
+            // An unbound permission's binding is derived, never installed.
+            let binding = (!grant.unbound).then(|| prepared.binding.clone());
+            (reply, binding, Some(prepared), None)
         }
         Operation::Execute => {
             let request: ExecuteEscrowRequest =
@@ -1339,7 +1444,7 @@ pub(crate) async fn handle_snapshot(
                     recovered_receipt = Some(request.prepared_receipt.clone());
                     validate_prepared(&executed.prepared, command, policy)?;
                     validate_roster(processor, &executed.prepared.binding)?;
-                    validate_live_execution(&metadata.escrow_state, &executed.prepared)?;
+                    validate_live_execution(&metadata.escrow_state, &executed.prepared, policy)?;
                     if matches!(request.proof, ConditionProof::None) {
                         restore_execution(context, manifest, policy, &executed.prepared).await?;
                     } else if verify_execution(
@@ -1359,7 +1464,7 @@ pub(crate) async fn handle_snapshot(
                 SealedState::Prepared { prepared } => {
                     validate_prepared(&prepared, command, policy)?;
                     validate_roster(processor, &prepared.binding)?;
-                    validate_live_execution(&metadata.escrow_state, &prepared)?;
+                    validate_live_execution(&metadata.escrow_state, &prepared, policy)?;
                     let execution_digest =
                         verify_execution(context, manifest, policy, &prepared, &request.proof)
                             .await?;
@@ -1373,6 +1478,7 @@ pub(crate) async fn handle_snapshot(
                         .cloned();
                     if let Some(old) = old {
                         if (old.prepared != prepared || old.execution_digest != execution_digest)
+                            && !fresh_attempt(policy, &old.prepared, &prepared)
                             && !(prepared.predecessor.is_some()
                                 && matches!(prepared.action, Action::Sign { .. })
                                 && old.prepared.action == prepared.action
@@ -1458,9 +1564,14 @@ pub(crate) async fn handle_snapshot(
                 Payload::encode(&executed.output).map_err(invalid)?,
                 canonical_receipt,
             )?;
+            let unbound = policy
+                .policy
+                .grants
+                .get(&executed.prepared.action_id)
+                .is_some_and(|grant| grant.unbound);
             (
                 reply,
-                Some(executed.prepared.binding.clone()),
+                (!unbound).then(|| executed.prepared.binding.clone()),
                 Some(executed.prepared.clone()),
                 Some(executed),
             )
@@ -1500,7 +1611,7 @@ pub(crate) async fn handle_snapshot(
         )?;
     }
     if let Some(executed) = new_execution {
-        install_execution(&mut next, &executed)?;
+        install_execution(&mut next, &executed, policy)?;
         next.execution_receipts.insert(
             (user.clone(), executed.prepared.action_id.clone()),
             result.sealed_state.clone(),
@@ -1544,6 +1655,38 @@ fn execute_output(
             scope_digest: authorization_digest("escrow-signing-scope-v1", scope)
                 .map_err(invalid)?,
         }),
+        Action::SignBip340 { scope } => {
+            let secret = Zeroizing::new(
+                <[u8; 32]>::try_from(
+                    signing_key.ok_or_else(|| invalid("Signing key is unavailable"))?,
+                )
+                .map_err(|_| invalid("Invalid escrow signing key length"))?,
+            );
+            let secp = secp256k1::Secp256k1::new();
+            let key = secp256k1::SecretKey::from_byte_array(*secret).map_err(invalid)?;
+            let keypair = secp256k1::Keypair::from_secret_key(&secp, &key);
+            if keypair.public_key().serialize().as_slice() != scope.public_key.as_bytes() {
+                return Err(invalid(
+                    "BIP340 signing key differs from participant authorization",
+                ));
+            }
+            // Script-path signatures use the untweaked key. Keypair handles its odd-Y parity.
+            let signatures = scope
+                .items
+                .iter()
+                .map(|item| escrow::protocol::Bip340Signature {
+                    item_id: item.item_id,
+                    signature: secp
+                        .sign_schnorr(&item.digest, &keypair)
+                        .to_byte_array()
+                        .to_vec(),
+                })
+                .collect();
+            Ok(ExecutionOutput::Bip340Signatures {
+                public_key: scope.public_key.clone(),
+                signatures,
+            })
+        }
         Action::ReleaseSecret { name, recipient } => {
             let secret = registration
                 .secrets

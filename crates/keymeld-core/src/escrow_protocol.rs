@@ -223,13 +223,19 @@ impl PrepareEscrowRequest {
             return Err(invalid("Too many prior preparations"));
         }
         name(&self.action_id)?;
-        if self.binding_receipt.as_bytes().is_empty() {
-            return Err(invalid("Escrow binding receipt is required"));
-        }
         let grant = policy
             .grants
             .get(&self.action_id)
             .ok_or_else(|| invalid("Unknown escrow permission"))?;
+        // An unbound permission acts under a binding the enclave derives, so a caller that
+        // supplies one is proposing to act under something else.
+        if grant.unbound {
+            if !self.binding_receipt.as_bytes().is_empty() {
+                return Err(invalid("An unbound permission takes no binding receipt"));
+            }
+        } else if self.binding_receipt.as_bytes().is_empty() {
+            return Err(invalid("Escrow binding receipt is required"));
+        }
         match (&grant.condition, &self.action) {
             (Condition::VerifierRule { .. }, None) => {
                 if self.attempt.attempt_id.is_nil() {
@@ -342,6 +348,15 @@ impl EscrowResponse {
 }
 
 /// Generic encrypted execution results contain only explicitly authorized data.
+/// A BIP340 signature over one item of a [`crate::escrow::Bip340Scope`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bip340Signature {
+    pub item_id: Uuid,
+    /// 64 bytes. The caller verifies it against the scope's key and the item's digest.
+    pub signature: Vec<u8>,
+}
+
 /// A signing action installs a permit for one session; it never exports a key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -349,6 +364,11 @@ pub enum ExecutionOutput {
     SigningPermit {
         signing_session_id: SessionId,
         scope_digest: [u8; 32],
+    },
+    /// One signature per authorized item, in scope order.
+    Bip340Signatures {
+        public_key: PublicKeyBytes,
+        signatures: Vec<Bip340Signature>,
     },
     ReleasedSecret {
         name: String,

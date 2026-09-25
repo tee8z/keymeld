@@ -1058,3 +1058,248 @@ fn executed_receipt_recovery_must_pass_the_trusted_recovery_gate_before_restorin
         "Recovery cannot create another preparation"
     );
 }
+
+/// An application fixture whose participant may sign BIP340 digests the verifier resolves.
+fn bip340_fixture(repetition: escrow::Repetition) -> Fixture {
+    let mut f = fixture_with_grants(
+        true,
+        true,
+        false,
+        false,
+        vec![(
+            "bip340",
+            escrow::ActionGrant {
+                preparation: escrow::PreparationPolicy::Single,
+                repetition,
+                unbound: false,
+                condition: Condition::VerifierRule {
+                    rule: "document_approved".into(),
+                },
+                operation: escrow::Permission::SignBip340,
+            },
+        )],
+    );
+    f.context.escrow_verifiers = Arc::new(
+        VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+            execution_gate: None,
+            reject_recovery: false,
+        })])
+        .unwrap(),
+    );
+    f
+}
+fn bip340_action(f: &Fixture, digests: &[[u8; 32]]) -> Action {
+    Action::SignBip340 {
+        scope: escrow::Bip340Scope {
+            public_key: f.registration.policy.policy.participant_public_key.clone(),
+            items: digests
+                .iter()
+                .map(|digest| escrow::Bip340Item {
+                    item_id: Uuid::now_v7(),
+                    digest: *digest,
+                })
+                .collect(),
+        },
+    }
+}
+fn fresh_attempt() -> ActionAttempt {
+    ActionAttempt {
+        attempt_id: Uuid::now_v7(),
+        signing_session_id: None,
+    }
+}
+/// Prepare and execute `action` under `attempt`, returning the checked signatures.
+fn sign_bip340(f: &Fixture, binding: &Payload, attempt: &ActionAttempt, action: &Action) -> usize {
+    let prepared = handle(
+        &f.completed,
+        &f.context,
+        &prepare_command(f, binding.clone(), "bip340", attempt, action),
+        1,
+    )
+    .unwrap();
+    let executed = handle(
+        &f.completed,
+        &f.context,
+        &execute_command(f, "bip340", attempt, prepared.sealed_state, approved()),
+        1,
+    )
+    .unwrap();
+    let ExecutionOutput::Bip340Signatures {
+        public_key,
+        signatures,
+    } = executed.output.decode().unwrap()
+    else {
+        panic!("expected BIP340 signatures");
+    };
+    let Action::SignBip340 { scope } = action else {
+        unreachable!()
+    };
+    assert_eq!(public_key, scope.public_key);
+    assert_eq!(signatures.len(), scope.items.len());
+    let key = secp256k1::PublicKey::from_slice(public_key.as_bytes())
+        .unwrap()
+        .x_only_public_key()
+        .0;
+    for (signature, item) in signatures.iter().zip(&scope.items) {
+        assert_eq!(signature.item_id, item.item_id);
+        let signature = secp256k1::schnorr::Signature::from_byte_array(
+            signature.signature.clone().try_into().unwrap(),
+        );
+        secp256k1::Secp256k1::verification_only()
+            .verify_schnorr(&signature, &item.digest, &key)
+            .unwrap();
+    }
+    signatures.len()
+}
+
+#[test]
+fn bip340_signatures_verify_and_every_fresh_attempt_signs_its_own_digests() {
+    let f = bip340_fixture(escrow::Repetition::VerifierAuthorizedAttempts);
+    let binding = handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .unwrap()
+        .sealed_state;
+
+    // A batch's intent proof, then a retried batch's with other digests.
+    let first = fresh_attempt();
+    assert_eq!(
+        sign_bip340(
+            &f,
+            &binding,
+            &first,
+            &bip340_action(&f, &[[1; 32], [2; 32]])
+        ),
+        2
+    );
+    let second = fresh_attempt();
+    let action = bip340_action(&f, &[[3; 32]]);
+    assert_eq!(sign_bip340(&f, &binding, &second, &action), 1);
+
+    // An attempt cannot be reused for other digests.
+    let replaced = prepare_command(
+        &f,
+        binding.clone(),
+        "bip340",
+        &second,
+        &bip340_action(&f, &[[4; 32]]),
+    );
+    assert!(handle(&f.completed, &f.context, &replaced, 1).is_err());
+}
+
+#[test]
+fn a_one_time_bip340_permission_signs_once() {
+    let f = bip340_fixture(escrow::Repetition::Once);
+    let binding = handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .unwrap()
+        .sealed_state;
+    sign_bip340(
+        &f,
+        &binding,
+        &fresh_attempt(),
+        &bip340_action(&f, &[[1; 32]]),
+    );
+    let again = prepare_command(
+        &f,
+        binding,
+        "bip340",
+        &fresh_attempt(),
+        &bip340_action(&f, &[[2; 32]]),
+    );
+    assert!(handle(&f.completed, &f.context, &again, 1).is_err());
+}
+
+#[test]
+fn a_bip340_scope_signs_only_with_the_participant_key() {
+    let f = bip340_fixture(escrow::Repetition::VerifierAuthorizedAttempts);
+    let binding = handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .unwrap()
+        .sealed_state;
+    let Action::SignBip340 { mut scope } = bip340_action(&f, &[[1; 32]]) else {
+        unreachable!()
+    };
+    scope.public_key = PublicKeyBytes::new(&public_key(&[18; 32])).unwrap();
+    let other_key = prepare_command(
+        &f,
+        binding.clone(),
+        "bip340",
+        &fresh_attempt(),
+        &Action::SignBip340 { scope },
+    );
+    assert!(handle(&f.completed, &f.context, &other_key, 1).is_err());
+
+    // A BIP340 attempt never targets a MuSig2 signing session.
+    let with_session = ActionAttempt {
+        attempt_id: Uuid::now_v7(),
+        signing_session_id: Some(f.signing.signing_session_id.clone()),
+    };
+    let wrong = prepare_command(
+        &f,
+        binding,
+        "bip340",
+        &with_session,
+        &bip340_action(&f, &[[1; 32]]),
+    );
+    assert!(handle(&f.completed, &f.context, &wrong, 1).is_err());
+}
+
+#[test]
+fn verifier_authorized_musig_signing_repeats_in_fresh_sessions() {
+    let mut f = fixture_with_grants(
+        true,
+        true,
+        false,
+        false,
+        vec![(
+            "sign",
+            escrow::ActionGrant {
+                preparation: escrow::PreparationPolicy::Single,
+                repetition: escrow::Repetition::VerifierAuthorizedAttempts,
+                unbound: false,
+                condition: Condition::VerifierRule {
+                    rule: "document_approved".into(),
+                },
+                operation: escrow::Permission::Sign,
+            },
+        )],
+    );
+    f.context.escrow_verifiers = Arc::new(
+        VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+            execution_gate: None,
+            reject_recovery: false,
+        })])
+        .unwrap(),
+    );
+    let binding = handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .unwrap()
+        .sealed_state;
+    // A failed batch is retried with new messages, each attempt in its own signing session.
+    for _ in 0..2 {
+        let session = SessionId::new_v7();
+        let attempt = ActionAttempt {
+            attempt_id: Uuid::now_v7(),
+            signing_session_id: Some(session.clone()),
+        };
+        let prepared = handle(
+            &f.completed,
+            &f.context,
+            &prepare_command(&f, binding.clone(), "sign", &attempt, &signing_action(&f)),
+            1,
+        )
+        .unwrap();
+        let executed = handle(
+            &f.completed,
+            &f.context,
+            &execute_command(&f, "sign", &attempt, prepared.sealed_state, approved()),
+            1,
+        )
+        .unwrap();
+        let ExecutionOutput::SigningPermit {
+            signing_session_id, ..
+        } = executed.output.decode().unwrap()
+        else {
+            panic!("expected a signing permit");
+        };
+        assert_eq!(signing_session_id, session);
+    }
+}

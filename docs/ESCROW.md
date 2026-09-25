@@ -15,10 +15,19 @@ Old draft signatures do not authorize v2 policies.
 | Permission | Result |
 | --- | --- |
 | `Sign` | A permit for an exact signing scope and named signing session. |
+| `SignBip340` | Plain BIP340 signatures by the participant's untweaked key over 32-byte digests, such as taproot script-path sighashes. |
 | `ReleaseSecret` | One named secret encrypted to its authorized recipient. |
 | `ReleaseSigningKey` | The participant key encrypted to its independently authorized recipient. |
 
 Signing permission does not authorize either release.
+
+`SignBip340` signs outside any MuSig2 session.
+The scope names the participant's own key and lists each digest, and the output returns one signature per item.
+As a late-bound permission it requires a verifier rule, so the verifier computes the digests from the transaction it authorizes.
+With `VerifierAuthorizedAttempts` repetition, each fresh attempt may prepare and execute once with its own messages.
+This suits protocols such as Ark, where a retried batch signs new transactions.
+It also applies to a verifier-authorized `Sign`, where each attempt needs its own MuSig2 signing session.
+That repetition is refused for release permissions and for exact scopes.
 The ordinary keygen export bridge rejects escrow-protected keys.
 Unknown versions, conditions, actions, and verifier selections fail closed.
 An application commitment authenticates bytes; it does not establish their meaning.
@@ -56,6 +65,20 @@ The first successful execution freezes the permission; replacement preparation d
 This state does not establish global consumption across hostile rollback.
 No receipt permits secret nonce reuse or arbitrary replacement messages.
 
+## Pools that never fill
+
+An `unbound` grant needs no application binding. Its verifier authorizes each action from the participant's registered policy alone.
+It is allowed only for verifier-authorized `SignBip340`, such as refunding an escrow whose pool never formed.
+
+`ConfidentialSession::register_partial_roster` registers only the participants who are present, including the coordinator.
+It never distributes peer keys or requests an aggregate, so no key is ever built from the subset.
+Each enclave that holds a present participant keeps the session registering.
+A registering session serves unbound prepare and execute for its registered participants, and refuses every other escrow and signing command.
+Registrations remain bound to their manifest slot, session, and enclave, so a subset cannot add a participant or reuse another session's registration.
+A registration batch the enclave refuses changes nothing, and the session keeps the registrations it holds.
+Calling it again replays the exact journaled requests: an enclave that still holds the session answers them without effect, and one that restarted applies them again.
+Save the journal of the first call durably, since the enclaves bind the session to its route. A registered roster cannot change.
+
 ## Trusted verifiers
 
 `EscrowVerifier` separates enrollment, binding, preparation, and execution checks.
@@ -84,4 +107,4 @@ Those capabilities are absent from Keymeld's feature set and gateway handlers.
 See the [Coordinator deployment documentation](https://github.com/5day4cast/coordinator/blob/main/docs/COORDINATOR_ENCLAVE.md) for that application's build boundary.
 
 The current custody context is a managed session participant.
-Persistent imported-key policies, plain BIP340 permissions, and external-party MuSig2 require additional primitives.
+Persistent imported-key policies and external-party MuSig2 require additional primitives.

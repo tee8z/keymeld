@@ -60,6 +60,26 @@ impl ContextAwareSession {
         Ok(())
     }
 
+    /// Refuse a registration batch that a session still registering would reject, before
+    /// dispatch consumes the session. Applying it would fail the session partway, and lose
+    /// the registrations it holds. Exact retries of a batch already applied must be skipped
+    /// before this, since each registration in them now fills its slot.
+    pub(crate) fn check_registration_batch(
+        &self,
+        cmd: &EnclaveCommand,
+    ) -> Result<(), EnclaveError> {
+        match (&self.status, &self.session_context, cmd) {
+            (
+                OperatorStatus::Keygen(KeygenStatus::Distributing(state)),
+                SessionContext::Keygen(keygen_ctx),
+                EnclaveCommand::Musig(keymeld_core::protocol::MusigCommand::Keygen(
+                    keymeld_core::protocol::KeygenCommand::AddParticipantsBatch(batch),
+                )),
+            ) => state.check_participants(batch, keygen_ctx, &self.enclave_context),
+            _ => Ok(()),
+        }
+    }
+
     fn process_validated(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
         debug!(
             "Processing command {:?} for session {}",

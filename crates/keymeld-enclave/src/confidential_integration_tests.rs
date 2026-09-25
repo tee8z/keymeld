@@ -23,13 +23,13 @@ use keymeld_sdk::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
-struct RelayState {
-    operators: Arc<Mutex<BTreeMap<EnclaveId, Arc<EnclaveOperator>>>>,
-    requests: Arc<Mutex<Vec<String>>>,
-    responses: Arc<Mutex<Vec<String>>>,
+pub(super) struct RelayState {
+    pub(super) operators: Arc<Mutex<BTreeMap<EnclaveId, Arc<EnclaveOperator>>>>,
+    pub(super) requests: Arc<Mutex<Vec<String>>>,
+    pub(super) responses: Arc<Mutex<Vec<String>>>,
 }
 
-async fn public_key(
+pub(super) async fn public_key(
     State(state): State<RelayState>,
     Path(id): Path<u32>,
 ) -> Json<serde_json::Value> {
@@ -40,7 +40,7 @@ async fn public_key(
     }))
 }
 
-async fn relay(
+pub(super) async fn relay(
     State(state): State<RelayState>,
     Json(envelope): Json<EnclaveEnvelope>,
 ) -> Json<EnclaveEnvelope> {
@@ -68,9 +68,9 @@ async fn relay(
 }
 
 #[derive(Default)]
-struct Checkpoint {
-    fail_next: AtomicBool,
-    saved: Mutex<Option<String>>,
+pub(super) struct Checkpoint {
+    pub(super) fail_next: AtomicBool,
+    pub(super) saved: Mutex<Option<String>>,
 }
 impl ConfidentialCheckpoint for Checkpoint {
     fn save<'a>(&'a self, journal: &'a ConfidentialJournal) -> CheckpointFuture<'a> {
@@ -646,6 +646,7 @@ fn document_policy(
                 ActionGrant {
                     preparation: escrow::PreparationPolicy::Single,
                     repetition: escrow::Repetition::Once,
+                    unbound: false,
                     condition: Condition::VerifierRule {
                         rule: "approved_document".into(),
                     },
