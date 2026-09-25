@@ -477,6 +477,100 @@ impl<'a> ConfidentialSession<'a> {
         self.complete_keygen(registrations).await
     }
 
+    /// Register only the participants present, for a pool that will never fill, so that
+    /// each of them can still be refunded.
+    ///
+    /// Keygen is never completed: no peer keys are distributed and no aggregate key exists.
+    /// Each enclave holding a present participant keeps the session registering, and serves
+    /// only that participant's unbound escrow permissions, such as a refund signed by their
+    /// own key. The roster must include the coordinator and at least one other participant,
+    /// and must leave out at least one; the complete roster goes through
+    /// [`Self::complete_keygen`].
+    ///
+    /// Call it again before each use. It sends each enclave its original requests again,
+    /// exactly, and nothing new: one that still holds the session answers them without
+    /// effect, and one that restarted applies them again. Once registered, the roster cannot
+    /// change.
+    ///
+    /// Save the journal of the first call durably. The enclaves bind the session to the
+    /// journal's route, so a later call from a journal that lost those requests starts over on
+    /// a new route, and is refused.
+    pub async fn register_partial_roster(
+        &mut self,
+        registrations: &BTreeMap<UserId, ParticipantRegistrationData>,
+    ) -> Result<(), SdkError> {
+        let authorized: BTreeSet<_> = self
+            .manifest
+            .manifest
+            .participant_verifiers
+            .keys()
+            .collect();
+        let present: BTreeSet<_> = registrations.keys().collect();
+        let coordinator = &self.manifest.manifest.coordinator_user_id;
+        if !present.is_subset(&authorized) {
+            return Err(invalid(
+                "Registration is outside the approved participant roster",
+            ));
+        }
+        if present == authorized {
+            return Err(invalid(
+                "A complete roster completes keygen instead of registering a partial one",
+            ));
+        }
+        if !present.contains(coordinator) || present.len() < 2 {
+            return Err(invalid(
+                "A partial roster needs the coordinator and at least one other participant",
+            ));
+        }
+        let grouped = self.group_registrations(registrations)?;
+        // Check the whole roster against what was sent before, before sending anything.
+        let mut restorable = false;
+        for enclave_id in self.enclaves.keys().copied().collect::<Vec<_>>() {
+            if ["keygen/distribute", "keygen/aggregate"]
+                .iter()
+                .any(|stage| self.journal.recorded_command(stage, enclave_id).is_some())
+            {
+                return Err(invalid(
+                    "Keygen already ran for the complete roster; restore it instead",
+                ));
+            }
+            let saved = self
+                .journal
+                .commands
+                .get(&format!("keygen/register/{}", enclave_id.as_u32()));
+            let expected = grouped
+                .get(&enclave_id)
+                .map(|local| self.stage_commitment("keygen/register", enclave_id, local))
+                .transpose()?;
+            match (saved, expected) {
+                (None, _) => {}
+                (Some(saved), Some(expected)) if saved.input_commitment == expected => {
+                    restorable = true;
+                }
+                _ => return Err(invalid("A registered partial roster cannot change")),
+            }
+        }
+        if restorable {
+            // A presence probe can't serve here: an enclave answers it only for a session
+            // whose keygen completed. Exact retries need none. An enclave that still holds the
+            // session answers them from its reply cache, or skips them as commands it already
+            // ran. One that restarted, or was sent only part of them, applies them again.
+            for id in grouped.keys().copied().collect::<Vec<_>>() {
+                for stage in ["keygen/init", "keygen/register"] {
+                    if self.journal.recorded_command(stage, id).is_some() {
+                        self.replay_recorded(stage, id).await?;
+                    }
+                }
+            }
+        }
+        for (enclave_id, local) in &grouped {
+            self.init_keygen(*enclave_id).await?;
+            // The peer keys are for completing keygen, which a partial roster never does.
+            self.register_participants(*enclave_id, local).await?;
+        }
+        Ok(())
+    }
+
     pub async fn complete_keygen(
         &mut self,
         registrations: &BTreeMap<UserId, ParticipantRegistrationData>,
