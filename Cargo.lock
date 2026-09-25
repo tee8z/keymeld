@@ -2456,7 +2456,7 @@ dependencies = [
  "rcgen",
  "rustls-pki-types",
  "rustls-webpki",
- "secp256k1 0.31.1",
+ "secp256k1 0.33.1",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -2501,7 +2501,7 @@ dependencies = [
  "openssl",
  "pkcs1",
  "rand 0.9.5",
- "secp256k1 0.31.1",
+ "secp256k1 0.33.1",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -2533,7 +2533,7 @@ dependencies = [
  "musig2",
  "rand 0.9.5",
  "reqwest",
- "secp256k1 0.31.1",
+ "secp256k1 0.33.1",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2567,7 +2567,7 @@ dependencies = [
  "moka",
  "prometheus",
  "rand 0.9.5",
- "secp256k1 0.31.1",
+ "secp256k1 0.33.1",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2601,7 +2601,7 @@ dependencies = [
  "keymeld-core",
  "mockito",
  "reqwest",
- "secp256k1 0.31.1",
+ "secp256k1 0.33.1",
  "serde",
  "serde_json",
  "sha2",
@@ -3866,6 +3866,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "secp256k1"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7f404a8dab7a7a5a631e741d8699aa9c8e1d689fc26ccf897c7187565490b69"
+dependencies = [
+ "rand 0.9.5",
+ "secp256k1-sys 0.14.1",
+ "serde",
+]
+
+[[package]]
 name = "secp256k1-sys"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3879,6 +3890,15 @@ name = "secp256k1-sys"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcb913707158fadaf0d8702c2db0e857de66eb003ccfdda5924b5f5ac98efb38"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "secp256k1-sys"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b2992d4a3cd244539a7d5d0966aadbe5ca7fb868a5d7e38c29499b9e709bbd"
 dependencies = [
  "cc",
 ]
