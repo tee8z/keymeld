@@ -859,7 +859,9 @@ fn only_an_unbound_permission_prepares_without_a_binding_receipt() {
 
     // A bound permission acts under the binding it is given.
     request("spend", receipt.clone()).validate(&policy).unwrap();
-    assert!(request("spend", Payload::default()).validate(&policy).is_err());
+    assert!(request("spend", Payload::default())
+        .validate(&policy)
+        .is_err());
 
     // An unbound one acts under a binding the enclave derives, so it is given none.
     request("refund", Payload::default())

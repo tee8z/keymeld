@@ -1495,12 +1495,12 @@ fn escrow_session_snapshot(
     session: &ContextAwareSession,
 ) -> Result<crate::operations::escrow::EscrowSessionSnapshot, EnclaveError> {
     match &session.status {
-        OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => {
-            Ok(crate::operations::escrow::EscrowSessionSnapshot::new(completed))
-        }
-        OperatorStatus::Keygen(KeygenStatus::Distributing(distributing)) => Ok(
-            crate::operations::escrow::EscrowSessionSnapshot::registering(distributing),
+        OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => Ok(
+            crate::operations::escrow::EscrowSessionSnapshot::new(completed),
         ),
+        OperatorStatus::Keygen(KeygenStatus::Distributing(distributing)) => {
+            Ok(crate::operations::escrow::EscrowSessionSnapshot::registering(distributing))
+        }
         _ => Err(EnclaveError::Validation(
             keymeld_core::protocol::ValidationError::Other(
                 "Escrow operations require an initialized keygen session".into(),

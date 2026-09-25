@@ -219,6 +219,14 @@ impl Queue {
                 }
             }
 
+            // A refused registration must not fail a session whose participants are still
+            // registering: for a pool that never filled, they are what its refunds need.
+            // Check the whole batch now that exact retries have been skipped.
+            if let Err(error) = current_session.check_registration_batch(&command.command) {
+                processing_result = Some(Err(error));
+                return current_session;
+            }
+
             // Process the inner EnclaveCommand using the session's owned context
             match current_session.process(&command.command) {
                 Ok(()) => {

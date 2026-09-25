@@ -65,6 +65,20 @@ The first successful execution freezes the permission; replacement preparation d
 This state does not establish global consumption across hostile rollback.
 No receipt permits secret nonce reuse or arbitrary replacement messages.
 
+## Pools that never fill
+
+An `unbound` grant needs no application binding. Its verifier authorizes each action from the participant's registered policy alone.
+It is allowed only for verifier-authorized `SignBip340`, such as refunding an escrow whose pool never formed.
+
+`ConfidentialSession::register_partial_roster` registers only the participants who are present, including the coordinator.
+It never distributes peer keys or requests an aggregate, so no key is ever built from the subset.
+Each enclave that holds a present participant keeps the session registering.
+A registering session serves unbound prepare and execute for its registered participants, and refuses every other escrow and signing command.
+Registrations remain bound to their manifest slot, session, and enclave, so a subset cannot add a participant or reuse another session's registration.
+A registration batch the enclave refuses changes nothing, and the session keeps the registrations it holds.
+Calling it again replays the exact journaled requests: an enclave that still holds the session answers them without effect, and one that restarted applies them again.
+Save the journal of the first call durably, since the enclaves bind the session to its route. A registered roster cannot change.
+
 ## Trusted verifiers
 
 `EscrowVerifier` separates enrollment, binding, preparation, and execution checks.

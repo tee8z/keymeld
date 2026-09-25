@@ -105,6 +105,12 @@ impl KeygenStatus {
             // Escrow operations preserve the completed MuSig key session.
             (KgCompleted(s), Escrow(_)) => Ok(KgCompleted(s)),
 
+            // A session whose participants are still registering serves only unbound escrow
+            // actions, and the escrow handler refuses every other one. Passing the command
+            // through leaves that decision to the handler: an invalid transition here would
+            // fail the session and lose its registrations.
+            (Distributing(s), Escrow(_)) => Ok(Distributing(s)),
+
             // Idempotent: late-arriving commands on completed session
             (KgCompleted(s), KgInitSession(_))
             | (KgCompleted(s), AddParticipantsBatch(_))
