@@ -52,7 +52,7 @@ test-support = []
 keymeld-sdk = { path = "../keymeld-sdk" }
 axum = { workspace = true }
 base64 = "0.22"
-spki = "0.7.3"
+spki = "0.8.0"
 
 [[bin]]
 name = "keymeld-enclave"
