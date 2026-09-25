@@ -18,7 +18,7 @@ serde_json = { workspace = true }
 bincode = { workspace = true }
 serde_cbor = { workspace = true }
 serde_bytes = "0.11"
-aws-nitro-enclaves-nsm-api = "0.4"
+aws-nitro-enclaves-nsm-api = "0.5"
 aws-nitro-enclaves-cose = "0.5"
 aws-config = { workspace = true }
 # Modern Hyper 1 / rustls 0.23 connector; the SDK default also enables legacy TLS.
