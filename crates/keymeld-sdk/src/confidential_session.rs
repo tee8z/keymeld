@@ -193,16 +193,7 @@ impl<'a> ConfidentialSession<'a> {
             return Err(invalid("Invalid confidential journal stage"));
         }
         let key = format!("{stage}/{}", enclave_id.as_u32());
-        let commitment = authorization_digest(
-            "confidential-client-stage-v1",
-            &(
-                self.manifest.digest()?,
-                self.recipients,
-                enclave_id,
-                stage,
-                input,
-            ),
-        )?;
+        let commitment = self.stage_commitment(stage, enclave_id, input)?;
         let enclave = self
             .enclaves
             .get(&enclave_id)
@@ -266,6 +257,25 @@ impl<'a> ConfidentialSession<'a> {
             ))),
             response => Ok(response),
         }
+    }
+
+    /// What a journaled stage commits to: its inputs, before randomized encryption.
+    fn stage_commitment<T: Serialize>(
+        &self,
+        stage: &str,
+        enclave_id: EnclaveId,
+        input: &T,
+    ) -> Result<[u8; 32], SdkError> {
+        Ok(authorization_digest(
+            "confidential-client-stage-v1",
+            &(
+                self.manifest.digest()?,
+                self.recipients,
+                enclave_id,
+                stage,
+                input,
+            ),
+        )?)
     }
 
     /// Retry only a definitively rejected, authenticated enclave command.
@@ -375,37 +385,8 @@ impl<'a> ConfidentialSession<'a> {
             .journal
             .opaque_route_id
             .get_or_insert_with(Uuid::now_v7);
-        let mut missing = BTreeSet::new();
-        for (id, enclave) in &self.enclaves {
-            // A fresh read-only challenge prevents a cached presence response
-            // from concealing a restart.
-            let request = self.transport.prepare(
-                enclave,
-                route_id,
-                Command::new(EnclaveCommand::System(SystemCommand::CheckKeygenSession {
-                    keygen_session_id: self.manifest.manifest.keygen_session_id.clone(),
-                    recipient_authorization: Box::new(self.recipients.clone()),
-                })),
-                self.authority,
-                self.reply_key,
-            )?;
-            match self
-                .transport
-                .execute(enclave, &request, self.reply_key)
-                .await?
-                .response
-            {
-                EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(true)) => {}
-                EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(false)) => {
-                    missing.insert(*id);
-                }
-                _ => {
-                    return Err(invalid(
-                        "Cannot authenticate completed confidential keygen state",
-                    ))
-                }
-            }
-        }
+        let all = self.enclaves.keys().copied().collect::<Vec<_>>();
+        let missing = self.missing_keygen_sessions(route_id, &all).await?;
         // Restoring a restart replays journaled keygen commands, so it is only
         // possible once complete_keygen has recorded them. A session with no
         // journaled keygen stage is a first run instead: fall through and let
@@ -458,19 +439,13 @@ impl<'a> ConfidentialSession<'a> {
             for stage in ["keygen/init", "keygen/register", "keygen/distribute"] {
                 for id in &missing {
                     let key = format!("{stage}/{}", id.as_u32());
-                    let Some(saved) = self.journal.commands.get(&key) else {
+                    if !self.journal.commands.contains_key(&key) {
                         if stage == "keygen/distribute" && self.enclaves.len() == 1 {
                             continue;
                         }
                         return Err(invalid("Missing original keygen restoration request"));
-                    };
-                    let outcome = self
-                        .transport
-                        .execute(&self.enclaves[id], &saved.request, self.reply_key)
-                        .await?;
-                    if matches!(outcome.response, EnclaveOutcome::Error(_)) {
-                        return Err(invalid("Enclave rejected exact keygen restoration"));
                     }
+                    self.replay_recorded(stage, *id).await?;
                 }
             }
             for id in &missing {
@@ -518,134 +493,16 @@ impl<'a> ConfidentialSession<'a> {
                 "Keygen requires the complete authorized registration roster",
             ));
         }
-        let mut grouped: BTreeMap<EnclaveId, Vec<ParticipantRegistrationData>> = BTreeMap::new();
-        for (user, registration) in registrations {
-            if user != &registration.user_id {
-                return Err(invalid("Registration map substituted a participant"));
-            }
-            registration
-                .registration_authorization
-                .verify(self.manifest, &registration.enclave_encrypted_data)?;
-            grouped
-                .entry(self.registration_enclave(registration)?)
-                .or_default()
-                .push(registration.clone());
-        }
-        let enclave_keys = self
-            .recipients
-            .recipient_public_keys
-            .iter()
-            .map(|(enclave_id, key)| EnclavePublicKeyInfo {
-                enclave_id: *enclave_id,
-                public_key: hex::encode(key),
-            })
-            .collect::<Vec<_>>();
-        let expected_participants = self
-            .manifest
-            .manifest
-            .participant_verifiers
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let grouped = self.group_registrations(registrations)?;
         let coordinator_enclave =
             self.recipients.user_enclave_assignments[&self.manifest.manifest.coordinator_user_id];
         for enclave_id in grouped.keys().copied().collect::<Vec<_>>() {
-            let manifest = self.manifest.clone();
-            let recipients = self.recipients.clone();
-            let credentials = self.credentials;
-            let key = hex::encode(&self.recipients.recipient_public_keys[&enclave_id]);
-            let expected = expected_participants.clone();
-            let public_keys = enclave_keys.clone();
-            let response = self
-                .command_once("keygen/init", enclave_id, &(), move || {
-                    Ok(EnclaveCommand::Musig(MusigCommand::Keygen(
-                        KeygenCommand::InitSession(InitKeygenSessionCommand {
-                            keygen_session_id: manifest.manifest.keygen_session_id.clone(),
-                            coordinator_encrypted_private_key: None,
-                            coordinator_user_id: (enclave_id == coordinator_enclave)
-                                .then(|| manifest.manifest.coordinator_user_id.clone()),
-                            encrypted_session_secret: Some(
-                                credentials.encrypt_secret_for_enclave(&key)?,
-                            ),
-                            timeout_secs: manifest.manifest.timeout_secs,
-                            expected_participant_count: expected.len(),
-                            expected_participants: expected,
-                            enclave_public_keys: public_keys,
-                            encrypted_taproot_tweak: manifest
-                                .manifest
-                                .encrypted_taproot_tweak
-                                .clone(),
-                            subset_definitions: manifest.manifest.subset_definitions.clone(),
-                            recipient_authorization: Box::new(recipients),
-                            authorization_manifest: Box::new(manifest),
-                        }),
-                    )))
-                })
-                .await?;
-            match response {
-                EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::KeygenInitialized(
-                    value,
-                ))) if value.keygen_session_id == self.manifest.manifest.keygen_session_id => {}
-                EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::Success)) => {}
-                _ => {
-                    return Err(invalid(
-                        "Unexpected confidential keygen initialization result",
-                    ))
-                }
-            }
+            self.init_keygen(enclave_id).await?;
         }
         let mut distributed: BTreeMap<EnclaveId, BTreeMap<UserId, String>> = BTreeMap::new();
         for (enclave_id, local) in &grouped {
-            let local_copy = local.clone();
-            let session = self.manifest.manifest.keygen_session_id.clone();
-            let response = self
-                .command_once("keygen/register", *enclave_id, local, move || {
-                    Ok(EnclaveCommand::Musig(MusigCommand::Keygen(
-                        KeygenCommand::AddParticipantsBatch(AddParticipantsBatchCommand {
-                            keygen_session_id: session,
-                            participants: local_copy,
-                        }),
-                    )))
-                })
-                .await?;
-            let EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::ParticipantsAddedBatch(
-                response,
-            ))) = response
-            else {
-                return Err(invalid("Unexpected confidential participant batch result"));
-            };
-            let expected: BTreeSet<_> = local.iter().map(|p| &p.user_id).collect();
-            if response.participants.len() != expected.len()
-                || response.participants.iter().collect::<BTreeSet<_>>() != expected
-                || response.encrypted_public_keys.len() != expected.len()
-            {
-                return Err(invalid("Enclave changed the registered participant set"));
-            }
-            let mut seen = BTreeSet::new();
-            for (user, keys) in response.encrypted_public_keys {
-                if !expected.contains(&user) || !seen.insert(user.clone()) {
-                    return Err(invalid(
-                        "Enclave returned duplicate or foreign participant keys",
-                    ));
-                }
-                let mut destinations = BTreeSet::new();
-                for key in keys {
-                    if !self.enclaves.contains_key(&key.target_enclave_id)
-                        || key.target_enclave_id == *enclave_id
-                        || !destinations.insert(key.target_enclave_id)
-                    {
-                        return Err(invalid(
-                            "Enclave returned an unapproved public-key destination",
-                        ));
-                    }
-                    distributed
-                        .entry(key.target_enclave_id)
-                        .or_default()
-                        .insert(user.clone(), key.encrypted_public_key);
-                }
-                if destinations.len() != self.enclaves.len().saturating_sub(1) {
-                    return Err(invalid("Enclave omitted a required public-key recipient"));
-                }
+            for (target, user, key) in self.register_participants(*enclave_id, local).await? {
+                distributed.entry(target).or_default().insert(user, key);
             }
         }
         for (enclave_id, keys) in distributed {
@@ -694,6 +551,218 @@ impl<'a> ConfidentialSession<'a> {
             return Err(invalid("Unexpected confidential aggregate-key result"));
         };
         self.verify_roster(response, registrations)
+    }
+
+    /// Check each registration against the manifest and its assigned enclave, grouped by
+    /// the enclave that holds it.
+    fn group_registrations(
+        &self,
+        registrations: &BTreeMap<UserId, ParticipantRegistrationData>,
+    ) -> Result<BTreeMap<EnclaveId, Vec<ParticipantRegistrationData>>, SdkError> {
+        let mut grouped: BTreeMap<EnclaveId, Vec<ParticipantRegistrationData>> = BTreeMap::new();
+        for (user, registration) in registrations {
+            if user != &registration.user_id {
+                return Err(invalid("Registration map substituted a participant"));
+            }
+            registration
+                .registration_authorization
+                .verify(self.manifest, &registration.enclave_encrypted_data)?;
+            grouped
+                .entry(self.registration_enclave(registration)?)
+                .or_default()
+                .push(registration.clone());
+        }
+        Ok(grouped)
+    }
+
+    /// Initialize the keygen session on one enclave, for every participant the manifest
+    /// authorized.
+    async fn init_keygen(&mut self, enclave_id: EnclaveId) -> Result<(), SdkError> {
+        let enclave_keys = self
+            .recipients
+            .recipient_public_keys
+            .iter()
+            .map(|(enclave_id, key)| EnclavePublicKeyInfo {
+                enclave_id: *enclave_id,
+                public_key: hex::encode(key),
+            })
+            .collect::<Vec<_>>();
+        let expected = self
+            .manifest
+            .manifest
+            .participant_verifiers
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let coordinator_enclave =
+            self.recipients.user_enclave_assignments[&self.manifest.manifest.coordinator_user_id];
+        let manifest = self.manifest.clone();
+        let recipients = self.recipients.clone();
+        let credentials = self.credentials;
+        let key = hex::encode(&self.recipients.recipient_public_keys[&enclave_id]);
+        let response = self
+            .command_once("keygen/init", enclave_id, &(), move || {
+                Ok(EnclaveCommand::Musig(MusigCommand::Keygen(
+                    KeygenCommand::InitSession(InitKeygenSessionCommand {
+                        keygen_session_id: manifest.manifest.keygen_session_id.clone(),
+                        coordinator_encrypted_private_key: None,
+                        coordinator_user_id: (enclave_id == coordinator_enclave)
+                            .then(|| manifest.manifest.coordinator_user_id.clone()),
+                        encrypted_session_secret: Some(
+                            credentials.encrypt_secret_for_enclave(&key)?,
+                        ),
+                        timeout_secs: manifest.manifest.timeout_secs,
+                        expected_participant_count: expected.len(),
+                        expected_participants: expected,
+                        enclave_public_keys: enclave_keys,
+                        encrypted_taproot_tweak: manifest.manifest.encrypted_taproot_tweak.clone(),
+                        subset_definitions: manifest.manifest.subset_definitions.clone(),
+                        recipient_authorization: Box::new(recipients),
+                        authorization_manifest: Box::new(manifest),
+                    }),
+                )))
+            })
+            .await?;
+        match response {
+            EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::KeygenInitialized(
+                value,
+            ))) if value.keygen_session_id == self.manifest.manifest.keygen_session_id => Ok(()),
+            EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::Success)) => Ok(()),
+            _ => Err(invalid(
+                "Unexpected confidential keygen initialization result",
+            )),
+        }
+    }
+
+    /// Register one enclave's participants. Returns the public key it encrypted for each peer
+    /// enclave, as `(peer, participant, ciphertext)`.
+    async fn register_participants(
+        &mut self,
+        enclave_id: EnclaveId,
+        local: &[ParticipantRegistrationData],
+    ) -> Result<Vec<(EnclaveId, UserId, String)>, SdkError> {
+        let participants = local.to_vec();
+        let copy = participants.clone();
+        let session = self.manifest.manifest.keygen_session_id.clone();
+        let response = self
+            .command_once("keygen/register", enclave_id, &participants, move || {
+                Ok(EnclaveCommand::Musig(MusigCommand::Keygen(
+                    KeygenCommand::AddParticipantsBatch(AddParticipantsBatchCommand {
+                        keygen_session_id: session,
+                        participants: copy,
+                    }),
+                )))
+            })
+            .await?;
+        let EnclaveOutcome::Musig(MusigOutcome::Keygen(KeygenOutcome::ParticipantsAddedBatch(
+            response,
+        ))) = response
+        else {
+            return Err(invalid("Unexpected confidential participant batch result"));
+        };
+        let expected: BTreeSet<_> = local.iter().map(|p| &p.user_id).collect();
+        if response.participants.len() != expected.len()
+            || response.participants.iter().collect::<BTreeSet<_>>() != expected
+            || response.encrypted_public_keys.len() != expected.len()
+        {
+            return Err(invalid("Enclave changed the registered participant set"));
+        }
+        let mut seen = BTreeSet::new();
+        let mut peer_keys = Vec::new();
+        for (user, keys) in response.encrypted_public_keys {
+            if !expected.contains(&user) || !seen.insert(user.clone()) {
+                return Err(invalid(
+                    "Enclave returned duplicate or foreign participant keys",
+                ));
+            }
+            let mut destinations = BTreeSet::new();
+            for key in keys {
+                if !self.enclaves.contains_key(&key.target_enclave_id)
+                    || key.target_enclave_id == enclave_id
+                    || !destinations.insert(key.target_enclave_id)
+                {
+                    return Err(invalid(
+                        "Enclave returned an unapproved public-key destination",
+                    ));
+                }
+                peer_keys.push((
+                    key.target_enclave_id,
+                    user.clone(),
+                    key.encrypted_public_key,
+                ));
+            }
+            if destinations.len() != self.enclaves.len().saturating_sub(1) {
+                return Err(invalid("Enclave omitted a required public-key recipient"));
+            }
+        }
+        Ok(peer_keys)
+    }
+
+    /// Which of `enclaves` do not hold this keygen session, as after a restart. A fresh
+    /// read-only challenge prevents a cached presence response from concealing one.
+    async fn missing_keygen_sessions(
+        &self,
+        route_id: Uuid,
+        enclaves: &[EnclaveId],
+    ) -> Result<BTreeSet<EnclaveId>, SdkError> {
+        let mut missing = BTreeSet::new();
+        for id in enclaves {
+            let enclave = self
+                .enclaves
+                .get(id)
+                .ok_or_else(|| invalid("Unapproved confidential recipient"))?;
+            let request = self.transport.prepare(
+                enclave,
+                route_id,
+                Command::new(EnclaveCommand::System(SystemCommand::CheckKeygenSession {
+                    keygen_session_id: self.manifest.manifest.keygen_session_id.clone(),
+                    recipient_authorization: Box::new(self.recipients.clone()),
+                })),
+                self.authority,
+                self.reply_key,
+            )?;
+            match self
+                .transport
+                .execute(enclave, &request, self.reply_key)
+                .await?
+                .response
+            {
+                EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(true)) => {}
+                EnclaveOutcome::System(SystemOutcome::KeygenSessionPresent(false)) => {
+                    missing.insert(*id);
+                }
+                _ => {
+                    return Err(invalid(
+                        "Cannot authenticate completed confidential keygen state",
+                    ))
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Send a journaled request again, exactly, and keep the outcome first recorded for it.
+    ///
+    /// An enclave that restarted and lost the session applies it again. A new outcome would
+    /// hold newly randomized ciphertext, so the journal keeps the original.
+    async fn replay_recorded(&self, stage: &str, enclave_id: EnclaveId) -> Result<(), SdkError> {
+        let saved = self
+            .journal
+            .commands
+            .get(&format!("{stage}/{}", enclave_id.as_u32()))
+            .ok_or_else(|| invalid("Missing journaled request to replay"))?;
+        let enclave = self
+            .enclaves
+            .get(&enclave_id)
+            .ok_or_else(|| invalid("Unapproved confidential recipient"))?;
+        let outcome = self
+            .transport
+            .execute(enclave, &saved.request, self.reply_key)
+            .await?;
+        if matches!(outcome.response, EnclaveOutcome::Error(_)) {
+            return Err(invalid("Enclave rejected exact keygen restoration"));
+        }
+        Ok(())
     }
 
     fn verify_roster(
