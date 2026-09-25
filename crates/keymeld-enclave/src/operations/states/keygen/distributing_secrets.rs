@@ -610,4 +610,122 @@ mod registration_tests {
             assert_eq!(data.participants, vec![user_id.clone()]);
         }
     }
+
+    /// An escrow command can reach a session whose participants are still registering, as in
+    /// a pool that never filled. Whether it may act is the escrow handler's decision. The state
+    /// machine must pass it through rather than fail the session and lose its registrations.
+    #[cfg(feature = "escrow")]
+    #[tokio::test]
+    async fn an_escrow_command_leaves_a_registering_session_registering() {
+        use keymeld_core::escrow::{
+            protocol::{EscrowCommand, Operation, Payload, RequestContext},
+            ApplicationContext, EscrowContext,
+        };
+        use keymeld_core::protocol::{Command, EnclaveCommand, KeygenCommand, MusigCommand};
+
+        let f = fixture();
+        let session_id = f.manifest.manifest.keygen_session_id.clone();
+        let user_id = f.participant.user_id.clone();
+        let encrypted_secret = hex::encode(
+            SecureCrypto::ecies_encrypt(
+                &PublicKey::from_slice(&f.enclave.public_key).unwrap(),
+                f.session_secret.as_bytes(),
+            )
+            .unwrap(),
+        );
+        let enclave = Arc::new(RwLock::new(f.enclave));
+        let mut context = match SessionContext::new_keygen(session_id.clone()) {
+            SessionContext::Keygen(context) => context,
+            _ => unreachable!(),
+        };
+        let recipient_key = enclave.read().unwrap().public_key.clone();
+        let enclave_id = enclave.read().unwrap().enclave_id;
+        let command = InitKeygenSessionCommand {
+            recipient_authorization: Box::new(
+                keymeld_core::authorization::EnclaveRecipientAuthorization::sign(
+                    &f.manifest,
+                    BTreeMap::from([(user_id.clone(), enclave_id)]),
+                    BTreeMap::from([(enclave_id, recipient_key.clone())]),
+                    &[11; 32],
+                )
+                .unwrap(),
+            ),
+            keygen_session_id: session_id.clone(),
+            authorization_manifest: Box::new(f.manifest.clone()),
+            coordinator_encrypted_private_key: None,
+            coordinator_user_id: Some(user_id.clone()),
+            encrypted_session_secret: Some(encrypted_secret),
+            timeout_secs: 300,
+            expected_participant_count: 1,
+            expected_participants: vec![user_id.clone()],
+            enclave_public_keys: vec![keymeld_core::protocol::EnclavePublicKeyInfo {
+                enclave_id,
+                public_key: hex::encode(recipient_key),
+            }],
+            encrypted_taproot_tweak: f.manifest.manifest.encrypted_taproot_tweak.clone(),
+            subset_definitions: Vec::new(),
+        };
+        let KeygenStatus::Distributing(state) = super::super::Initialized::new(session_id.clone())
+            .init_session(&command, &mut context, &enclave)
+            .unwrap()
+        else {
+            panic!("expected distributing state");
+        };
+        let sessions = Arc::new(dashmap::DashMap::new());
+        sessions.insert(
+            session_id.clone(),
+            crate::operations::ContextAwareSession::new(
+                crate::operations::OperatorStatus::Keygen(KeygenStatus::Distributing(state)),
+                SessionContext::Keygen(context),
+                enclave,
+            ),
+        );
+        let queue = crate::queue::Queue::new(sessions.clone());
+
+        let escrow =
+            EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(EscrowCommand {
+                context: RequestContext {
+                    schema_version: keymeld_core::escrow::SCHEMA_VERSION,
+                    operation: Operation::Prepare,
+                    escrow: EscrowContext {
+                        keygen_session_id: session_id.clone(),
+                        user_id: user_id.clone(),
+                        escrow_id: uuid::Uuid::now_v7(),
+                        manifest_digest: f.manifest.digest().unwrap().try_into().unwrap(),
+                        application: ApplicationContext::commit("refund".into(), 1, b"policy")
+                            .unwrap(),
+                    },
+                    policy_digest: [1; 32],
+                    request_id: uuid::Uuid::now_v7(),
+                    action_id: Some("refund".into()),
+                    attempt: None,
+                },
+                encrypted_request: Payload::new(vec![1]).unwrap(),
+                authorization: Vec::new(),
+            })));
+        queue
+            .process_command(session_id.clone(), Command::new(escrow))
+            .await
+            .unwrap();
+        assert!(matches!(
+            sessions.get(&session_id).unwrap().status,
+            crate::operations::OperatorStatus::Keygen(KeygenStatus::Distributing(_))
+        ));
+
+        // The session still takes its registration, and completes with it.
+        let registration = EnclaveCommand::Musig(MusigCommand::Keygen(
+            KeygenCommand::AddParticipantsBatch(AddParticipantsBatchCommand {
+                keygen_session_id: session_id.clone(),
+                participants: vec![f.participant],
+            }),
+        ));
+        queue
+            .process_command(session_id.clone(), Command::new(registration))
+            .await
+            .unwrap();
+        assert!(matches!(
+            sessions.get(&session_id).unwrap().status,
+            crate::operations::OperatorStatus::Keygen(KeygenStatus::Completed(_))
+        ));
+    }
 }
