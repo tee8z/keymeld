@@ -27,6 +27,10 @@ Each EIF has a manifest containing its checksum, source commit, version, dirty-s
 Use a clean reviewed commit for release artifacts; reject `source_dirty: true`.
 Review and combine manifests as described in [measured image deployment](SECURITY_OPERATIONS.md#build-and-deploy-measured-images).
 
+The release's `enclave` and `enclave-escrow` container images are the flake's `docker-enclave` and `docker-enclave-escrow` outputs, the same base `just build-eif` builds locally.
+The release workflow may substitute an image that a master build of the same commit produced; the derivation, and so the image, is the same.
+The `gateway` images are assembled from the gateway binary in the release tarball and are not measured.
+
 ## Start and verify
 
 Start the [parent KMS and credential relays](KMS.md#nitro-network-and-credentials) under a supervised service.
