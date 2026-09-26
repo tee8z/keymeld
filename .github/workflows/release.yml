@@ -3,16 +3,28 @@ name: Release
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      warm:
+        description: Build like a push to master and save this branch's caches (publishes nothing)
+        type: boolean
+        default: false
   push:
     tags:
       - "v*.*.*"
+    # A push to master runs the release's build jobs to warm their caches (see
+    # prepare-release), so a tagged release, including a hotfix, compiles only
+    # the workspace's own crates and substitutes the enclave images master built.
+    branches:
+      - master
 
 permissions:
   contents: read
 
+# Tags share one group so publication stays serialised; a newer push to a
+# branch or pull request replaces its older run.
 concurrency:
-  group: release-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.ref_type == 'tag' && 'release' || format('release-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +40,8 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       dry_run: ${{ steps.source.outputs.dry_run }}
       prerelease: ${{ steps.source.outputs.prerelease }}
+      warm: ${{ steps.source.outputs.warm }}
+      build_images: ${{ steps.source.outputs.build_images }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +52,8 @@ jobs:
       - name: Validate committed versions and tag
         id: source
         shell: bash
+        env:
+          INPUT_WARM: ${{ inputs.warm }}
         run: |
           set -euo pipefail
           VERSION=$(cargo metadata --no-deps --format-version 1 --locked | jq -er '
@@ -51,10 +67,18 @@ jobs:
           if [[ "$VERSION" == *-* ]]; then PRERELEASE=true; fi
           SOURCE_SHA=$(git rev-parse HEAD)
           DRY_RUN=true
+          # Warm passes (pushes to master) build like a release to fill the
+          # caches that tagged releases restore; only they save caches. They
+          # skip the gateway images, which only copy binaries.
+          WARM=false
+          BUILD_IMAGES=true
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]]; then
             [[ "$GITHUB_REF_NAME" == "v$VERSION" ]]
             [[ "$(git rev-parse "$GITHUB_REF^{commit}")" == "$SOURCE_SHA" ]]
             DRY_RUN=false
+          elif [[ "$GITHUB_EVENT_NAME" == push || "${INPUT_WARM:-false}" == true ]]; then
+            WARM=true
+            BUILD_IMAGES=false
           fi
           {
             echo "version=$VERSION"
@@ -62,13 +86,47 @@ jobs:
             echo "sha=$SOURCE_SHA"
             echo "dry_run=$DRY_RUN"
             echo "prerelease=$PRERELEASE"
+            echo "warm=$WARM"
+            echo "build_images=$BUILD_IMAGES"
           } >> "$GITHUB_OUTPUT"
           {
             echo "Source commit: $SOURCE_SHA"
             echo "Workspace version: $VERSION"
             echo "Dry run: $DRY_RUN"
             echo "Prerelease: $PRERELEASE"
+            echo "Cache warming pass: $WARM"
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # Lint and test run in parallel; each restores its own dependency cache.
+  lint:
+    name: Lint Release Commit
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Compiled dependencies come from the cache that pushes to master write;
+      # only those runs save it, so a pull request can't change what a release
+      # links. The workspace's own crates always compile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-lint
+          save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Check measured bootstrap and KMS policy rendering
+        run: |
+          bash scripts/test-nitro-bridges.sh
+          bash scripts/test-locked-kms-policy.sh
+          bash scripts/test-nitro-kms-e2e-mocks.sh
+          bash scripts/test-aws-launchers.sh
+          bash scripts/test-build-enclave-eif.sh
 
   test:
     name: Test Release Commit
@@ -80,54 +138,76 @@ jobs:
           ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # See lint: dependencies from master's cache; only master saves it.
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        with:
+          shared-key: release-test
+          save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
       - run: cargo test --workspace --all-features --locked
-      - name: Check measured bootstrap and KMS policy rendering
-        run: |
-          bash scripts/test-nitro-bridges.sh
-          bash scripts/test-locked-kms-policy.sh
-          bash scripts/test-nitro-kms-e2e-mocks.sh
-          bash scripts/test-aws-launchers.sh
-          bash scripts/test-build-enclave-eif.sh
 
+  # Both regressions share one build: the second run reuses the first's binaries.
   authorization-e2e:
-    name: Test Authorization End to End (${{ matrix.enclaves }} enclaves)
+    name: Test Authorization End to End
     needs: prepare-release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        enclaves: [1, 3]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      # Warm passes delete the caches their new one replaces.
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Outputs of the development shell that the public Nix cache doesn't
+      # have, chiefly the patched OpenSSL, saved by master (see
+      # scripts/ci-nix-cache.sh). Restored before Nix is installed so the
+      # directory stays the runner's.
+      - name: Restore the development shell's Nix outputs
+        id: nix-cache
+        uses: actions/cache/restore@v4
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          path: ${{ runner.temp }}/nix-cache
+          key: nix-devshell-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**') }}
+          restore-keys: nix-devshell-${{ runner.arch }}-
+      - run: mkdir -p "$RUNNER_TEMP/nix-cache"
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = file://${{ runner.temp }}/nix-cache?trusted=1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-authorization
-      - name: Run real gateway and enclave authorization regressions
-        run: |
-          args=()
-          if [[ '${{ matrix.enclaves }}' == 1 ]]; then args+=(--single-enclave); fi
-          nix develop -c bash examples/run-authorization-e2e.sh "${args[@]}"
+          shared-key: release-authorization
+          save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
+      - name: Run real gateway and enclave authorization regressions (3 enclaves)
+        run: nix develop -c bash examples/run-authorization-e2e.sh
+      - name: Run real gateway and enclave authorization regressions (1 enclave)
+        run: nix develop -c bash examples/run-authorization-e2e.sh --skip-build --single-enclave
       - name: Retain authorization failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: authorization-e2e-logs-${{ matrix.enclaves }}-enclaves
+          name: authorization-e2e-logs
           path: /tmp/keymeld-authorization-e2e.*/
           retention-days: 7
+      - name: Keep the development shell's Nix outputs
+        if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        run: bash scripts/ci-nix-cache.sh save "$RUNNER_TEMP/nix-cache" ".#devShells.x86_64-linux.default"
+      - if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/nix-cache
+          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
+      - name: Delete the caches this one replaces
+        if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.nix-cache.outputs.cache-primary-key }}
+          PREFIX: nix-devshell-${{ runner.arch }}-
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "$PREFIX" --limit 100 --json id,key \
+            --jq ".[] | select(.key != \"$KEY\") | .id" | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY"
 
   build-release:
     name: Build Binaries (${{ matrix.target }}, ${{ matrix.variant }})
@@ -151,9 +231,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # See lint: dependencies from master's cache; only master saves it.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}-${{ matrix.variant }}
+          shared-key: release-${{ matrix.target }}-${{ matrix.variant }}
+          save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
       - name: Build release binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -188,6 +270,23 @@ jobs:
           path: release/*
           if-no-files-found: error
           retention-days: 7
+      # The gateway images copy the tarball's binary; these are the files the
+      # Nix package installs beside it, including the bundles build.rs wrote.
+      - name: Stage the gateway's runtime assets for its images
+        if: needs.prepare-release.outputs.build_images == 'true'
+        run: |
+          set -euo pipefail
+          mkdir gateway-assets
+          cp -r crates/keymeld-gateway/static crates/keymeld-gateway/migrations config gateway-assets/
+          test -s gateway-assets/static/app.min.js
+          test -s gateway-assets/static/styles.min.css
+      - if: needs.prepare-release.outputs.build_images == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-assets-${{ matrix.target }}-${{ matrix.variant }}
+          path: gateway-assets
+          if-no-files-found: error
+          retention-days: 7
 
   build-wasm-sdk:
     name: Build WASM SDK
@@ -201,42 +300,63 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # See lint: dependencies from master's cache; only master saves it.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-wasm
+          shared-key: release-wasm
+          save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
       - name: Verify WASM library compilation
         run: cargo build -p keymeld-sdk --target wasm32-unknown-unknown --release --features client,dlctix,escrow --locked
         env:
           CFLAGS_wasm32_unknown_unknown: "-Wno-error=implicit-function-declaration"
 
-  build-docker:
+  # The enclave images are the flake's .#docker-enclave outputs, unchanged:
+  # scripts/build-enclave-eif.sh builds its measured EIF from the same
+  # derivation, so they are not assembled from the release binaries. A master
+  # push saves each image's output; a tag on that commit substitutes it (same
+  # derivation, same image) instead of compiling again.
+  build-enclave-images:
     name: Build Image (${{ matrix.image }}, ${{ matrix.arch }})
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      # Warm passes delete the caches their new one replaces.
+      actions: write
     strategy:
       fail-fast: false
       matrix:
-        image: [gateway, enclave, gateway-escrow, enclave-escrow]
+        image: [enclave, enclave-escrow]
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
-        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare-release.outputs.sha }}
           persist-credentials: false
-      - name: Free build space
+      # This took up to two minutes in the foreground; a build that needs the
+      # space starts much later.
+      - name: Free build space (in the background)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+          nohup sudo sh -c 'rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; docker image prune --all --force' \
+            >/dev/null 2>&1 &
+      # Restored before Nix is installed so the directory stays the runner's.
+      - name: Restore this image's Nix outputs
+        id: nix-cache
+        uses: actions/cache/restore@v4
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          path: ${{ runner.temp }}/nix-cache
+          key: nix-${{ matrix.image }}-${{ matrix.arch }}-${{ needs.prepare-release.outputs.sha }}
+          restore-keys: nix-${{ matrix.image }}-${{ matrix.arch }}-
+      - run: mkdir -p "$RUNNER_TEMP/nix-cache"
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = file://${{ runner.temp }}/nix-cache?trusted=1
       - name: Build image archive without registry credentials
         env:
           IMAGE: ${{ matrix.image }}
@@ -245,6 +365,121 @@ jobs:
           set -euo pipefail
           nix build ".#docker-$IMAGE" --print-build-logs --no-update-lock-file
           cp --dereference result "$RUNNER_TEMP/$IMAGE-$ARCH.tar.gz"
+      - if: needs.prepare-release.outputs.warm != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/${{ matrix.image }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Keep this image's Nix outputs
+        if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: bash scripts/ci-nix-cache.sh save "$RUNNER_TEMP/nix-cache" ".#docker-$IMAGE"
+      - if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/nix-cache
+          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
+      - name: Delete the caches this one replaces
+        if: needs.prepare-release.outputs.warm == 'true' && steps.nix-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.nix-cache.outputs.cache-primary-key }}
+          PREFIX: nix-${{ matrix.image }}-${{ matrix.arch }}-
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "$PREFIX" --limit 100 --json id,key \
+            --jq ".[] | select(.key != \"$KEY\") | .id" | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY"
+
+  # Assembled from build-release's binaries (the ones in the release tarballs)
+  # and the assets their build generated: nothing compiles here. The
+  # Dockerfile has no RUN step, so both architectures build on one amd64
+  # runner without emulation.
+  build-gateway-images:
+    name: Build Image (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: [prepare-release, build-release]
+    if: needs.prepare-release.outputs.build_images == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [gateway, gateway-escrow]
+        arch: [amd64, arm64]
+        include:
+          - image: gateway
+            variant: default
+          - image: gateway-escrow
+            variant: escrow
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}-${{ matrix.variant }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-assets-${{ matrix.target }}-${{ matrix.variant }}
+          path: context/${{ matrix.arch }}/share
+      - name: Assemble the image context from the release tarball
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          SUFFIX=""
+          if [[ "$VARIANT" != default ]]; then SUFFIX="-$VARIANT"; fi
+          # The tarball keeps the binary's mode; artifacts would not.
+          tar -xzf "release/keymeld-gateway$SUFFIX-$VERSION-$TARGET.tar.gz" -C "context/$ARCH"
+          test -x "context/$ARCH/keymeld-gateway"
+          find context -type f | sort
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image archive
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker buildx build --platform "linux/$ARCH" -f deploy/docker/gateway.Dockerfile \
+            -t "keymeld-$IMAGE:latest" --output "type=docker,dest=$RUNNER_TEMP/$IMAGE-$ARCH.tar" context
+          docker load < "$RUNNER_TEMP/$IMAGE-$ARCH.tar"
+      # Without running a foreign-architecture binary: every library the
+      # binary needs is in the image, and its glibc is new enough.
+      - name: Check the binary's runtime libraries against the base image
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          CONTAINER=$(docker create --platform "linux/$ARCH" "keymeld-$IMAGE:latest")
+          docker export "$CONTAINER" > rootfs.tar
+          docker rm "$CONTAINER" >/dev/null
+          tar -tf rootfs.tar > rootfs.list
+          BINARY="context/$ARCH/keymeld-gateway"
+          for LIBRARY in $(readelf -d "$BINARY" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            grep -Eq "(^|/)$LIBRARY\$" rootfs.list || { echo "::error::$LIBRARY is not in the image"; exit 1; }
+            echo "found $LIBRARY"
+          done
+          NEEDED=$(readelf -V "$BINARY" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -Vu | tail -1)
+          STATUS=$(grep -m1 '^var/lib/dpkg/status.d/libc6' rootfs.list)
+          PROVIDED=$(tar -xOf rootfs.tar "$STATUS" | sed -n 's/^Version: \([0-9.]*\).*/\1/p' | head -1)
+          echo "binary needs glibc $NEEDED; image has $PROVIDED"
+          [[ "$(printf '%s\n' "$NEEDED" "$PROVIDED" | sort -V | tail -1)" == "$PROVIDED" ]]
+      - name: Compress image archive
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+        run: gzip -1 "$RUNNER_TEMP/$IMAGE-$ARCH.tar"
       - uses: actions/upload-artifact@v4
         with:
           name: docker-${{ matrix.image }}-${{ matrix.arch }}
@@ -253,9 +488,10 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  # Images wait for every check, not for the GitHub release.
   publish-images:
     name: Publish Image (${{ matrix.image }})
-    needs: [prepare-release, test, authorization-e2e, build-release, build-wasm-sdk, build-docker]
+    needs: [prepare-release, lint, test, authorization-e2e, build-release, build-wasm-sdk, build-enclave-images, build-gateway-images]
     if: needs.prepare-release.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -294,9 +530,10 @@ jobs:
           docker buildx imagetools create --tag "$IMAGE:$VERSION" \
             "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
 
+  # The tarballs don't wait for the container images, which publish on their own.
   create-release:
     name: Publish GitHub Release
-    needs: [prepare-release, test, authorization-e2e, build-release, build-wasm-sdk, build-docker, publish-images]
+    needs: [prepare-release, lint, test, authorization-e2e, build-release, build-wasm-sdk]
     if: needs.prepare-release.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
