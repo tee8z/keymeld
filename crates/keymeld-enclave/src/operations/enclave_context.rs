@@ -241,11 +241,13 @@ impl EnclaveSharedContext {
         let mut nonce_bytes = [0u8; 12];
         rand::rng().fill(&mut nonce_bytes);
 
-        let ciphertext = cipher.encrypt((&nonce_bytes).into(), private_key).map_err(|e| {
-            EnclaveError::Crypto(CryptoError::Other(format!(
-                "Failed to encrypt private key: {e}"
-            )))
-        })?;
+        let ciphertext = cipher
+            .encrypt((&nonce_bytes).into(), private_key)
+            .map_err(|e| {
+                EnclaveError::Crypto(CryptoError::Other(format!(
+                    "Failed to encrypt private key: {e}"
+                )))
+            })?;
 
         let mut result = nonce_bytes.to_vec();
         result.extend_from_slice(&ciphertext);
@@ -266,11 +268,13 @@ impl EnclaveSharedContext {
 
         let cipher = Aes256Gcm::new(dek.into());
 
-        let plaintext = cipher.decrypt(nonce_bytes.into(), ciphertext).map_err(|e| {
-            EnclaveError::Crypto(CryptoError::Other(format!(
-                "Failed to decrypt private key: {e}"
-            )))
-        })?;
+        let plaintext = cipher
+            .decrypt(nonce_bytes.into(), ciphertext)
+            .map_err(|e| {
+                EnclaveError::Crypto(CryptoError::Other(format!(
+                    "Failed to decrypt private key: {e}"
+                )))
+            })?;
 
         Ok(plaintext)
     }
