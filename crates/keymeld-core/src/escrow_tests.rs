@@ -1038,3 +1038,121 @@ fn a_deposit_scoped_command_names_its_keygen_session_under_its_signature() {
         policy.policy.context.keygen_session_id
     );
 }
+
+/// The request context as it was before a command could name its keygen session.
+#[derive(Serialize)]
+struct LegacyRequestContext<'a> {
+    schema_version: u16,
+    operation: Operation,
+    escrow: &'a EscrowContext,
+    policy_digest: [u8; 32],
+    request_id: Uuid,
+    action_id: &'a Option<String>,
+    attempt: &'a Option<ActionAttempt>,
+}
+
+fn legacy_context(context: &RequestContext) -> LegacyRequestContext<'_> {
+    LegacyRequestContext {
+        schema_version: context.schema_version,
+        operation: context.operation,
+        escrow: &context.escrow,
+        policy_digest: context.policy_digest,
+        request_id: context.request_id,
+        action_id: &context.action_id,
+        attempt: &context.attempt,
+    }
+}
+
+/// The receipt context as an enclave signed it before a command could name its keygen session.
+#[derive(Serialize)]
+struct LegacyReceiptContext<'a> {
+    schema_version: u16,
+    enclave_id: crate::EnclaveId,
+    enclave_key_epoch: u64,
+    request: &'a LegacyRequestContext<'a>,
+    request_digest: [u8; 32],
+}
+
+#[test]
+fn a_command_and_receipt_written_before_session_naming_still_decode_and_verify() {
+    let policy = signed();
+    let context = request_context(&policy, Operation::Execute);
+    let legacy = legacy_context(&context);
+    let encrypted = Payload::new(vec![1, 2, 3]).unwrap();
+    // A command signed and stored, for example in a client journal, before the field existed.
+    let written_before = serde_json::to_vec(&serde_json::json!({
+        "context": legacy,
+        "encrypted_request": encrypted,
+        "authorization": sign_authorization(&[8; 32], "escrow-request-v1", &(&legacy, &encrypted))
+            .unwrap(),
+    }))
+    .unwrap();
+    let stored: EscrowCommand = serde_json::from_slice(&written_before).unwrap();
+    assert_eq!(stored.context, context);
+    stored.verify(&context, key(8).as_bytes()).unwrap();
+    assert_eq!(
+        stored.digest().unwrap(),
+        authorization_digest("escrow-command-v1", &(&legacy, &encrypted)).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&context).unwrap(),
+        serde_json::to_vec(&legacy).unwrap()
+    );
+    // So does the receipt an enclave signed for it before the field existed.
+    let request_digest = stored.digest().unwrap();
+    let legacy_receipt = LegacyReceiptContext {
+        schema_version: crate::escrow::SCHEMA_VERSION,
+        enclave_id: crate::EnclaveId::new(1),
+        enclave_key_epoch: 3,
+        request: &legacy,
+        request_digest,
+    };
+    let output = Payload::new(vec![4]).unwrap();
+    let sealed_state = Payload::new(vec![5]).unwrap();
+    let written_before = serde_json::to_vec(&serde_json::json!({
+        "context": legacy_receipt,
+        "output": output,
+        "sealed_state": sealed_state,
+        "enclave_signature": sign_authorization(
+            &[9; 32],
+            "escrow-response-v1",
+            &(&legacy_receipt, &output, &sealed_state),
+        )
+        .unwrap(),
+    }))
+    .unwrap();
+    let receipt = ReceiptContext {
+        schema_version: crate::escrow::SCHEMA_VERSION,
+        enclave_id: crate::EnclaveId::new(1),
+        enclave_key_epoch: 3,
+        request: context.clone(),
+        request_digest,
+    };
+    let stored: EscrowResponse = serde_json::from_slice(&written_before).unwrap();
+    assert_eq!(stored.context, receipt);
+    stored.verify(&receipt, key(9).as_bytes()).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&receipt).unwrap(),
+        serde_json::to_vec(&legacy_receipt).unwrap()
+    );
+}
+
+/// Binary encodings cannot omit a field, so the bincode channel between gateway and enclave,
+/// which upgrade together, carries the session after the earlier layout. Stored state is JSON.
+#[test]
+fn the_binary_enclave_channel_appends_the_session_to_the_earlier_layout() {
+    let policy = signed();
+    let context = request_context(&policy, Operation::Bind);
+    let earlier = bincode::serialize(&legacy_context(&context)).unwrap();
+    assert_eq!(
+        bincode::serialize(&context).unwrap(),
+        [earlier.as_slice(), &[0_u8]].concat()
+    );
+    assert!(bincode::deserialize::<RequestContext>(&earlier).is_err());
+    let mut scoped = context;
+    scoped.keygen_session_id = Some(SessionId::new_v7());
+    assert_eq!(
+        bincode::deserialize::<RequestContext>(&bincode::serialize(&scoped).unwrap()).unwrap(),
+        scoped
+    );
+}

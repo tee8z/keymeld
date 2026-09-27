@@ -105,6 +105,11 @@ A verifier reads it from `manifest.manifest.deposit_scope` at enrollment and bin
 
 Keys registered as deposits cannot be copied to the user key store with `StoreKeyFromKeygen`.
 
+A manifest, request context or registration envelope without these fields encodes, signs and digests in JSON exactly as before.
+Manifests, commands, receipts and journals that earlier releases stored as JSON still decode and verify.
+The binary channel between gateway and enclave always carries the new fields, so upgrade the gateway and enclaves together.
+Store journals and receipts as JSON, not in a binary layout such as bincode.
+
 ## Trusted verifiers
 
 `EscrowVerifier` separates enrollment, binding, preparation, and execution checks.

@@ -488,22 +488,37 @@ fn a_manifest_without_a_deposit_scope_encodes_signs_and_digests_as_before() {
         },
         signature: vec![7, 8],
     };
-    assert_eq!(
-        serde_json::to_string(&fixed).unwrap(),
-        concat!(
-            r#"{"manifest":{"keygen_session_id":"01890a5d-ac96-774b-bcce-b302099a8057","#,
-            r#""coordinator_user_id":"01890a5d-ac96-774b-bcce-b302099a8058","#,
-            r#""creator_pubkey":[1,2],"signing_pubkey":[3],"session_public_key":[4],"#,
-            r#""participant_verifiers":{"01890a5d-ac96-774b-bcce-b302099a8058":[5,6]},"#,
-            r#""timeout_secs":300,"max_signing_sessions":3,"encrypted_taproot_tweak":"tweak","#,
-            r#""subset_definitions":[{"subset_id":"01890a5d-ac96-774b-bcce-b302099a8059","#,
-            r#""participants":["01890a5d-ac96-774b-bcce-b302099a8058"]}]},"signature":[7,8]}"#,
-        )
+    let written_before = concat!(
+        r#"{"manifest":{"keygen_session_id":"01890a5d-ac96-774b-bcce-b302099a8057","#,
+        r#""coordinator_user_id":"01890a5d-ac96-774b-bcce-b302099a8058","#,
+        r#""creator_pubkey":[1,2],"signing_pubkey":[3],"session_public_key":[4],"#,
+        r#""participant_verifiers":{"01890a5d-ac96-774b-bcce-b302099a8058":[5,6]},"#,
+        r#""timeout_secs":300,"max_signing_sessions":3,"encrypted_taproot_tweak":"tweak","#,
+        r#""subset_definitions":[{"subset_id":"01890a5d-ac96-774b-bcce-b302099a8059","#,
+        r#""participants":["01890a5d-ac96-774b-bcce-b302099a8058"]}]},"signature":[7,8]}"#,
     );
+    let digest = "823c64ff9cf8bc8b6ae07b04f5e85ae4a1068dbdb7e5120aad6314c735a5233e";
+    assert_eq!(serde_json::to_string(&fixed).unwrap(), written_before);
+    assert_eq!(hex::encode(fixed.digest().unwrap()), digest);
+    // Stored JSON from before the field existed, such as a gateway session row or an
+    // application's journal, decodes to the same manifest and digest.
+    let stored: SignedSessionManifest = serde_json::from_str(written_before).unwrap();
+    assert!(stored.manifest.deposit_scope.is_none());
+    assert_eq!(serde_json::to_string(&stored).unwrap(), written_before);
+    assert_eq!(hex::encode(stored.digest().unwrap()), digest);
+}
+
+/// Binary encodings cannot omit a field, so the bincode channel between gateway and enclave,
+/// which upgrade together, carries the scope after the earlier layout. Stored state is JSON.
+#[test]
+fn the_binary_enclave_channel_appends_the_scope_to_the_earlier_layout() {
+    let manifest = pool().manifest(None).manifest;
+    let earlier = bincode::serialize(&legacy(&manifest)).unwrap();
     assert_eq!(
-        hex::encode(fixed.digest().unwrap()),
-        "823c64ff9cf8bc8b6ae07b04f5e85ae4a1068dbdb7e5120aad6314c735a5233e"
+        bincode::serialize(&manifest).unwrap(),
+        [earlier.as_slice(), &[0_u8]].concat()
     );
+    assert!(bincode::deserialize::<SessionAuthorizationManifest>(&earlier).is_err());
 }
 
 #[test]

@@ -1227,7 +1227,7 @@ async fn a_deposit_is_refused_by_a_session_under_other_terms_or_none() {
         .registration_authorization
         .verify(&pool.manifest, &unmarked.enclave_encrypted_data)
         .unwrap();
-    assert!(session.validate_registration(&unmarked).await.is_err());
+    refused_past_the_sdk(&mut session, &pool, "unmarked", &unmarked).await;
     // Its own deposit still registers.
     session
         .validate_registration(&alice.registration)
