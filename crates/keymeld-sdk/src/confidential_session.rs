@@ -60,6 +60,10 @@ struct SavedBatch {
 }
 
 /// Serialize only to the authorized application's authenticated storage.
+///
+/// Store it as JSON or another self-describing format. Fields that later releases add are
+/// omitted from JSON while unset, so a journal saved by an earlier release still decodes;
+/// binary layouts such as bincode change between releases.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ConfidentialJournal {
     commands: BTreeMap<String, JournalEntry>,

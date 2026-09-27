@@ -327,6 +327,7 @@ fn command<T: Serialize>(
         request_id: Uuid::now_v7(),
         action_id: action.map(|(id, _)| id.into()),
         attempt: action.map(|(_, attempt)| attempt.clone()),
+        keygen_session_id: None,
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(request).unwrap());
     let encrypted = f
@@ -923,3 +924,50 @@ fn subset_tweak_must_match_the_actual_keygen_context_before_permit_lookup() {
 
 #[path = "escrow_verifier_tests.rs"]
 mod verifier_tests;
+
+/// The sealed binding as it was before it could record a deposit-scoped policy's session.
+#[derive(Serialize)]
+struct LegacyBinding<'a> {
+    context: &'a EscrowContext,
+    policy_digest: [u8; 32],
+    enclave_id: keymeld_core::EnclaveId,
+    participant_policy_digests: &'a BTreeMap<UserId, [u8; 32]>,
+    application_state: &'a Payload,
+}
+
+#[test]
+fn a_binding_sealed_before_session_naming_still_decodes_unchanged() {
+    let binding = Binding {
+        context: EscrowContext {
+            keygen_session_id: SessionId::new_v7(),
+            user_id: UserId::new_v7(),
+            escrow_id: Uuid::now_v7(),
+            manifest_digest: [2; 32],
+            application: ApplicationContext::commit("document".into(), 1, b"terms").unwrap(),
+        },
+        policy_digest: [3; 32],
+        enclave_id: keymeld_core::EnclaveId::new(1),
+        participant_policy_digests: BTreeMap::from([(UserId::new_v7(), [4; 32])]),
+        application_state: Payload::new(vec![5]).unwrap(),
+        keygen_session_id: None,
+    };
+    let written_before = serde_json::to_vec(&LegacyBinding {
+        context: &binding.context,
+        policy_digest: binding.policy_digest,
+        enclave_id: binding.enclave_id,
+        participant_policy_digests: &binding.participant_policy_digests,
+        application_state: &binding.application_state,
+    })
+    .unwrap();
+    let stored: Binding = serde_json::from_slice(&written_before).unwrap();
+    assert_eq!(stored, binding);
+    assert_eq!(serde_json::to_vec(&stored).unwrap(), written_before);
+    // A deposit-scoped session's binding records its session.
+    let mut scoped = binding;
+    scoped.keygen_session_id = Some(SessionId::new_v7());
+    assert_ne!(serde_json::to_vec(&scoped).unwrap(), written_before);
+    assert_eq!(
+        serde_json::from_slice::<Binding>(&serde_json::to_vec(&scoped).unwrap()).unwrap(),
+        scoped
+    );
+}

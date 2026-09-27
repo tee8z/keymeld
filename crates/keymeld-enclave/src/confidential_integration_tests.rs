@@ -198,6 +198,7 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
                 )
                 .unwrap(),
             subset_definitions: Vec::new(),
+            deposit_scope: None,
         },
         &[11; 32],
     )
@@ -679,6 +680,7 @@ async fn escrow_round<T: serde::Serialize>(
         request_id: Uuid::now_v7(),
         action_id: attempt.map(|_| "sign".into()),
         attempt: attempt.cloned(),
+        keygen_session_id: None,
     };
     let outcome = session
         .command_once(stage, enclave_id, request, || {

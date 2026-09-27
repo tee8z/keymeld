@@ -1432,6 +1432,7 @@ mod tests {
                 max_signing_sessions: None,
                 encrypted_taproot_tweak: String::new(),
                 subset_definitions: vec![],
+                deposit_scope: None,
             },
             &authority.export_secret(),
         )

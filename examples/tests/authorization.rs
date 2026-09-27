@@ -567,6 +567,7 @@ async fn registration_signing_and_roster_attacks() -> Result<()> {
         context: bad_auth_context.clone(),
         private_key: victim_private_key.to_vec(),
         escrow: None,
+        deposit: false,
     };
     let mut request = honest.clone();
     request.auth_pubkey = bad_auth_context.auth_pubkey;

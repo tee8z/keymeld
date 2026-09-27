@@ -476,6 +476,18 @@ async fn handle_store_from_keygen(
             "Escrow-authorized keys cannot be exported to an unrestricted signer".into(),
         )));
     }
+    // A stored key authenticates with an auth key derived from its origin session, and a
+    // deposit's derives from its deposit scope instead.
+    if processor
+        .get_session_metadata_public()
+        .authorization_manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.manifest.deposit_scope.is_some())
+    {
+        return Err(EnclaveError::Validation(ValidationError::Other(
+            "Keys registered as deposits cannot be stored from their session".into(),
+        )));
+    }
 
     // Get the private key from the user session
     let private_key = user_session.private_key.clone().ok_or_else(|| {

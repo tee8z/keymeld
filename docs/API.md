@@ -301,6 +301,7 @@ Deletion uses `keymeld-delete-user-key-v1:{key_id}`. A read proof cannot authori
 
 Use SDK credentials to construct these headers.
 MuSig2 authentication keys derive from `HKDF-SHA256(private_key, "keymeld-session-auth-v1:{keygen_session_id}")`.
+In a session with a deposit scope, they derive from the deposit session ID instead.
 Single-signer authentication keys use `single_signer_auth` as the derivation's session ID.
 
 ## Encryption

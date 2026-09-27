@@ -165,7 +165,10 @@ pub fn verify_authorization<T: Serialize + ?Sized>(
         .map_err(|_| invalid("Invalid authorization signature"))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Largest [`DepositScope::evidence`] a manifest may carry.
+pub const MAX_DEPOSIT_EVIDENCE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SessionAuthorizationManifest {
     pub keygen_session_id: SessionId,
@@ -178,6 +181,79 @@ pub struct SessionAuthorizationManifest {
     pub max_signing_sessions: Option<u32>,
     pub encrypted_taproot_tweak: String,
     pub subset_definitions: Vec<SubsetDefinition>,
+    /// Registrations sealed before this session existed, such as key deposits made while
+    /// pools were still forming. When set, every registration and escrow policy of the session is
+    /// bound to this scope instead of the session id and manifest digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposit_scope: Option<DepositScope>,
+}
+
+/// JSON, which every signature and digest covers, omits an absent deposit scope, so a manifest
+/// without one encodes exactly as it did before the field existed. Binary encodings, which
+/// cannot skip a field, always carry it.
+impl Serialize for SessionAuthorizationManifest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let scope = !serializer.is_human_readable() || self.deposit_scope.is_some();
+        let mut state =
+            serializer.serialize_struct("SessionAuthorizationManifest", 10 + usize::from(scope))?;
+        state.serialize_field("keygen_session_id", &self.keygen_session_id)?;
+        state.serialize_field("coordinator_user_id", &self.coordinator_user_id)?;
+        state.serialize_field("creator_pubkey", &self.creator_pubkey)?;
+        state.serialize_field("signing_pubkey", &self.signing_pubkey)?;
+        state.serialize_field("session_public_key", &self.session_public_key)?;
+        state.serialize_field("participant_verifiers", &self.participant_verifiers)?;
+        state.serialize_field("timeout_secs", &self.timeout_secs)?;
+        state.serialize_field("max_signing_sessions", &self.max_signing_sessions)?;
+        state.serialize_field("encrypted_taproot_tweak", &self.encrypted_taproot_tweak)?;
+        state.serialize_field("subset_definitions", &self.subset_definitions)?;
+        if scope {
+            state.serialize_field("deposit_scope", &self.deposit_scope)?;
+        } else {
+            state.skip_field("deposit_scope")?;
+        }
+        state.end()
+    }
+}
+
+/// The scope that key deposits were sealed under before their session existed.
+///
+/// A deposit is an ordinary registration whose [`RegistrationContext`] names
+/// `deposit_session_id` and `deposit_digest` in place of the session id and manifest digest,
+/// whose session auth key derives from `deposit_session_id`, and whose escrow policy's
+/// `EscrowContext` names the same pair. Any session whose manifest names this scope can
+/// register it, in the slot, enclave and key epoch it was sealed to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DepositScope {
+    /// Stands in for the session id in each deposit's registration context, escrow context and
+    /// session auth key derivation. Must differ from `keygen_session_id`.
+    pub deposit_session_id: SessionId,
+    /// Stands in for the manifest digest; exactly 32 bytes, chosen by the application
+    /// (for example a digest of the published terms every deposit was made under).
+    pub deposit_digest: Vec<u8>,
+    /// Opaque application evidence that the session's escrow verifier checks at enrollment and
+    /// binding, for example how pool members were chosen. At most
+    /// [`MAX_DEPOSIT_EVIDENCE_BYTES`].
+    pub evidence: Vec<u8>,
+}
+
+impl DepositScope {
+    fn validate(&self, keygen_session_id: &SessionId) -> Result<(), KeyMeldError> {
+        if self.deposit_digest.len() != 32 {
+            return Err(invalid("A deposit digest must contain 32 bytes"));
+        }
+        if self.evidence.len() > MAX_DEPOSIT_EVIDENCE_BYTES {
+            return Err(invalid("Deposit evidence exceeds its size limit"));
+        }
+        if self.deposit_session_id == *keygen_session_id || self.deposit_session_id.uuid().is_nil()
+        {
+            return Err(invalid(
+                "A deposit scope needs its own session id, distinct from the keygen session",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,6 +332,9 @@ impl SignedSessionManifest {
                 return Err(invalid("Invalid authorized subset definition"));
             }
         }
+        if let Some(scope) = &manifest.deposit_scope {
+            scope.validate(&manifest.keygen_session_id)?;
+        }
         verify_authorization(
             &manifest.creator_pubkey,
             "session-manifest",
@@ -267,8 +346,27 @@ impl SignedSessionManifest {
     pub fn digest(&self) -> Result<Vec<u8>, KeyMeldError> {
         Ok(authorization_digest("signed-session-manifest", self)?.to_vec())
     }
+
+    /// The session id and digest that this session's registrations and escrow policies are
+    /// bound to: its deposit scope when it has one, else its own session id and digest.
+    ///
+    /// The manifest digest still identifies the session everywhere else, such as its enclave
+    /// recipients and its signed roster.
+    pub fn registration_scope(&self) -> Result<(SessionId, Vec<u8>), KeyMeldError> {
+        match &self.manifest.deposit_scope {
+            Some(scope) => Ok((
+                scope.deposit_session_id.clone(),
+                scope.deposit_digest.clone(),
+            )),
+            None => Ok((self.manifest.keygen_session_id.clone(), self.digest()?)),
+        }
+    }
 }
 
+/// `keygen_session_id` and `manifest_hash` name the manifest's
+/// [registration scope](SignedSessionManifest::registration_scope): the session id and manifest
+/// digest, or for a deposit, its deposit session id and digest. `auth_pubkey` derives from the
+/// same session id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegistrationContext {
@@ -291,6 +389,11 @@ pub struct RegistrationEnvelope {
     /// the participant key. Absence preserves the original registration proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escrow: Option<crate::escrow::EscrowRegistration>,
+    /// Sealed as a key deposit: its context names a deposit scope, and only a session whose
+    /// manifest names that scope may register it. The possession proof commits to it, so a
+    /// registration sealed for one session can never be registered as another's deposit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deposit: bool,
 }
 
 impl std::fmt::Debug for RegistrationEnvelope {
@@ -298,6 +401,7 @@ impl std::fmt::Debug for RegistrationEnvelope {
         f.debug_struct("RegistrationEnvelope")
             .field("context", &self.context)
             .field("private_key", &"[REDACTED]")
+            .field("deposit", &self.deposit)
             .finish_non_exhaustive()
     }
 }
@@ -308,16 +412,19 @@ impl Drop for RegistrationEnvelope {
     }
 }
 
+/// The possession proof's domain. A deposit's differs from a session registration's.
+fn possession_domain(escrow: bool, deposit: bool) -> &'static str {
+    match (escrow, deposit) {
+        (false, false) => "registration-possession",
+        (true, false) => "registration-escrow-possession-v1",
+        (false, true) => "registration-deposit-possession-v1",
+        (true, true) => "registration-deposit-escrow-possession-v1",
+    }
+}
+
 impl RegistrationEnvelope {
     pub fn new(context: RegistrationContext, private_key: &[u8; 32]) -> Result<Self, KeyMeldError> {
-        let envelope = Self {
-            proof_signature: sign_authorization(private_key, "registration-possession", &context)?,
-            context,
-            private_key: private_key.to_vec(),
-            escrow: None,
-        };
-        envelope.verify()?;
-        Ok(envelope)
+        Self::seal(context, private_key, None, false)
     }
 
     pub fn with_escrow(
@@ -325,18 +432,66 @@ impl RegistrationEnvelope {
         private_key: &[u8; 32],
         escrow: crate::escrow::EscrowRegistration,
     ) -> Result<Self, KeyMeldError> {
+        Self::seal(context, private_key, Some(escrow), false)
+    }
+
+    /// Seal a key deposit, before the session it will be registered into exists. The context
+    /// names the deposit scope: its `keygen_session_id` is the deposit session id, its
+    /// `manifest_hash` the deposit digest, and its `auth_pubkey` derives from the deposit
+    /// session id. Every registration of a deposit-scoped session is sealed this way.
+    pub fn deposit(
+        context: RegistrationContext,
+        private_key: &[u8; 32],
+    ) -> Result<Self, KeyMeldError> {
+        Self::seal(context, private_key, None, true)
+    }
+
+    /// [`Self::deposit`] with escrow permissions, whose `EscrowContext` names the same scope.
+    pub fn deposit_with_escrow(
+        context: RegistrationContext,
+        private_key: &[u8; 32],
+        escrow: crate::escrow::EscrowRegistration,
+    ) -> Result<Self, KeyMeldError> {
+        Self::seal(context, private_key, Some(escrow), true)
+    }
+
+    fn seal(
+        context: RegistrationContext,
+        private_key: &[u8; 32],
+        escrow: Option<crate::escrow::EscrowRegistration>,
+        deposit: bool,
+    ) -> Result<Self, KeyMeldError> {
+        let domain = possession_domain(escrow.is_some(), deposit);
+        let proof_signature = match &escrow {
+            Some(escrow) => sign_authorization(private_key, domain, &(&context, escrow))?,
+            None => sign_authorization(private_key, domain, &context)?,
+        };
         let envelope = Self {
-            proof_signature: sign_authorization(
-                private_key,
-                "registration-escrow-possession-v1",
-                &(&context, &escrow),
-            )?,
+            proof_signature,
             context,
             private_key: private_key.to_vec(),
-            escrow: Some(escrow),
+            escrow,
+            deposit,
         };
         envelope.verify()?;
         Ok(envelope)
+    }
+
+    /// Verify the envelope for registration in the session of `manifest`: its context names
+    /// the manifest's registration scope, and it was sealed as a deposit exactly when the
+    /// manifest has a deposit scope.
+    pub fn verify_for(&self, manifest: &SignedSessionManifest) -> Result<(), KeyMeldError> {
+        self.verify()?;
+        let (scope_session_id, scope_digest) = manifest.registration_scope()?;
+        if self.deposit != manifest.manifest.deposit_scope.is_some()
+            || self.context.keygen_session_id != scope_session_id
+            || self.context.manifest_hash != scope_digest
+        {
+            return Err(invalid(
+                "Registration was not sealed for this session's registration scope",
+            ));
+        }
+        Ok(())
     }
 
     pub fn verify(&self) -> Result<(), KeyMeldError> {
@@ -360,6 +515,7 @@ impl RegistrationEnvelope {
                     "Registration keys do not match the encrypted private key",
                 ));
             }
+            let domain = possession_domain(self.escrow.is_some(), self.deposit);
             if let Some(escrow) = &self.escrow {
                 let context = &escrow.policy.policy.context;
                 if context.keygen_session_id != self.context.keygen_session_id
@@ -371,14 +527,14 @@ impl RegistrationEnvelope {
                 escrow.verify(context, &self.context.public_key)?;
                 return verify_authorization(
                     &self.context.public_key,
-                    "registration-escrow-possession-v1",
+                    domain,
                     &(&self.context, escrow),
                     &self.proof_signature,
                 );
             }
             verify_authorization(
                 &self.context.public_key,
-                "registration-possession",
+                domain,
                 &self.context,
                 &self.proof_signature,
             )
@@ -416,10 +572,13 @@ impl RegistrationAuthorization {
         })
     }
 
+    /// Checks the slot credential's signature, and that the context is bound to the manifest's
+    /// [registration scope](SignedSessionManifest::registration_scope).
     pub fn verify_commitment(&self, manifest: &SignedSessionManifest) -> Result<(), KeyMeldError> {
         manifest.verify()?;
-        if self.context.keygen_session_id != manifest.manifest.keygen_session_id
-            || self.context.manifest_hash != manifest.digest()?
+        let (scope_session_id, scope_digest) = manifest.registration_scope()?;
+        if self.context.keygen_session_id != scope_session_id
+            || self.context.manifest_hash != scope_digest
             || self.ciphertext_hash.len() != 32
         {
             return Err(invalid(
@@ -732,6 +891,7 @@ mod tests {
                 max_signing_sessions: Some(5),
                 encrypted_taproot_tweak: "ciphertext".into(),
                 subset_definitions: vec![],
+                deposit_scope: None,
             },
             &[1; 32],
         )
@@ -1085,3 +1245,7 @@ mod tests {
 #[cfg(test)]
 #[path = "escrow_registration_tests.rs"]
 mod escrow_registration_tests;
+
+#[cfg(test)]
+#[path = "deposit_scope_tests.rs"]
+mod deposit_scope_tests;

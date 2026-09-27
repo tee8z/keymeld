@@ -698,3 +698,7 @@ mod integration_tests;
 #[cfg(all(test, feature = "escrow"))]
 #[path = "partial_roster_tests.rs"]
 mod partial_roster_tests;
+
+#[cfg(all(test, feature = "escrow"))]
+#[path = "deposit_registration_tests.rs"]
+mod deposit_registration_tests;

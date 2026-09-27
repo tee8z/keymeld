@@ -46,6 +46,7 @@ The application must bind each authorization to its own participant identity and
 - Expected participant IDs and their registration verifiers.
 - Timeout and maximum signing-session count.
 - Encrypted Taproot tweak and complete subset definitions.
+- An optional deposit scope, for registrations sealed before the session existed. See [Deposits](ESCROW.md#deposits).
 
 Clients must retain the manifest received through their trusted invitation or creation flow.
 A manifest fetched from the gateway is insufficient to establish the intended creator or participant roster.
@@ -76,6 +77,7 @@ The participant prepares the encrypted envelope; the application authorizes that
 
 Each `RegistrationEnvelope` contains the private key, a `RegistrationContext`, and a possession signature over that context.
 The context binds the session ID, manifest hash, participant ID, enclave ID, enclave key epoch, public key, auth key, and approval policy.
+In a session with a deposit scope, the deposit session ID and digest take the place of the session ID and manifest hash.
 Elliptic Curve Integrated Encryption Scheme (ECIES) encrypts the envelope to the assigned enclave key.
 
 `RegistrationAuthorization` signs the context and a SHA-256 hash of the decoded ciphertext bytes.

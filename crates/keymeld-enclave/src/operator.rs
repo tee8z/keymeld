@@ -1559,6 +1559,7 @@ mod escrow_capability_tests {
                 request_id: uuid::Uuid::now_v7(),
                 action_id: None,
                 attempt: None,
+                keygen_session_id: None,
             },
             encrypted_request: Payload::new(vec![1]).unwrap(),
             authorization: vec![],

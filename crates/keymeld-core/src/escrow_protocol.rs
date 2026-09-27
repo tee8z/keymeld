@@ -89,7 +89,7 @@ pub enum Operation {
     Prepare,
     Execute,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestContext {
     pub schema_version: u16,
@@ -99,13 +99,55 @@ pub struct RequestContext {
     pub request_id: Uuid,
     pub action_id: Option<String>,
     pub attempt: Option<ActionAttempt>,
+    /// The keygen session the command acts in, when the escrow context names a deposit scope
+    /// instead of it. Omit it when the escrow context names the session itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keygen_session_id: Option<SessionId>,
+}
+/// JSON, which the command signature and every digest cover, omits an absent keygen session,
+/// so a context without one encodes exactly as it did before the field existed. Binary
+/// encodings, which cannot skip a field, always carry it.
+impl Serialize for RequestContext {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let session = !serializer.is_human_readable() || self.keygen_session_id.is_some();
+        let mut state = serializer.serialize_struct("RequestContext", 7 + usize::from(session))?;
+        state.serialize_field("schema_version", &self.schema_version)?;
+        state.serialize_field("operation", &self.operation)?;
+        state.serialize_field("escrow", &self.escrow)?;
+        state.serialize_field("policy_digest", &self.policy_digest)?;
+        state.serialize_field("request_id", &self.request_id)?;
+        state.serialize_field("action_id", &self.action_id)?;
+        state.serialize_field("attempt", &self.attempt)?;
+        if session {
+            state.serialize_field("keygen_session_id", &self.keygen_session_id)?;
+        } else {
+            state.skip_field("keygen_session_id")?;
+        }
+        state.end()
+    }
 }
 impl RequestContext {
+    /// The keygen session this command acts in.
+    pub fn session_id(&self) -> &SessionId {
+        self.keygen_session_id
+            .as_ref()
+            .unwrap_or(&self.escrow.keygen_session_id)
+    }
     pub fn validate(&self) -> Result<(), KeyMeldError> {
         version(self.schema_version)?;
         self.escrow.validate()?;
         if self.request_id.is_nil() {
             return Err(invalid("Escrow request identity must not be nil"));
+        }
+        if self
+            .keygen_session_id
+            .as_ref()
+            .is_some_and(|id| id.uuid().is_nil() || *id == self.escrow.keygen_session_id)
+        {
+            return Err(invalid(
+                "An escrow command names its keygen session only for a deposit-scoped policy",
+            ));
         }
         match (&self.operation, &self.action_id, &self.attempt) {
             (Operation::Bind, None, None) => Ok(()),

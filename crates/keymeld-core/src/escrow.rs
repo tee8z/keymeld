@@ -128,6 +128,9 @@ impl ApplicationContext {
     }
 }
 
+/// `keygen_session_id` and `manifest_digest` name the session manifest's
+/// [registration scope](crate::authorization::SignedSessionManifest::registration_scope): the
+/// session and its manifest digest, or for a deposit, its deposit session id and digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EscrowContext {
