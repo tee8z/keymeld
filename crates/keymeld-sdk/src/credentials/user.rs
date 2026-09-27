@@ -6,6 +6,18 @@ use keymeld_core::{
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
+/// Encrypt a registration envelope to an enclave's key.
+fn seal_for_enclave(
+    envelope: &keymeld_core::authorization::RegistrationEnvelope,
+    enclave_public_key_hex: &str,
+) -> Result<String, SdkError> {
+    let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(envelope)?);
+    Ok(hex::encode(SecureCrypto::ecies_encrypt_from_hex(
+        enclave_public_key_hex,
+        &plaintext,
+    )?))
+}
+
 pub struct UserCredentials {
     private_key: SecretKey,
     public_key: PublicKey,
@@ -28,11 +40,7 @@ impl UserCredentials {
             &self.private_key_bytes(),
             escrow,
         )?;
-        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
-        Ok(hex::encode(SecureCrypto::ecies_encrypt_from_hex(
-            enclave_public_key_hex,
-            &plaintext,
-        )?))
+        seal_for_enclave(&envelope, enclave_public_key_hex)
     }
 
     /// Prepare a context-bound key envelope. A slot owner can authorize it later,
@@ -46,11 +54,40 @@ impl UserCredentials {
             context,
             &self.private_key_bytes(),
         )?;
-        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
-        Ok(hex::encode(SecureCrypto::ecies_encrypt_from_hex(
-            enclave_public_key_hex,
-            &plaintext,
-        )?))
+        seal_for_enclave(&envelope, enclave_public_key_hex)
+    }
+
+    /// Prepare a key deposit, before the session it will be registered into exists: every
+    /// registration of a session whose manifest has a deposit scope. The context names the
+    /// scope, and its `auth_pubkey` comes from [`Self::derive_session_auth_pubkey`] with the
+    /// deposit session id.
+    pub fn prepare_deposit_registration(
+        &self,
+        context: keymeld_core::authorization::RegistrationContext,
+        enclave_public_key_hex: &str,
+    ) -> Result<String, SdkError> {
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::deposit(
+            context,
+            &self.private_key_bytes(),
+        )?;
+        seal_for_enclave(&envelope, enclave_public_key_hex)
+    }
+
+    /// [`Self::prepare_deposit_registration`] with escrow permissions and named secrets, whose
+    /// `EscrowContext` names the same deposit scope.
+    #[cfg(feature = "escrow")]
+    pub fn prepare_deposit_registration_with_escrow(
+        &self,
+        context: keymeld_core::authorization::RegistrationContext,
+        enclave_public_key_hex: &str,
+        escrow: keymeld_core::escrow::EscrowRegistration,
+    ) -> Result<String, SdkError> {
+        let envelope = keymeld_core::authorization::RegistrationEnvelope::deposit_with_escrow(
+            context,
+            &self.private_key_bytes(),
+            escrow,
+        )?;
+        seal_for_enclave(&envelope, enclave_public_key_hex)
     }
 
     pub fn from_private_key(private_key: &[u8]) -> Result<Self, SdkError> {
@@ -118,6 +155,10 @@ impl UserCredentials {
         Ok(hex::encode(encrypted))
     }
 
+    /// The session auth key for a registration's `auth_pubkey`, derived from the session id its
+    /// context names. A key deposit, sealed before its session exists, passes its deposit session
+    /// id (`DepositScope::deposit_session_id`) here, as does every later signature by this key in
+    /// the session it is registered into.
     pub fn derive_session_auth_pubkey(&self, keygen_session_id: &str) -> Result<Vec<u8>, SdkError> {
         let (_, auth_pubkey) =
             SecureCrypto::derive_session_auth_keypair(&self.private_key_bytes(), keygen_session_id)
@@ -125,6 +166,9 @@ impl UserCredentials {
         Ok(auth_pubkey.serialize().to_vec())
     }
 
+    /// Authenticate a request in a signing session with the session auth key derived from
+    /// `keygen_session_id`: the keygen session's id, or its deposit session id when this key was
+    /// registered as a deposit.
     pub fn sign_for_session(
         &self,
         signing_session_id: &str,

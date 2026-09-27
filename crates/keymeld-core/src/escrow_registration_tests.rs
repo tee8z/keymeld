@@ -35,6 +35,7 @@ fn fixture() -> (SignedSessionManifest, RegistrationEnvelope) {
                 .to_hex()
                 .unwrap(),
             subset_definitions: vec![],
+            deposit_scope: None,
         },
         &[11; 32],
     )

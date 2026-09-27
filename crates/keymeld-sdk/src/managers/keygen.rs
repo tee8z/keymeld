@@ -10,8 +10,8 @@ use crate::types::{
     SessionId, SubsetDefinition, TaprootTweak, UserId,
 };
 use keymeld_core::authorization::{
-    RegistrationAuthorization, RegistrationContext, SessionAuthorizationManifest, SignedRoster,
-    SignedSessionManifest, ROSTER_CONTEXT, SUBSET_AGGREGATE_CONTEXT,
+    DepositScope, RegistrationAuthorization, RegistrationContext, SessionAuthorizationManifest,
+    SignedRoster, SignedSessionManifest, ROSTER_CONTEXT, SUBSET_AGGREGATE_CONTEXT,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -24,6 +24,7 @@ pub struct KeygenOptions {
     pub(crate) require_signing_approval: bool,
     pub(crate) authority: Option<AuthorizationCredentials>,
     pub(crate) participant_verifiers: BTreeMap<UserId, Vec<u8>>,
+    pub(crate) deposit_scope: Option<DepositScope>,
 }
 
 impl Default for KeygenOptions {
@@ -35,6 +36,7 @@ impl Default for KeygenOptions {
             require_signing_approval: true,
             authority: None,
             participant_verifiers: BTreeMap::new(),
+            deposit_scope: None,
         }
     }
 }
@@ -62,6 +64,14 @@ impl KeygenOptions {
 
     pub fn tweak(mut self, tweak: TaprootTweak) -> Self {
         self.taproot_tweak = tweak;
+        self
+    }
+
+    /// Accept registrations sealed under `scope` before this session existed, such as key
+    /// deposits made while pools were still forming. Every registration of the session, the
+    /// creator's own included, is then bound to the scope instead of the session.
+    pub fn deposit_scope(mut self, scope: DepositScope) -> Self {
+        self.deposit_scope = Some(scope);
         self
     }
 
@@ -260,6 +270,7 @@ impl<'a> KeygenManager<'a> {
                         participants: subset.participants.clone(),
                     })
                     .collect(),
+                deposit_scope: options.deposit_scope.clone(),
             },
             &authority.export_secret(),
         )?;
@@ -666,19 +677,26 @@ impl<'a> KeygenSession<'a> {
             .sign_session_request(&self.session_id.to_string())?;
 
         let require_signing_approval = options.approval_required(self.require_signing_approval);
+        // A deposit-scoped session binds every registration, this one included, to its scope.
+        let (scope_session_id, scope_digest) = self.authorization_manifest.registration_scope()?;
+        let auth_pubkey =
+            user_credentials.derive_session_auth_pubkey(&scope_session_id.to_string())?;
         let context = RegistrationContext {
-            keygen_session_id: self.session_id.clone(),
-            manifest_hash: self.authorization_manifest.digest()?,
+            keygen_session_id: scope_session_id,
+            manifest_hash: scope_digest,
             user_id: self.client.user_id().clone(),
             enclave_id: slot.enclave_id,
             enclave_key_epoch,
             public_key: user_credentials.public_key_bytes(),
-            auth_pubkey: user_credentials
-                .derive_session_auth_pubkey(&self.session_id.to_string())?,
+            auth_pubkey: auth_pubkey.clone(),
             require_signing_approval,
         };
-        let encrypted_private_key =
-            user_credentials.prepare_registration(context.clone(), enclave_pubkey)?;
+        let encrypted_private_key = if self.authorization_manifest.manifest.deposit_scope.is_some()
+        {
+            user_credentials.prepare_deposit_registration(context.clone(), enclave_pubkey)?
+        } else {
+            user_credentials.prepare_registration(context.clone(), enclave_pubkey)?
+        };
         let registration_authorization = RegistrationAuthorization::sign(
             &registration_credentials.export_secret(),
             context,
@@ -700,9 +718,6 @@ impl<'a> KeygenSession<'a> {
                 .map_err(|e| SdkError::Internal(format!("Failed to serialize: {}", e)))?,
             "keygen_participant_session",
         )?;
-
-        let auth_pubkey =
-            user_credentials.derive_session_auth_pubkey(&self.session_id.to_string())?;
 
         let register_request = RegisterKeygenParticipantRequest {
             registration_authorization,
@@ -946,9 +961,10 @@ impl<'a> KeygenSession<'a> {
                             "Roster is missing this client's authorization".into(),
                         )
                     })?;
+                let (scope_session_id, _) = self.authorization_manifest.registration_scope()?;
                 if key != &credentials.public_key_bytes()
                     || actual.context.auth_pubkey
-                        != credentials.derive_session_auth_pubkey(&self.session_id.to_string())?
+                        != credentials.derive_session_auth_pubkey(&scope_session_id.to_string())?
                 {
                     return Err(SdkError::InvalidInput(
                         "The participant roster does not contain this client's key in its slot"

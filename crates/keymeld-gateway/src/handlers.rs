@@ -602,7 +602,12 @@ pub async fn register_keygen_participant(
     );
 
     let context = &request.registration_authorization.context;
-    if context.keygen_session_id != keygen_session_id
+    // A deposit sealed before this session existed names the manifest's deposit scope instead.
+    let (scope_session_id, _) = collecting
+        .authorization_manifest
+        .registration_scope()
+        .map_err(|e| ApiError::bad_request(format!("Invalid session manifest: {e}")))?;
+    if context.keygen_session_id != scope_session_id
         || context.user_id != request.user_id
         || context.enclave_id != assigned_enclave
         || context.enclave_key_epoch != enclave_key_epoch

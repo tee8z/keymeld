@@ -18,7 +18,11 @@ pub fn validate_registration(
         .verify(manifest, &participant.enclave_encrypted_data)
         .map_err(|e| invalid(e.to_string()))?;
     let context = &authorization.context;
-    if context.keygen_session_id != manifest.manifest.keygen_session_id
+    // A deposit sealed before its session existed names the manifest's deposit scope instead.
+    let (scope_session_id, _) = manifest
+        .registration_scope()
+        .map_err(|e| invalid(e.to_string()))?;
+    if context.keygen_session_id != scope_session_id
         || context.user_id != participant.user_id
         || context.enclave_id != enclave.enclave_id
         || current_epoch.is_some_and(|epoch| context.enclave_key_epoch != epoch)
@@ -35,7 +39,11 @@ pub fn validate_registration(
     )?);
     let envelope: RegistrationEnvelope =
         serde_json::from_slice(&decrypted).map_err(|e| invalid(e.to_string()))?;
-    envelope.verify().map_err(|e| invalid(e.to_string()))?;
+    // A deposit-scoped session takes only envelopes sealed as deposits, and no other session
+    // takes them.
+    envelope
+        .verify_for(manifest)
+        .map_err(|e| invalid(e.to_string()))?;
     if let Some(escrow) = &envelope.escrow {
         if !enclave.confidential_dispatch {
             return Err(invalid(
@@ -129,6 +137,7 @@ pub(crate) mod tests {
                     .to_hex()
                     .unwrap(),
                 subset_definitions: Vec::new(),
+                deposit_scope: None,
             },
             &creator,
         )
@@ -206,6 +215,7 @@ pub(crate) mod tests {
             private_key: [22; 32].to_vec(),
             proof_signature: vec![0; 64],
             escrow: None,
+            deposit: false,
         };
         participant.enclave_encrypted_data = hex::encode(
             SecureCrypto::ecies_encrypt(

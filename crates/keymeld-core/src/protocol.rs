@@ -558,7 +558,7 @@ impl EnclaveCommand {
                         Ok(cmd.keygen_session_id.clone())
                     }
                     KeygenCommand::GetAggregatePublicKey(cmd) => Ok(cmd.keygen_session_id.clone()),
-                    KeygenCommand::Escrow(cmd) => Ok(cmd.context.escrow.keygen_session_id.clone()),
+                    KeygenCommand::Escrow(cmd) => Ok(cmd.context.session_id().clone()),
                 },
                 MusigCommand::Signing(signing_cmd) => match signing_cmd {
                     SigningCommand::InitSession(cmd) => Ok(cmd.signing_session_id.clone()),

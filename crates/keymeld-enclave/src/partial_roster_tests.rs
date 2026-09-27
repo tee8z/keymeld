@@ -244,6 +244,7 @@ fn pool_in(enclaves: &Enclaves, seed: u8, users: Vec<UserId>, session_id: Sessio
                 )
                 .unwrap(),
             subset_definitions: Vec::new(),
+            deposit_scope: None,
         },
         &[seed; 32],
     )
@@ -521,6 +522,7 @@ async fn escrow_request<T: serde::Serialize>(
         request_id: Uuid::now_v7(),
         action_id: action.map(|(id, _)| id.to_string()),
         attempt: action.map(|(_, attempt)| attempt.clone()),
+        keygen_session_id: None,
     };
     let stage = format!("escrow/{}", context.request_id);
     let outcome = session

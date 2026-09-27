@@ -332,6 +332,7 @@ async fn rejected_and_canceled_reservations_cannot_publish_an_uncommitted_roster
             max_signing_sessions: None,
             encrypted_taproot_tweak: String::new(),
             subset_definitions: vec![],
+            deposit_scope: None,
         },
         &authority.export_secret(),
     )

@@ -152,10 +152,14 @@ impl<'a> SigningManager<'a> {
             ));
         }
 
+        let (auth_session_id, _) = keygen_session
+            .authorization_manifest()
+            .registration_scope()?;
         let mut session = SigningSession {
             batch_items: request.batch_items,
             signing_session_id: response.signing_session_id,
             keygen_session_id: response.keygen_session_id,
+            auth_session_id,
             signing_authorization: Some(request.signing_authorization.clone()),
             credentials,
             status: response.status,
@@ -183,10 +187,13 @@ impl<'a> SigningManager<'a> {
             SdkError::InvalidInput("User credentials required for signing status".to_string())
         })?;
 
+        let (auth_session_id, _) = keygen_session
+            .authorization_manifest()
+            .registration_scope()?;
         let user_signature = user_credentials.sign_for_session(
             &signing_session_id.to_string(),
             &self.client.user_id().to_string(),
-            &keygen_session.session_id().to_string(),
+            &auth_session_id.to_string(),
         )?;
 
         let status_response: SigningSessionStatusResponse = self
@@ -214,6 +221,7 @@ impl<'a> SigningManager<'a> {
             batch_items: status_response.batch_items,
             signing_session_id: status_response.signing_session_id,
             keygen_session_id: status_response.keygen_session_id,
+            auth_session_id,
             signing_authorization: None,
             credentials,
             status: status_response.status,
@@ -283,6 +291,9 @@ pub struct SigningSession<'a> {
     batch_items: Vec<SigningBatchItem>,
     signing_session_id: SessionId,
     keygen_session_id: SessionId,
+    /// The session id this client's session auth key derives from: the keygen session's, or its
+    /// deposit scope's when its registrations were sealed as deposits.
+    auth_session_id: SessionId,
     /// The authority's signature over the batch, kept only by the session that
     /// created it; restored sessions do not carry it.
     signing_authorization: Option<SigningAuthorization>,
@@ -395,11 +406,11 @@ impl<'a> SigningSession<'a> {
         let user_signature = user_credentials.sign_for_session(
             &self.signing_session_id.to_string(),
             &self.client.user_id().to_string(),
-            &self.keygen_session_id.to_string(),
+            &self.auth_session_id.to_string(),
         )?;
         let (auth_key, _) = keymeld_core::crypto::SecureCrypto::derive_session_auth_keypair(
             &user_credentials.private_key_bytes(),
-            &self.keygen_session_id.to_string(),
+            &self.auth_session_id.to_string(),
         )?;
         let timestamp = approval_timestamp()?;
         let batch: Vec<_> = self
@@ -436,7 +447,7 @@ impl<'a> SigningSession<'a> {
         let user_signature = user_credentials.sign_for_session(
             &self.signing_session_id.to_string(),
             &self.client.user_id().to_string(),
-            &self.keygen_session_id.to_string(),
+            &self.auth_session_id.to_string(),
         )?;
 
         let response: SigningSessionStatusResponse = self

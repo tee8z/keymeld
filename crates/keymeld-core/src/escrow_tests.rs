@@ -106,6 +106,7 @@ fn request_context(policy: &SignedEscrowPolicy, operation: Operation) -> Request
         request_id: Uuid::now_v7(),
         action_id: action.then(|| "sign".into()),
         attempt: action.then(|| attempt(true)),
+        keygen_session_id: None,
     }
 }
 
@@ -973,4 +974,67 @@ fn per_attempt_repetition_is_only_for_verifier_authorized_signing() {
         },
     );
     assert!(policy.validate().is_err());
+}
+
+#[test]
+fn a_deposit_scoped_command_names_its_keygen_session_under_its_signature() {
+    use crate::protocol::{EnclaveCommand, KeygenCommand, MusigCommand};
+    let policy = signed();
+    let plain = request_context(&policy, Operation::Execute);
+    assert_eq!(plain.session_id(), &policy.policy.context.keygen_session_id);
+    // Without a keygen session the context encodes as before the field existed.
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("keygen_session_id").is_none());
+    assert_eq!(
+        serde_json::from_value::<RequestContext>(json).unwrap(),
+        plain
+    );
+
+    // A deposit-scoped policy names its scope, so the command names the session it acts in.
+    let session = SessionId::new_v7();
+    let mut scoped = plain.clone();
+    scoped.keygen_session_id = Some(session.clone());
+    scoped.validate().unwrap();
+    assert_eq!(scoped.session_id(), &session);
+    let json = serde_json::to_value(&scoped).unwrap();
+    assert_eq!(json["keygen_session_id"], session.to_string());
+    assert_eq!(
+        serde_json::from_value::<RequestContext>(json).unwrap(),
+        scoped
+    );
+    // Only when it differs from the policy's own context, and is not nil.
+    for id in [
+        policy.policy.context.keygen_session_id.clone(),
+        SessionId::from(Uuid::nil()),
+    ] {
+        let mut named = plain.clone();
+        named.keygen_session_id = Some(id);
+        assert!(named.validate().is_err());
+    }
+
+    // The authority's signature covers the session, and the enclave routes by it.
+    let command =
+        EscrowCommand::sign(scoped.clone(), Payload::new(vec![1]).unwrap(), &[8; 32]).unwrap();
+    command.verify(&scoped, key(8).as_bytes()).unwrap();
+    let mut moved = command.clone();
+    moved.context.keygen_session_id = Some(SessionId::new_v7());
+    assert!(moved.verify(&moved.context, key(8).as_bytes()).is_err());
+    assert_ne!(moved.digest().unwrap(), command.digest().unwrap());
+    let transport = EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(command)));
+    assert_eq!(transport.session_id().unwrap(), session);
+    let decoded: EnclaveCommand =
+        bincode::deserialize(&bincode::serialize(&transport).unwrap()).unwrap();
+    let EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(decoded))) = decoded
+    else {
+        panic!("wrong decoded command")
+    };
+    decoded.verify(&scoped, key(8).as_bytes()).unwrap();
+    let plain_command =
+        EscrowCommand::sign(plain.clone(), Payload::new(vec![1]).unwrap(), &[8; 32]).unwrap();
+    let transport =
+        EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(plain_command)));
+    assert_eq!(
+        transport.session_id().unwrap(),
+        policy.policy.context.keygen_session_id
+    );
 }

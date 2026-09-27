@@ -238,8 +238,12 @@ impl DistributingSecrets {
             registration
                 .verify_commitment(manifest)
                 .map_err(|e| invalid_registration(e.to_string()))?;
+            let (scope_session_id, _) = manifest
+                .registration_scope()
+                .map_err(|e| invalid_registration(e.to_string()))?;
             if registration.context.user_id != *user_id
-                || registration.context.keygen_session_id != self.session_id
+                || manifest.manifest.keygen_session_id != self.session_id
+                || registration.context.keygen_session_id != scope_session_id
                 || !metadata.expected_participants.contains(user_id)
                 || keygen_ctx
                     .recipient_authorization
@@ -410,9 +414,15 @@ impl DistributingSecrets {
             <[u8; 32]>::try_from(envelope.private_key.as_slice())
                 .map_err(|_| invalid_registration("Invalid private key length"))?,
         );
-        let (_, derived_auth) =
-            SecureCrypto::derive_session_auth_keypair(&private_bytes, &self.session_id.to_string())
-                .map_err(|e| invalid_registration(e.to_string()))?;
+        // A deposit's auth key derives from the deposit session id it was sealed under.
+        let (scope_session_id, _) = manifest
+            .registration_scope()
+            .map_err(|e| invalid_registration(e.to_string()))?;
+        let (_, derived_auth) = SecureCrypto::derive_session_auth_keypair(
+            &private_bytes,
+            &scope_session_id.to_string(),
+        )
+        .map_err(|e| invalid_registration(e.to_string()))?;
         if derived_auth.serialize().to_vec() != registration.context.auth_pubkey {
             return Err(invalid_registration(
                 "Auth public key does not match decrypted participant key",
@@ -837,6 +847,7 @@ mod registration_tests {
                     request_id: uuid::Uuid::now_v7(),
                     action_id: Some("refund".into()),
                     attempt: None,
+                    keygen_session_id: None,
                 },
                 encrypted_request: Payload::new(vec![1]).unwrap(),
                 authorization: Vec::new(),

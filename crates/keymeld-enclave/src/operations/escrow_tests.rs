@@ -327,6 +327,7 @@ fn command<T: Serialize>(
         request_id: Uuid::now_v7(),
         action_id: action.map(|(id, _)| id.into()),
         attempt: action.map(|(_, attempt)| attempt.clone()),
+        keygen_session_id: None,
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(request).unwrap());
     let encrypted = f

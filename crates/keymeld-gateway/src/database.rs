@@ -778,8 +778,12 @@ impl Database {
                     .verify(&collecting.authorization_manifest, &enclave_encrypted_data)
                     .map_err(|e| ApiError::unauthorized(format!("Invalid slot authorization: {e}")))?;
                 let context = &request.registration_authorization.context;
+                let (scope_session_id, _) = collecting
+                    .authorization_manifest
+                    .registration_scope()
+                    .map_err(|e| ApiError::bad_request(format!("Invalid session manifest: {e}")))?;
                 if context.user_id != request.user_id
-                    || context.keygen_session_id != keygen_session_id
+                    || context.keygen_session_id != scope_session_id
                     || context.enclave_id != enclave_id
                     || context.enclave_key_epoch != enclave_key_epoch
                     || context.public_key != request.public_key

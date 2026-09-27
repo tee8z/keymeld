@@ -29,6 +29,7 @@ fn registration() -> ValidateRegistrationCommand {
                 subset_definitions: vec![],
                 max_signing_sessions: None,
                 encrypted_taproot_tweak: "opaque tweak".into(),
+                deposit_scope: None,
             },
             signature: vec![],
         }),

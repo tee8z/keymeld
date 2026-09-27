@@ -99,12 +99,13 @@ fn expected_context(
             "Escrow participant is outside the authorized manifest",
         ));
     }
+    // A deposit's policy was signed before its session existed, so it names the manifest's
+    // deposit scope rather than the session.
+    let (scope_session_id, scope_digest) = manifest.registration_scope().map_err(invalid)?;
     let mut expected = context.clone();
-    expected.keygen_session_id = manifest.manifest.keygen_session_id.clone();
+    expected.keygen_session_id = scope_session_id;
     expected.user_id = user_id.clone();
-    expected.manifest_digest = manifest
-        .digest()
-        .map_err(invalid)?
+    expected.manifest_digest = scope_digest
         .try_into()
         .map_err(|_| invalid("Invalid manifest digest length"))?;
     Ok(expected)
@@ -346,6 +347,11 @@ struct Binding {
     enclave_id: keymeld_core::EnclaveId,
     participant_policy_digests: BTreeMap<UserId, [u8; 32]>,
     application_state: Payload,
+    /// The keygen session of a deposit-scoped policy, whose context names only its deposit
+    /// scope. A deposit may be registered in more than one session; this keeps each session's
+    /// receipts to itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keygen_session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +487,7 @@ fn signed_response(
 fn validate_binding(binding: &Binding, command: &EscrowCommand) -> Result<(), EnclaveError> {
     if binding.context != command.context.escrow
         || binding.policy_digest != command.context.policy_digest
+        || binding.keygen_session_id != command.context.keygen_session_id
     {
         return Err(invalid(
             "Escrow receipt belongs to another policy, participant or application",
@@ -494,6 +501,7 @@ fn validate_binding(binding: &Binding, command: &EscrowCommand) -> Result<(), En
 fn unbound_binding(
     policy: &SignedEscrowPolicy,
     enclave_id: keymeld_core::EnclaveId,
+    command: &EscrowCommand,
 ) -> Result<Binding, EnclaveError> {
     Ok(Binding {
         context: policy.policy.context.clone(),
@@ -501,6 +509,7 @@ fn unbound_binding(
         enclave_id,
         participant_policy_digests: BTreeMap::new(),
         application_state: Payload::default(),
+        keygen_session_id: command.context.keygen_session_id.clone(),
     })
 }
 
@@ -516,7 +525,8 @@ fn validate_prepared(
         .get(&prepared.action_id)
         .is_some_and(|grant| grant.unbound);
     // Prepare derives this binding only for an unbound permission, never from a receipt.
-    if unbound && prepared.binding != unbound_binding(policy, prepared.binding.enclave_id)? {
+    if unbound && prepared.binding != unbound_binding(policy, prepared.binding.enclave_id, command)?
+    {
         return Err(invalid(
             "An unbound permission acts only under its derived binding",
         ));
@@ -1016,8 +1026,11 @@ pub(crate) async fn handle_snapshot(
         .as_ref()
         .ok_or_else(|| invalid("Escrow operations require an authorized manifest"))?;
     manifest.verify().map_err(invalid)?;
-    if command.context.escrow.keygen_session_id != completed.session_id
+    // A deposit-scoped policy names its deposit scope, and its command names the session.
+    let (scope_session_id, _) = manifest.registration_scope().map_err(invalid)?;
+    if command.context.session_id() != &completed.session_id
         || manifest.manifest.keygen_session_id != completed.session_id
+        || command.context.escrow.keygen_session_id != scope_session_id
     {
         return Err(invalid("Escrow command belongs to another keygen session"));
     }
@@ -1219,6 +1232,7 @@ pub(crate) async fn handle_snapshot(
                 enclave_id: context.enclave_id,
                 participant_policy_digests,
                 application_state: Payload::default(),
+                keygen_session_id: command.context.keygen_session_id.clone(),
             };
             if policy.policy.verifier.is_some()
                 && !binding.participant_policy_digests.contains_key(user)
@@ -1268,7 +1282,7 @@ pub(crate) async fn handle_snapshot(
                 if !request.binding_receipt.as_bytes().is_empty() {
                     return Err(invalid("An unbound permission takes no binding receipt"));
                 }
-                unbound_binding(policy, context.enclave_id)?
+                unbound_binding(policy, context.enclave_id, command)?
             } else {
                 let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)?
                 else {

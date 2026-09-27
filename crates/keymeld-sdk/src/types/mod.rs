@@ -7,9 +7,10 @@ use utoipa::ToSchema;
 
 // Re-export core types that are part of the API
 pub use keymeld_core::authorization::{
-    EnclaveRecipientAuthorization, ParticipantApproval, ParticipantRoster,
+    DepositScope, EnclaveRecipientAuthorization, ParticipantApproval, ParticipantRoster,
     RegistrationAuthorization, RegistrationContext, RegistrationEnvelope,
     SessionAuthorizationManifest, SignedRoster, SignedSessionManifest, SigningAuthorization,
+    MAX_DEPOSIT_EVIDENCE_BYTES,
 };
 pub use keymeld_core::identifiers::{EnclaveId, KeyId, SessionId, UserId};
 pub use keymeld_core::protocol::{
