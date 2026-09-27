@@ -79,6 +79,32 @@ A registration batch the enclave refuses changes nothing, and the session keeps 
 Calling it again replays the exact journaled requests: an enclave that still holds the session answers them without effect, and one that restarted applies them again.
 Save the journal of the first call durably, since the enclaves bind the session to its route. A registered roster cannot change.
 
+## Deposits
+
+A deposit is a registration sealed before its session exists, such as an entry made while pools are still forming.
+The application picks a deposit session id and a 32-byte digest, for example of the published terms.
+The deposit's `RegistrationContext` and its policy's `EscrowContext` name that pair in place of the session id and manifest digest.
+Its session auth key derives from the deposit session id: `UserCredentials::derive_session_auth_pubkey(&deposit_session_id.to_string())`.
+Seal it with `RegistrationEnvelope::deposit` or `deposit_with_escrow`, or the SDK's `UserCredentials::prepare_deposit_registration` and `prepare_deposit_registration_with_escrow`.
+The participant's possession proof commits to that marking.
+An enclave accepts a marked envelope only in a session with a deposit scope, and an unmarked one only in a session without.
+So no manifest can name another session's id and digest as its deposit scope to adopt that session's registrations.
+
+A session accepts deposits when its signed manifest carries a `deposit_scope` with the same pair.
+`SignedSessionManifest::registration_scope` returns the pair its registrations must name.
+Every registration and escrow policy of that session, the creator's own included, is then bound to the scope and sealed as a deposit.
+The manifest digest still identifies the session: its enclave recipients, signed roster and escrow receipts name the session itself.
+Escrow commands for a deposit-scoped policy set `RequestContext::keygen_session_id` to the session they act in.
+The scope's `evidence` is opaque application data, at most 64 KiB, covered by the creator's signature.
+A verifier reads it from `manifest.manifest.deposit_scope` at enrollment and binding, for example to check how the pool was formed.
+
+- A deposit may be registered into any session whose manifest names its scope and whose verifier accepts it.
+- Keymeld keeps no ledger of used deposits. An application that needs single use must enforce it, for example with a funding input that can be spent only once, or reject reuse in its verifier.
+- A deposit must be registered under the enclave key epoch it was sealed to, so enclave keys must not rotate while deposits wait.
+- The slot credential still authorizes each registration, and the registration stays bound to its manifest slot and enclave.
+
+Keys registered as deposits cannot be copied to the user key store with `StoreKeyFromKeygen`.
+
 ## Trusted verifiers
 
 `EscrowVerifier` separates enrollment, binding, preparation, and execution checks.
