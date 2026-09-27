@@ -1,6 +1,6 @@
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
+    Aes256Gcm,
 };
 use aws_sdk_kms::Client as KmsClient;
 use dashmap::DashMap;
@@ -240,13 +240,14 @@ impl EnclaveSharedContext {
 
         let mut nonce_bytes = [0u8; 12];
         rand::rng().fill(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, private_key).map_err(|e| {
-            EnclaveError::Crypto(CryptoError::Other(format!(
-                "Failed to encrypt private key: {e}"
-            )))
-        })?;
+        let ciphertext = cipher
+            .encrypt((&nonce_bytes).into(), private_key)
+            .map_err(|e| {
+                EnclaveError::Crypto(CryptoError::Other(format!(
+                    "Failed to encrypt private key: {e}"
+                )))
+            })?;
 
         let mut result = nonce_bytes.to_vec();
         result.extend_from_slice(&ciphertext);
@@ -259,22 +260,21 @@ impl EnclaveSharedContext {
         dek: &[u8; 32],
         encrypted_data: &[u8],
     ) -> Result<Vec<u8>, EnclaveError> {
-        if encrypted_data.len() < 12 {
+        let Some((nonce_bytes, ciphertext)) = encrypted_data.split_first_chunk::<12>() else {
             return Err(EnclaveError::Crypto(CryptoError::Other(
                 "Encrypted data too short to contain nonce".to_string(),
             )));
-        }
+        };
 
         let cipher = Aes256Gcm::new(dek.into());
 
-        let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
-            EnclaveError::Crypto(CryptoError::Other(format!(
-                "Failed to decrypt private key: {e}"
-            )))
-        })?;
+        let plaintext = cipher
+            .decrypt(nonce_bytes.into(), ciphertext)
+            .map_err(|e| {
+                EnclaveError::Crypto(CryptoError::Other(format!(
+                    "Failed to decrypt private key: {e}"
+                )))
+            })?;
 
         Ok(plaintext)
     }

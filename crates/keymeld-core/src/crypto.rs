@@ -1,7 +1,7 @@
 use crate::KeyMeldError;
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-    Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, Nonce},
+    Aes256Gcm, Key,
 };
 use hkdf::Hkdf;
 
@@ -106,6 +106,14 @@ impl Default for SecureCrypto {
     }
 }
 
+fn random_nonce() -> Result<Nonce<Aes256Gcm>, KeyMeldError> {
+    let mut nonce = [0u8; 12];
+    RandOsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
+    Ok(nonce.into())
+}
+
 impl SecureCrypto {
     pub const fn new() -> Self {
         Self
@@ -180,8 +188,8 @@ impl SecureCrypto {
         hk.expand(b"keymeld-ecies-encrypt", &mut encryption_key)
             .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&encryption_key));
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = Aes256Gcm::new(&encryption_key.into());
+        let nonce = random_nonce()?;
         let ciphertext = cipher
             .encrypt(&nonce, plaintext)
             .map_err(|e| KeyMeldError::EncryptionError(e.to_string()))?;
@@ -205,7 +213,8 @@ impl SecureCrypto {
         let ephemeral_public =
             PublicKey::from_slice(&ciphertext[0..33]).map_err(KeyMeldError::InvalidKey)?;
 
-        let nonce = Nonce::from_slice(&ciphertext[33..45]);
+        let nonce = Nonce::<Aes256Gcm>::try_from(&ciphertext[33..45])
+            .map_err(|_| KeyMeldError::CryptoError("Invalid nonce length".to_string()))?;
         let actual_ciphertext = &ciphertext[45..];
         let shared_secret = SharedSecret::new(&ephemeral_public, secret_key);
         let hk = Hkdf::<Sha256>::new(None, shared_secret.as_ref());
@@ -213,9 +222,9 @@ impl SecureCrypto {
         hk.expand(b"keymeld-ecies-encrypt", &mut decryption_key)
             .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&decryption_key));
+        let cipher = Aes256Gcm::new(&decryption_key.into());
         let plaintext = cipher
-            .decrypt(nonce, actual_ciphertext)
+            .decrypt(&nonce, actual_ciphertext)
             .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))?;
 
         Ok(plaintext)
@@ -444,9 +453,8 @@ impl SecureCrypto {
         hk.expand(context.as_bytes(), &mut derived_key)
             .map_err(|e| KeyMeldError::HkdfError(e.to_string()))?;
 
-        let key = Key::<Aes256Gcm>::from_slice(&derived_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = Aes256Gcm::new(&derived_key.into());
+        let nonce = random_nonce()?;
 
         let ciphertext = cipher
             .encrypt(&nonce, data)
@@ -757,7 +765,9 @@ pub struct SessionSecret {
 impl SessionSecret {
     pub fn new_random() -> Self {
         let mut key = [0u8; 32];
-        key.copy_from_slice(&Aes256Gcm::generate_key(&mut OsRng));
+        RandOsRng
+            .try_fill_bytes(&mut key)
+            .expect("the OS random number generator should be available");
         Self { key }
     }
 
@@ -790,13 +800,13 @@ impl SessionSecret {
         let mut derived_key = [0u8; 32];
         hk.expand(context.as_bytes(), &mut derived_key)
             .expect("HKDF expand should not fail with valid inputs");
-        *Key::<Aes256Gcm>::from_slice(&derived_key)
+        derived_key.into()
     }
 
     pub fn encrypt(&self, data: &[u8], context: &str) -> Result<EncryptedData, KeyMeldError> {
         let key = self.derive_key(context);
         let cipher = Aes256Gcm::new(&key);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = random_nonce()?;
 
         let ciphertext = cipher
             .encrypt(&nonce, data)
@@ -824,17 +834,15 @@ impl SessionSecret {
         let key = self.derive_key(&encrypted.context);
         let cipher = Aes256Gcm::new(&key);
 
-        if encrypted.nonce.len() != 12 {
-            return Err(KeyMeldError::ValidationError(format!(
+        let nonce = Nonce::<Aes256Gcm>::try_from(encrypted.nonce.as_slice()).map_err(|_| {
+            KeyMeldError::ValidationError(format!(
                 "Invalid nonce length: expected 12 bytes, got {}",
                 encrypted.nonce.len()
-            )));
-        }
-
-        let nonce = Nonce::from_slice(&encrypted.nonce);
+            ))
+        })?;
 
         cipher
-            .decrypt(nonce, encrypted.ciphertext.as_ref())
+            .decrypt(&nonce, encrypted.ciphertext.as_ref())
             .map_err(|e| KeyMeldError::DecryptionError(e.to_string()))
     }
 

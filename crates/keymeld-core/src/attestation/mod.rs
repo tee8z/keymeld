@@ -133,7 +133,7 @@ impl AttestationPolicy {
         // Trust-anchor validity is deliberately not part of webpki, so enforce it here.
         let root_cert = x509_cert::Certificate::from_der(root)
             .map_err(|_| invalid("Invalid attestation trust anchor"))?;
-        let validity = root_cert.tbs_certificate.validity;
+        let validity = root_cert.tbs_certificate().validity();
         if now_seconds < validity.not_before.to_unix_duration().as_secs()
             || now_seconds > validity.not_after.to_unix_duration().as_secs()
         {
@@ -272,7 +272,7 @@ mod tests {
         pkcs8::DecodePrivateKey,
     };
     use rcgen::{
-        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
+        BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
         PKCS_ECDSA_P384_SHA384,
     };
     use sha2::{Digest, Sha256};
@@ -308,12 +308,11 @@ mod tests {
 
     fn make_fixture() -> Fixture {
         let root_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
-        let root = certificate_params("test root", true)
-            .self_signed(&root_key)
-            .unwrap();
+        let root_params = certificate_params("test root", true);
+        let root = root_params.self_signed(&root_key).unwrap();
         let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
         let leaf = certificate_params("test NSM", false)
-            .signed_by(&leaf_key, &root, &root_key)
+            .signed_by(&leaf_key, &Issuer::from_params(&root_params, &root_key))
             .unwrap();
         let signer = SigningKey::from_pkcs8_der(&leaf_key.serialize_der()).unwrap();
         let key = crate::crypto::SecureCrypto::generate_enclave_keypair()

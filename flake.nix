@@ -41,7 +41,7 @@
         };
 
         # Use specific Rust version for reproducible builds
-        rustToolchain = pkgs.rust-bin.stable."1.88.0".default.override {
+        rustToolchain = pkgs.rust-bin.stable."1.92.0".default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 

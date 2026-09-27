@@ -23,13 +23,13 @@ sha2 = { workspace = true }
 hkdf = { workspace = true }
 aes-gcm = { workspace = true }
 hex = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 subtle = "2.5.0"
-coset = "0.3.8"
+coset = "0.4.2"
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 rustls-webpki = { version = "0.103.15", default-features = false, features = ["std"] }
 rustls-pki-types = "1.12"
-x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
+x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
 serde_bytes = "0.11"
 uuid = { workspace = true }
 time = { workspace = true }
@@ -43,7 +43,7 @@ tokio-vsock = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-rcgen = "0.13.2"
+rcgen = "0.14.10"
 
 [features]
 default = ["gateway"]
