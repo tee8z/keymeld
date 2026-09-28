@@ -49,7 +49,7 @@ utoipa = { version = "5.4.0", features = [
   "preserve_order",
   "preserve_path_order",
 ] }
-utoipa-scalar = { version = "0.3.0", features = ["axum"] }
+utoipa-scalar = { version = "0.4.0", features = ["axum"] }
 
 [dev-dependencies]
 tempfile = "3.15.0"
