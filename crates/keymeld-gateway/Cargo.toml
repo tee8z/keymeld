@@ -40,7 +40,7 @@ time = { workspace = true }
 sqlx = { workspace = true }
 prometheus = { version = "0.14.0" }
 lazy_static = { version = "1.4.0" }
-utoipa = { version = "5.4.0", features = [
+utoipa = { version = "6.0.0", features = [
   "axum_extras",
   "time",
   "uuid",

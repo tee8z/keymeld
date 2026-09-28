@@ -34,7 +34,7 @@ serde_bytes = "0.11"
 uuid = { workspace = true }
 time = { workspace = true }
 dashmap = { workspace = true }
-utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
+utoipa = { version = "6.0.0", features = ["uuid"], optional = true }
 sqlx = { workspace = true, optional = true }
 
 # Networking dependencies - not available on WASM
