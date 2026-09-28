@@ -2666,7 +2666,7 @@ dependencies = [
  "bincode",
  "cms",
  "dashmap",
- "der 0.7.10",
+ "der 0.8.2",
  "hex",
  "keymeld-core",
  "keymeld-sdk",
