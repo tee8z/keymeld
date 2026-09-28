@@ -35,7 +35,7 @@ tokio-vsock = "0.7.2"
 async-trait = "0.1.83"
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 tower = { version = "0.5.3", features = ["full"] }
-tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 hyper = "1.7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9"
