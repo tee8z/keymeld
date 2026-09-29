@@ -79,6 +79,10 @@ where
     pub fn get_metrics(&self) -> ConnectionMetrics {
         self.client.get_metrics()
     }
+
+    fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
 }
 
 impl<C, R> From<MultiplexedConnection<C, R>> for ConnectionMetadata<C, R>
@@ -170,7 +174,7 @@ where
 
     /// Check if connection should be recycled
     fn should_recycle(&self) -> bool {
-        self.is_too_old() || self.is_idle_too_long()
+        self.connection.is_closed() || self.is_too_old() || self.is_idle_too_long()
     }
 }
 
@@ -660,8 +664,10 @@ where
                 let metadata = entry.value();
                 let metrics = metadata.get_metrics();
 
-                // Remove if unhealthy, too old, or idle too long
-                if !metrics.is_healthy() {
+                // Remove if closed, unhealthy, too old, or idle too long
+                if metadata.connection.is_closed() {
+                    Some((*entry.key(), "closed"))
+                } else if !metrics.is_healthy() {
                     Some((*entry.key(), "unhealthy"))
                 } else if metadata.is_too_old() {
                     Some((*entry.key(), "exceeded max lifetime"))
@@ -763,4 +769,75 @@ pub struct PoolHealth {
     pub avg_load_per_connection: f64,
     pub failure_rate: f64,
     pub requests_per_minute: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managed_socket::connection::{create_server_handler, ServerCommandHandler};
+    use serde::{Deserialize, Serialize};
+    use std::{future::Future, pin::Pin};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    enum Command {
+        Ping,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    enum Reply {
+        Pong,
+    }
+
+    struct Pong;
+
+    impl ServerCommandHandler<Command, Reply> for Pong {
+        fn handle_command(
+            &self,
+            _command: Command,
+        ) -> Pin<Box<dyn Future<Output = Result<Reply, anyhow::Error>> + Send + '_>> {
+            Box::pin(async { Ok(Reply::Pong) })
+        }
+    }
+
+    /// A connection the peer closed for idleness leaves the pool at the next
+    /// cleanup. Before, it stayed with its last minute's request count, so it
+    /// looked neither idle nor unhealthy, and each enclave's pool kept
+    /// growing by one connection an hour.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cleanup_removes_connections_the_peer_closed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let timeouts = TimeoutConfig {
+            network_read_timeout_secs: 1,
+            ..TimeoutConfig::default()
+        };
+        let server_timeouts = timeouts.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            create_server_handler::<Command, Reply>(Arc::new(Pong), Arc::new(AtomicU32::new(0)))
+                .handle(
+                    SocketStream::Tcp(stream),
+                    Arc::new(RequestRateTracker::new()),
+                    server_timeouts,
+                )
+                .await
+        });
+
+        let pool: SocketPool<Command, Reply> =
+            SocketPool::new(SocketConnector::tcp("127.0.0.1", port), &timeouts).unwrap();
+        assert_eq!(pool.send_command(Command::Ping).await.unwrap(), Reply::Pong);
+        assert_eq!(pool.get_connection_stats().active_connections, 1);
+        assert_eq!(pool.cleanup_unhealthy_connections().await, 0, "still open");
+
+        // Both sides give up on the idle connection after the 1 s read timeout.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.cleanup_unhealthy_connections().await == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "closed connection never left the pool"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(pool.get_connection_stats().active_connections, 0);
+    }
 }

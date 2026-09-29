@@ -22,42 +22,42 @@ pub const LATENCY_HISTOGRAM_BUCKETS: [f64; 15] = [
     f64::INFINITY, // catch-all
 ];
 
+/// Counts requests per clock minute. A count belongs to its minute: once the
+/// clock moves on, it stops being "current", even if no request arrives to
+/// roll it over. Stale counts made idle connections look loaded, so the pool
+/// kept opening new ones and never treated old ones as idle.
 #[derive(Debug)]
 pub struct RequestRateTracker {
     requests_current_minute: AtomicU32,
-    requests_previous_minute: AtomicU32,
     current_minute: AtomicU64,
+}
+
+fn unix_minute() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 60
 }
 
 impl RequestRateTracker {
     pub fn new() -> Self {
-        let current_minute = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            / 60;
-
         Self {
             requests_current_minute: AtomicU32::new(0),
-            requests_previous_minute: AtomicU32::new(0),
-            current_minute: AtomicU64::new(current_minute),
+            current_minute: AtomicU64::new(unix_minute()),
         }
     }
 
     pub fn record_request(&self) {
-        let now_minute = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            / 60;
+        self.record_request_at(unix_minute());
+    }
 
+    fn record_request_at(&self, now_minute: u64) {
         let current_minute = self.current_minute.load(Ordering::Acquire);
 
         if now_minute > current_minute {
             // Rotate to new minute
-            let old_current = self.requests_current_minute.swap(1, Ordering::AcqRel);
-            self.requests_previous_minute
-                .store(old_current, Ordering::Release);
+            self.requests_current_minute.store(1, Ordering::Release);
             self.current_minute.store(now_minute, Ordering::Release);
         } else {
             // Increment current minute
@@ -65,26 +65,32 @@ impl RequestRateTracker {
         }
     }
 
+    /// Requests in the current minute, or in the minute before it until the
+    /// first request of the current one; zero after a minute with none.
     pub fn requests_per_minute(&self) -> f64 {
-        let now_minute = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            / 60;
+        self.requests_per_minute_at(unix_minute())
+    }
 
+    fn requests_per_minute_at(&self, now_minute: u64) -> f64 {
         let current_minute = self.current_minute.load(Ordering::Acquire);
-
-        if now_minute > current_minute {
-            // We're in a new minute, use previous minute's data
-            self.requests_previous_minute.load(Ordering::Acquire) as f64
-        } else {
-            // Still in current minute, use current data
+        if now_minute <= current_minute + 1 {
             self.requests_current_minute.load(Ordering::Acquire) as f64
+        } else {
+            0.0
         }
     }
 
+    /// Requests so far in the current minute.
     pub fn current_count(&self) -> u32 {
-        self.requests_current_minute.load(Ordering::Acquire)
+        self.current_count_at(unix_minute())
+    }
+
+    fn current_count_at(&self, now_minute: u64) -> u32 {
+        if now_minute > self.current_minute.load(Ordering::Acquire) {
+            0
+        } else {
+            self.requests_current_minute.load(Ordering::Acquire)
+        }
     }
 }
 
@@ -344,5 +350,30 @@ impl ConnectionMetrics {
             return true;
         }
         self.failure_rate < 50.0
+    }
+}
+
+#[cfg(test)]
+mod rate_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn counts_expire_with_their_minute() {
+        let tracker = RequestRateTracker::new();
+        let minute = tracker.current_minute.load(Ordering::Acquire);
+        for _ in 0..12 {
+            tracker.record_request_at(minute);
+        }
+        assert_eq!(tracker.current_count_at(minute), 12);
+        assert_eq!(tracker.requests_per_minute_at(minute), 12.0);
+        // The next minute has no requests yet: the last full minute's rate
+        // still shows, but nothing is in flight in this one.
+        assert_eq!(tracker.current_count_at(minute + 1), 0);
+        assert_eq!(tracker.requests_per_minute_at(minute + 1), 12.0);
+        // An idle connection reads as idle, not as still loaded.
+        assert_eq!(tracker.current_count_at(minute + 30), 0);
+        assert_eq!(tracker.requests_per_minute_at(minute + 30), 0.0);
+        tracker.record_request_at(minute + 30);
+        assert_eq!(tracker.current_count_at(minute + 30), 1);
     }
 }

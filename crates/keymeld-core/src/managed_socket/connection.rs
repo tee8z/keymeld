@@ -184,16 +184,18 @@ where
             Self::handle_server_write_task(writer, response_rx, write_timeout).await
         });
 
-        // Wait for either task to complete (or fail)
+        // Wait for either task to complete (or fail), then stop the other:
+        // a detached half would keep the socket open.
+        let (mut read_task, mut write_task) = (read_task, write_task);
         tokio::select! {
-            read_result = read_task => {
+            read_result = &mut read_task => {
                 match read_result {
                     Ok(Ok(())) => debug!("Server read task completed successfully"),
                     Ok(Err(e)) => error!("Server read task error: {e}"),
                     Err(e) => error!("Server read task panicked: {e}"),
                 }
             }
-            write_result = write_task => {
+            write_result = &mut write_task => {
                 match write_result {
                     Ok(Ok(())) => debug!("Server write task completed successfully"),
                     Ok(Err(e)) => error!("Server write task error: {e}"),
@@ -201,6 +203,8 @@ where
                 }
             }
         }
+        read_task.abort();
+        write_task.abort();
 
         debug!("Server connection handler completed successfully");
         Ok(())
@@ -311,7 +315,12 @@ where
                     Err(anyhow!("Failed to read message header: {e}"))
                 }
             }
-            Err(e) => Err(anyhow!("Timeout reading message header: {e}")),
+            // No request for the whole read timeout: the peer left the
+            // connection idle, so close it like an orderly shutdown.
+            Err(_) => {
+                debug!("Closing server connection idle for the read timeout");
+                Ok(None)
+            }
         }
     }
 
@@ -533,16 +542,18 @@ where
             .await
         });
 
-        // Wait for either task to complete (or fail)
+        // Wait for either task to complete (or fail), then stop the other,
+        // so the request channel closes and the pool sees a dead connection.
+        let (mut read_task, mut write_task) = (read_task, write_task);
         tokio::select! {
-            read_result = read_task => {
+            read_result = &mut read_task => {
                 match read_result {
                     Ok(Ok(())) => debug!("Client read task completed successfully"),
                     Ok(Err(e)) => error!("Client read task error: {e}"),
                     Err(e) => error!("Client read task panicked: {e}"),
                 }
             }
-            write_result = write_task => {
+            write_result = &mut write_task => {
                 match write_result {
                     Ok(Ok(())) => debug!("Client write task completed successfully"),
                     Ok(Err(e)) => error!("Client write task error: {e}"),
@@ -550,6 +561,8 @@ where
                 }
             }
         }
+        read_task.abort();
+        write_task.abort();
 
         Ok(())
     }
@@ -661,8 +674,8 @@ where
                     }
                     break;
                 }
-                Err(e) => {
-                    error!("Client read task - timeout reading message header: {e}");
+                Err(_) => {
+                    debug!("Closing client connection idle for the read timeout");
                     break;
                 }
             }
@@ -945,6 +958,11 @@ where
             timeout_config,
             metrics,
         }
+    }
+
+    /// Whether the connection's tasks have ended; no request can succeed.
+    pub fn is_closed(&self) -> bool {
+        self.request_tx.is_closed()
     }
 
     pub async fn send_request(&self, request: Request<C>) -> Result<R> {
