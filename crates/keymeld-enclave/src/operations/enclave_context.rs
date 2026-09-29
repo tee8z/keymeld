@@ -11,7 +11,7 @@ use keymeld_core::{
     protocol::{CryptoError, EnclaveError},
     EncryptedData,
 };
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use zeroize::{Zeroize, Zeroizing};
 

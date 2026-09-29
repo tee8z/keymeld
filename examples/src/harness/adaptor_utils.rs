@@ -29,7 +29,7 @@ impl Default for AdaptorSecret {
 
 impl AdaptorSecret {
     pub fn new() -> Self {
-        use rand::RngCore;
+        use rand::Rng;
         let mut rng = rand::rng();
         let mut secret_bytes = [0u8; 32];
         rng.fill_bytes(&mut secret_bytes);

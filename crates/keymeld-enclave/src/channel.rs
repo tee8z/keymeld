@@ -104,7 +104,7 @@ pub struct AuthenticatedCommandHandler {
 
 impl AuthenticatedCommandHandler {
     pub fn new(operator: Arc<EnclaveOperator>, policy: ChannelPolicy) -> Self {
-        let secret_key = SecretKey::new(&mut rand::rng());
+        let secret_key = SecretKey::new(&mut secp256k1::rand::rng());
         let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key)
             .serialize()
             .to_vec();

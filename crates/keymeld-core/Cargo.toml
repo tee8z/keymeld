@@ -34,7 +34,7 @@ serde_bytes = "0.11"
 uuid = { workspace = true }
 time = { workspace = true }
 dashmap = { workspace = true }
-utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
+utoipa = { version = "6.0.0", features = ["uuid"], optional = true }
 sqlx = { workspace = true, optional = true }
 
 # Networking dependencies - not available on WASM
@@ -62,6 +62,8 @@ networking = ["tokio", "tokio-vsock"]
 getrandom = { version = "0.2", features = ["js"] }
 # getrandom 0.3 (used by rand 0.9) needs "wasm_js" feature for WASM
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# getrandom 0.4 (used by rand 0.10) needs "wasm_js" feature for WASM
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 wasm-bindgen = "0.2"
 
 [lints]
@@ -71,4 +73,4 @@ workspace = true
 # These are WASM target-specific dependencies that enable proper random number
 # generation and JS interop. cargo-machete doesn't detect their usage because
 # they're only compiled for wasm32 targets.
-ignored = ["getrandom", "getrandom_03", "wasm-bindgen"]
+ignored = ["getrandom", "getrandom_03", "getrandom_04", "wasm-bindgen"]
