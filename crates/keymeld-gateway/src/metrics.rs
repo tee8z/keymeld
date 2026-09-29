@@ -54,7 +54,7 @@ lazy_static::lazy_static! {
 
     static ref ENCLAVE_CONNECTION_LOAD_PERCENT: GaugeVec = register_gauge_vec!(
         "keymeld_enclave_connection_load_percent",
-        "Connection load as percentage of threshold (10 requests per connection)",
+        "Connection load as percentage of threshold (10 concurrent requests per connection)",
         &["enclave_id"]
     ).unwrap();
 
