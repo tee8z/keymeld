@@ -35,7 +35,7 @@ use keymeld_sdk::{
 use keymeld_sdk::prelude::{
     BatchSigningItem, KeyMeldClient, KeygenOptions, SigningOptions, UserCredentials,
 };
-use rand::RngCore;
+use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};

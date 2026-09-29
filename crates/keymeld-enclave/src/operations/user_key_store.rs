@@ -287,7 +287,7 @@ mod tests {
 
         // Generate a valid secp256k1 private key
         let secp = Secp256k1::new();
-        let (secret_key, _) = secp.generate_keypair(&mut rand::rng());
+        let (secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let private_key = KeyMaterial::new(secret_key.secret_bytes().to_vec());
 
         let auth_pubkey = auth_key(&secret_key);
@@ -323,7 +323,7 @@ mod tests {
         // Store two keys for the same user
         for _ in 0..2 {
             let key_id = KeyId::new_v7();
-            let (secret_key, _) = secp.generate_keypair(&mut rand::rng());
+            let (secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rng());
             let private_key = KeyMaterial::new(secret_key.secret_bytes().to_vec());
             store
                 .store_key(
@@ -347,7 +347,7 @@ mod tests {
         let user_id = UserId::new_v7();
         let key_id = KeyId::new_v7();
         let secp = Secp256k1::new();
-        let (secret_key, _) = secp.generate_keypair(&mut rand::rng());
+        let (secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let private_key = KeyMaterial::new(secret_key.secret_bytes().to_vec());
 
         store

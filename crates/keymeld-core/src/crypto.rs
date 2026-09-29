@@ -5,7 +5,7 @@ use aes_gcm::{
 };
 use hkdf::Hkdf;
 
-use rand::{rngs::OsRng as RandOsRng, TryRngCore};
+use rand::{rngs::SysRng, TryRng};
 use secp256k1::{ecdh::SharedSecret, ecdsa::Signature, Message, PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -108,7 +108,7 @@ impl Default for SecureCrypto {
 
 fn random_nonce() -> Result<Nonce<Aes256Gcm>, KeyMeldError> {
     let mut nonce = [0u8; 12];
-    RandOsRng
+    SysRng
         .try_fill_bytes(&mut nonce)
         .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
     Ok(nonce.into())
@@ -121,7 +121,7 @@ impl SecureCrypto {
 
     pub fn generate_secure_seed() -> Result<[u8; 32], KeyMeldError> {
         let mut seed = [0u8; 32];
-        RandOsRng
+        SysRng
             .try_fill_bytes(&mut seed)
             .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
         Ok(seed)
@@ -132,7 +132,7 @@ impl SecureCrypto {
         user_id: &str,
     ) -> Result<[u8; 32], KeyMeldError> {
         let mut nonce_seed = [0u8; 32];
-        RandOsRng
+        SysRng
             .try_fill_bytes(&mut nonce_seed)
             .map_err(|e| KeyMeldError::RandomGenerationError(Box::new(e)))?;
 
@@ -153,7 +153,7 @@ impl SecureCrypto {
     }
 
     pub fn generate_enclave_keypair() -> Result<(SecretKey, PublicKey), KeyMeldError> {
-        let secret_key = SecretKey::new(&mut rand::rng());
+        let secret_key = SecretKey::new(&mut secp256k1::rand::rng());
         let public_key = PublicKey::from_secret_key(SECP256K1, &secret_key);
         Ok((secret_key, public_key))
     }
@@ -180,7 +180,7 @@ impl SecureCrypto {
         public_key: &PublicKey,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, KeyMeldError> {
-        let ephemeral_secret = SecretKey::new(&mut rand::rng());
+        let ephemeral_secret = SecretKey::new(&mut secp256k1::rand::rng());
         let ephemeral_public = PublicKey::from_secret_key(SECP256K1, &ephemeral_secret);
         let shared_secret = SharedSecret::new(public_key, &ephemeral_secret);
         let hk = Hkdf::<Sha256>::new(None, shared_secret.as_ref());
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_key_material_secp256k1_conversion() {
-        let secret_key = SecretKey::new(&mut rand::rng());
+        let secret_key = SecretKey::new(&mut secp256k1::rand::rng());
         let key_material = KeyMaterial::from_secp256k1_secret(&secret_key);
         let recovered_secret = key_material.to_secp256k1_secret().unwrap();
 
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn test_ecies_encrypt_decrypt() {
-        let secret_key = SecretKey::new(&mut rand::rng());
+        let secret_key = SecretKey::new(&mut secp256k1::rand::rng());
         let public_key = PublicKey::from_secret_key(SECP256K1, &secret_key);
 
         let plaintext = b"Hello, ECIES encryption!";
@@ -681,10 +681,10 @@ mod tests {
 
     #[test]
     fn test_ecies_different_keys_fail() {
-        let secret_key1 = SecretKey::new(&mut rand::rng());
+        let secret_key1 = SecretKey::new(&mut secp256k1::rand::rng());
         let public_key1 = PublicKey::from_secret_key(SECP256K1, &secret_key1);
 
-        let secret_key2 = SecretKey::new(&mut rand::rng());
+        let secret_key2 = SecretKey::new(&mut secp256k1::rand::rng());
 
         let plaintext = b"Hello, ECIES encryption!";
         let ciphertext = SecureCrypto::ecies_encrypt(&public_key1, plaintext).unwrap();
@@ -765,7 +765,7 @@ pub struct SessionSecret {
 impl SessionSecret {
     pub fn new_random() -> Self {
         let mut key = [0u8; 32];
-        RandOsRng
+        SysRng
             .try_fill_bytes(&mut key)
             .expect("the OS random number generator should be available");
         Self { key }

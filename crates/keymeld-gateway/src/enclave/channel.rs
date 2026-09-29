@@ -30,7 +30,7 @@ pub fn generate_gateway_credential(path: &std::path::Path) -> anyhow::Result<Str
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    let mut secret = secp256k1::SecretKey::new(&mut rand::rng());
+    let mut secret = secp256k1::SecretKey::new(&mut secp256k1::rand::rng());
     let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
     let encoded = Zeroizing::new(hex::encode(secret.secret_bytes()));
     secret.non_secure_erase();

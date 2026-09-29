@@ -155,13 +155,14 @@ test.describe("KeyMeld UI", () => {
 
   test.describe("API Docs", () => {
     test("API documentation page loads", async ({ page }) => {
-      await page.goto("/api/v1/docs");
+      const response = await page.goto("/api/v1/docs");
+      expect(response?.ok()).toBeTruthy();
 
-      // Wait for the docs to load (Scalar UI)
-      await page.waitForLoadState("networkidle");
-
-      // The docs page should have loaded some content
-      await expect(page.locator("body")).not.toBeEmpty();
+      // The page embeds the OpenAPI spec for Scalar. Scalar's own script comes
+      // from a CDN and keeps the network busy, so don't wait for networkidle.
+      const spec = page.locator("script#api-reference");
+      await expect(spec).toBeAttached();
+      expect(await spec.textContent()).toContain('"openapi"');
     });
   });
 

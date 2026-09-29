@@ -48,7 +48,7 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
     // Phase 1: Setup
     info!("\n=== Phase 1: Setup ===");
 
-    let mut rng = rand::rng();
+    let mut rng = secp256k1::rand::rng();
     let oracle_seckey = Scalar::random(&mut rng);
     let oracle_pubkey = oracle_seckey.base_point_mul();
     let oracle_secnonce = Scalar::random(&mut rng);

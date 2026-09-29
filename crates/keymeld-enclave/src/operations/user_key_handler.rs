@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_success() {
         let secp = Secp256k1::new();
-        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let auth_pubkey = auth_public_key.serialize().to_vec();
 
         let key_id = KeyId::new_v7();
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_expired() {
         let secp = Secp256k1::new();
-        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let auth_pubkey = auth_public_key.serialize().to_vec();
 
         let key_id = KeyId::new_v7();
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_future() {
         let secp = Secp256k1::new();
-        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -717,9 +717,9 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_wrong_key() {
         let secp = Secp256k1::new();
-        let (auth_secret_key, _) = secp.generate_keypair(&mut rand::rng());
+        let (auth_secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rng());
         // Use a different public key than the one that signed
-        let (_, wrong_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (_, wrong_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let wrong_auth_pubkey = wrong_public_key.serialize().to_vec();
 
         let key_id = KeyId::new_v7();
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_tampered_message() {
         let secp = Secp256k1::new();
-        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (auth_secret_key, auth_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let auth_pubkey = auth_public_key.serialize().to_vec();
 
         let key_id = KeyId::new_v7();
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn test_validate_approval_signature_invalid_format() {
         let secp = Secp256k1::new();
-        let (_, auth_public_key) = secp.generate_keypair(&mut rand::rng());
+        let (_, auth_public_key) = secp.generate_keypair(&mut secp256k1::rand::rng());
         let auth_pubkey = auth_public_key.serialize().to_vec();
 
         let key_id = KeyId::new_v7();

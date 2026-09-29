@@ -25,7 +25,7 @@ reqwest = { workspace = true, default-features = false, features = ["json", "gzi
 tokio = { workspace = true, features = ["time"], optional = true }
 flate2 = { version = "1.1", optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
-utoipa = { version = "5.4.0", features = ["uuid"], optional = true }
+utoipa = { version = "6.0.0", features = ["uuid"], optional = true }
 dlctix = { version = "0.1.0", optional = true }
 
 [features]
@@ -57,6 +57,8 @@ uuid = { workspace = true, features = ["v7", "serde", "js"] }
 getrandom = { version = "0.2", features = ["js"] }
 # getrandom 0.3 (used by rand 0.9) needs "wasm_js" feature for WASM
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# getrandom 0.4 (used by rand 0.10) needs "wasm_js" feature for WASM
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 wasm-bindgen = "0.2"
 
 [lints]
@@ -70,4 +72,4 @@ mockito = { workspace = true }
 # These are WASM target-specific dependencies that enable proper random number
 # generation and JS interop. cargo-machete doesn't detect their usage because
 # they're only compiled for wasm32 targets.
-ignored = ["getrandom", "getrandom_03", "wasm-bindgen"]
+ignored = ["getrandom", "getrandom_03", "getrandom_04", "wasm-bindgen"]
