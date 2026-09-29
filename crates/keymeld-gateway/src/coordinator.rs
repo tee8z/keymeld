@@ -885,6 +885,11 @@ impl Coordinator {
                     }
                 }
                 _ = stats_logging_interval.tick() => {
+                    // Without this, closed, aged and idle connections stay in
+                    // each enclave's pool, and the pool keeps opening new ones.
+                    if let Err(e) = self.enclave_manager.cleanup_unhealthy_connections().await {
+                        warn!("Enclave connection cleanup failed: {}", e);
+                    }
                     self.log_operational_stats().await;
                     self.update_prometheus_stats().await;
                 }
