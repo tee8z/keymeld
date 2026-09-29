@@ -1554,7 +1554,7 @@ impl Coordinator {
             // Warn if average load exceeds threshold (connections are overloaded)
             if stats.avg_load_per_connection > 10.0 {
                 warn!(
-                    "Enclave {} connections overloaded: avg load {:.1} (threshold: 10)",
+                    "Enclave {} connections overloaded: {:.1} requests in flight per connection (threshold: 10)",
                     enclave_id.as_u32(),
                     stats.avg_load_per_connection
                 );

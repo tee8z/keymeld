@@ -83,6 +83,10 @@ where
     fn is_closed(&self) -> bool {
         self.client.is_closed()
     }
+
+    fn in_flight(&self) -> u32 {
+        self.client.in_flight()
+    }
 }
 
 impl<C, R> From<MultiplexedConnection<C, R>> for ConnectionMetadata<C, R>
@@ -122,16 +126,18 @@ where
         }
     }
 
-    /// Get current load (active requests in current window)
+    /// Current load: requests sent on this connection and not yet answered. Requests per
+    /// minute measure traffic, not load: a connection answering a steady stream of quick
+    /// requests is idle between them.
     fn active_count(&self) -> u32 {
-        self.connection.get_metrics().requests_in_current_window
+        self.connection.in_flight()
     }
 
     /// Calculate load score for selection (lower is better)
     /// Combines active requests, failure rate, and average latency
     fn load_score(&self) -> f64 {
         let metrics = self.connection.get_metrics();
-        let base_load = metrics.requests_in_current_window as f64;
+        let base_load = self.active_count() as f64;
 
         // Penalty for high failure rate (0-100%)
         // Weight: 0.5 means 10% failure rate adds 5 points to score
@@ -573,7 +579,7 @@ where
         // Aggregate metrics from all multiplexed connections
         for conn_ref in self.connections.iter() {
             let conn_metrics = conn_ref.value().get_metrics();
-            total_pending += conn_metrics.requests_in_current_window as usize;
+            total_pending += conn_ref.value().active_count() as usize;
             total_successful_rpm += conn_metrics.successful_requests_per_minute;
             total_failed_rpm += conn_metrics.failed_requests_per_minute;
             total_requests_in_window += conn_metrics.requests_in_current_window;
@@ -620,8 +626,9 @@ where
 
         self.health_state.store(pool_healthy, Ordering::Release);
 
+        // Load is requests in flight, as for choosing a connection.
         let avg_load = if active_connections > 0 {
-            total_requests_in_window as f64 / active_connections as f64
+            total_pending as f64 / active_connections as f64
         } else {
             0.0
         };
@@ -826,7 +833,12 @@ mod tests {
         let pool: SocketPool<Command, Reply> =
             SocketPool::new(SocketConnector::tcp("127.0.0.1", port), &timeouts).unwrap();
         assert_eq!(pool.send_command(Command::Ping).await.unwrap(), Reply::Pong);
-        assert_eq!(pool.get_connection_stats().active_connections, 1);
+        let stats = pool.get_connection_stats();
+        assert_eq!(stats.active_connections, 1);
+        assert_eq!(
+            stats.avg_load_per_connection, 0.0,
+            "an answered request no longer loads its connection"
+        );
         assert_eq!(pool.cleanup_unhealthy_connections().await, 0, "still open");
 
         // Both sides give up on the idle connection after the 1 s read timeout.

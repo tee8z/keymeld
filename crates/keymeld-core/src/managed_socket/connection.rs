@@ -941,6 +941,24 @@ pub struct Client<C, R> {
     request_tx: RequestSender<C, R>,
     timeout_config: TimeoutConfig,
     metrics: Arc<MetricsTracker>,
+    /// Requests sent and not yet answered: the connection's load.
+    in_flight: Arc<AtomicU32>,
+}
+
+/// Counts a request as in flight until it is answered, fails or is dropped.
+struct InFlight(Arc<AtomicU32>);
+
+impl InFlight {
+    fn start(count: &Arc<AtomicU32>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl<C, R> Client<C, R>
@@ -957,7 +975,13 @@ where
             request_tx,
             timeout_config,
             metrics,
+            in_flight: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Requests sent on this connection and not yet answered.
+    pub fn in_flight(&self) -> u32 {
+        self.in_flight.load(Ordering::Acquire)
     }
 
     /// Whether the connection's tasks have ended; no request can succeed.
@@ -966,6 +990,7 @@ where
     }
 
     pub async fn send_request(&self, request: Request<C>) -> Result<R> {
+        let _in_flight = InFlight::start(&self.in_flight);
         let (response_tx, mut response_rx) = mpsc::channel(self.timeout_config.max_channel_size);
 
         debug!(
