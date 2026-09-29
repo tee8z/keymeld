@@ -971,3 +971,205 @@ fn a_binding_sealed_before_session_naming_still_decodes_unchanged() {
         scoped
     );
 }
+
+/// A state as the previous release sealed it: uncompressed JSON under the v1 label.
+fn seal_v1(context: &EnclaveSharedContext, state: SealedState) -> Payload {
+    let envelope = SealedEnvelope {
+        schema_version: escrow::SCHEMA_VERSION,
+        enclave_id: context.enclave_id,
+        state,
+    };
+    let sealed = sealing_key(context)
+        .unwrap()
+        .encrypt(&serde_json::to_vec(&envelope).unwrap(), SEALED_STATE_V1)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    Payload::new(sealed).unwrap()
+}
+fn unseal_prepared(context: &EnclaveSharedContext, sealed: &Payload) -> PreparedAction {
+    match unseal(context, sealed).unwrap() {
+        SealedState::Prepared { prepared } => prepared,
+        other => panic!("expected a prepared state, got {other:?}"),
+    }
+}
+fn sealed_label(sealed: &Payload) -> String {
+    EncryptedData::from_bytes(sealed.as_bytes())
+        .unwrap()
+        .context
+}
+
+#[test]
+fn compressed_sealed_state_round_trips_and_v1_states_still_execute() {
+    let f = fixture(false);
+    let (prepared, attempt) = prepare(&f, "sign");
+    assert_eq!(sealed_label(&prepared.sealed_state), SEALED_STATE);
+    let state = unseal_prepared(&f.context, &prepared.sealed_state);
+    let resealed = seal_state(
+        &f.context,
+        SealedState::Prepared {
+            prepared: state.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(unseal_prepared(&f.context, &resealed), state);
+
+    // A receipt the previous release handed out before a redeploy.
+    let legacy = seal_v1(
+        &f.context,
+        SealedState::Prepared {
+            prepared: state.clone(),
+        },
+    );
+    assert_eq!(sealed_label(&legacy), SEALED_STATE_V1);
+    assert_eq!(unseal_prepared(&f.context, &legacy), state);
+    let command = execute_command(&f, "sign", &attempt, legacy, proof());
+    let executed = handle(&f.completed, &f.context, &command, 1).unwrap();
+    assert_eq!(sealed_label(&executed.sealed_state), SEALED_STATE);
+    verify_signing_batch(
+        f.completed.musig_processor(),
+        f.completed.session_secret(),
+        &f.signing,
+    )
+    .unwrap();
+}
+
+#[test]
+fn tampered_or_session_key_compressed_state_is_refused() {
+    let f = fixture(false);
+    let (prepared, attempt) = prepare(&f, "sign");
+    let mut corrupted = prepared.sealed_state.as_bytes().to_vec();
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 1;
+    let corrupted = Payload::new(corrupted).unwrap();
+    assert!(unseal(&f.context, &corrupted).is_err());
+    let cmd = execute_command(&f, "sign", &attempt, corrupted, proof());
+    assert!(handle(&f.completed, &f.context, &cmd, 1).is_err());
+
+    // Both labels are bound to the enclave sealing key, not the session key.
+    for (label, plaintext) in [
+        (
+            SEALED_STATE,
+            miniz_oxide::deflate::compress_to_vec(b"{}", SEALED_STATE_DEFLATE_LEVEL),
+        ),
+        (SEALED_STATE_V1, b"{}".to_vec()),
+    ] {
+        let forged = f
+            .completed
+            .session_secret()
+            .encrypt(&plaintext, label)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert!(unseal(&f.context, &Payload::new(forged).unwrap()).is_err());
+    }
+    let unknown = sealing_key(&f.context)
+        .unwrap()
+        .encrypt(b"{}", "escrow_state_v0")
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert!(unseal(&f.context, &Payload::new(unknown).unwrap()).is_err());
+}
+
+#[test]
+fn compressed_state_over_the_payload_limit_is_refused_before_decoding() {
+    let f = fixture(false);
+    let sealed = |plaintext: &[u8]| {
+        let compressed =
+            miniz_oxide::deflate::compress_to_vec(plaintext, SEALED_STATE_DEFLATE_LEVEL);
+        let sealed = sealing_key(&f.context)
+            .unwrap()
+            .encrypt(&compressed, SEALED_STATE)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        (compressed.len(), Payload::new(sealed).unwrap())
+    };
+    let (compressed, bomb) = sealed(&vec![b' '; escrow::MAX_PAYLOAD_BYTES + 1]);
+    assert!(compressed < 16 * 1024);
+    let error = unseal(&f.context, &bomb).unwrap_err().to_string();
+    assert!(error.contains("size limit"), "{error}");
+    // At the limit the state decompresses and fails only as JSON.
+    let (_, largest) = sealed(&vec![b' '; escrow::MAX_PAYLOAD_BYTES]);
+    let error = unseal(&f.context, &largest).unwrap_err().to_string();
+    assert!(!error.contains("size limit"), "{error}");
+}
+
+/// A pool contract's permit for one of `players`: N+2 outcome transactions with adaptor
+/// points, N+1 splits and N expiry splits, each listing all N+1 signers.
+fn contract_scope(players: usize) -> (SigningScope, BTreeMap<UserId, [u8; 32]>) {
+    let mut signers: Vec<ScopeSigner> = (0..=players)
+        .map(|index| ScopeSigner {
+            user_id: UserId::new_v7(),
+            public_key: PublicKeyBytes::new(&public_key(&[index as u8 + 1; 32])).unwrap(),
+        })
+        .collect();
+    signers.sort_by(|a, b| a.public_key.cmp(&b.public_key));
+    let batch = (0..3 * players + 3)
+        .map(|index| SigningItem {
+            item_id: Uuid::now_v7(),
+            message_digest: escrow::sha256(&index.to_le_bytes()),
+            subset_id: None,
+            signers: signers.clone(),
+            tweak: KeyTweak::TaprootKeyPath,
+            adaptor: if index < players + 2 {
+                AdaptorContext::Single {
+                    adaptor_id: Uuid::now_v7(),
+                    point: PublicKeyBytes::new(&public_key(&[index as u8 + 100; 32])).unwrap(),
+                }
+            } else {
+                AdaptorContext::None
+            },
+        })
+        .collect();
+    let digests = signers
+        .iter()
+        .map(|signer| {
+            (
+                signer.user_id.clone(),
+                escrow::sha256(signer.public_key.as_bytes()),
+            )
+        })
+        .collect();
+    (
+        SigningScope {
+            session_tweak: KeyTweak::None,
+            batch,
+        },
+        digests,
+    )
+}
+
+#[test]
+fn contract_scope_sealed_state_shrinks_for_large_pools() {
+    let f = fixture(false);
+    let (prepared, attempt) = prepare(&f, "sign");
+    let template = unseal_prepared(&f.context, &prepared.sealed_state);
+    for players in [22, 25] {
+        let (scope, digests) = contract_scope(players);
+        let mut state = template.clone();
+        state.action = Action::Sign { scope };
+        state.binding.participant_policy_digests = digests;
+        let state = SealedState::Prepared { prepared: state };
+        let v1 = seal_v1(&f.context, state.clone());
+        let v2 = seal_state(&f.context, state).unwrap();
+        assert_eq!(
+            unseal_prepared(&f.context, &v2),
+            unseal_prepared(&f.context, &v1)
+        );
+        // The Execute request the caller sends back, before the transport envelope.
+        let request = |sealed: Payload| {
+            serde_json::to_vec(&execute_command(&f, "sign", &attempt, sealed, proof()))
+                .unwrap()
+                .len()
+        };
+        let (v1_len, v2_len) = (v1.as_bytes().len(), v2.as_bytes().len());
+        let (v1_request, v2_request) = (request(v1), request(v2));
+        println!(
+            "{players} players: sealed {v1_len} -> {v2_len} bytes, execute request {v1_request} -> {v2_request} bytes"
+        );
+        assert!(v2_len * 10 < v1_len, "{v1_len} -> {v2_len}");
+        assert!(v2_request * 5 < v1_request, "{v1_request} -> {v2_request}");
+    }
+}

@@ -392,8 +392,29 @@ struct SealedEnvelope {
     enclave_id: keymeld_core::EnclaveId,
     state: SealedState,
 }
+/// Sealed states are deflated before encryption: a signing scope repeats every signer's
+/// key as a JSON integer array. States an earlier release sealed as v1 still unseal.
+const SEALED_STATE: &str = "escrow_state_v2";
+const SEALED_STATE_V1: &str = "escrow_state_v1";
+const SEALED_STATE_DEFLATE_LEVEL: u8 = 6;
+
 fn unseal(context: &EnclaveSharedContext, payload: &Payload) -> Result<SealedState, EnclaveError> {
-    let envelope: SealedEnvelope = decrypt(&sealing_key(context)?, payload, "escrow_state_v1")?;
+    let key = sealing_key(context)?;
+    let encrypted = EncryptedData::from_bytes(payload.as_bytes()).map_err(invalid)?;
+    let envelope: SealedEnvelope = if encrypted.context == SEALED_STATE_V1 {
+        decrypt(&key, payload, SEALED_STATE_V1)?
+    } else {
+        let compressed = Zeroizing::new(key.decrypt(&encrypted, SEALED_STATE).map_err(invalid)?);
+        // Seal refuses states over this bound, so no authentic state exceeds it.
+        let plaintext = Zeroizing::new(
+            miniz_oxide::inflate::decompress_to_vec_with_limit(
+                &compressed,
+                escrow::MAX_PAYLOAD_BYTES,
+            )
+            .map_err(|_| invalid("Escrow receipt exceeds size limit"))?,
+        );
+        escrow::decode(&plaintext).map_err(invalid)?
+    };
     if envelope.schema_version != escrow::SCHEMA_VERSION
         || envelope.enclave_id != context.enclave_id
     {
@@ -451,9 +472,16 @@ fn seal_state(context: &EnclaveSharedContext, state: SealedState) -> Result<Payl
         enclave_id: context.enclave_id,
         state,
     };
-    let plaintext = Zeroizing::new(serde_json::to_vec(&envelope).map_err(invalid)?);
+    let json = Zeroizing::new(serde_json::to_vec(&envelope).map_err(invalid)?);
+    if json.len() > escrow::MAX_PAYLOAD_BYTES {
+        return Err(invalid("Escrow receipt exceeds size limit"));
+    }
+    let plaintext = Zeroizing::new(miniz_oxide::deflate::compress_to_vec(
+        &json,
+        SEALED_STATE_DEFLATE_LEVEL,
+    ));
     let sealed = sealing_key(context)?
-        .encrypt(&plaintext, "escrow_state_v1")
+        .encrypt(&plaintext, SEALED_STATE)
         .and_then(|value| value.to_bytes())
         .map_err(invalid)?;
     Payload::new(sealed).map_err(invalid)
