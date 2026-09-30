@@ -39,6 +39,8 @@ tracing = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
+# Deflates sealed escrow states. Already in the lock through flate2.
+miniz_oxide = "0.9.1"
 
 [features]
 # Escrow ships in the built binaries. test-support stays opt-in: it is an

@@ -2685,6 +2685,7 @@ dependencies = [
  "hex",
  "keymeld-core",
  "keymeld-sdk",
+ "miniz_oxide",
  "musig2",
  "openssl",
  "pkcs1",
