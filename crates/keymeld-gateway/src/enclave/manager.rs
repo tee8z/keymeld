@@ -350,6 +350,9 @@ impl EnclaveManager {
 
         for config in enclave_configs {
             let enclave_id = EnclaveId::from(config.id);
+            // Export both outcomes before traffic arrives. An idle, configured
+            // enclave has zero relay failures, not a missing metric series.
+            crate::metrics::confidential_relay_counts(config.id);
             let client = EnclaveClient::new(
                 enclave_id,
                 config.connector.clone(),
