@@ -130,7 +130,7 @@ pub struct Metrics;
 pub fn observe_confidential_relay(id: u32, response: bool) {
     CONFIDENTIAL_RELAY
         .with_label_values(&[
-            &id.to_string(),
+            id.to_string().as_str(),
             if response {
                 "response"
             } else {
@@ -144,10 +144,10 @@ pub fn confidential_relay_counts(id: u32) -> (f64, f64) {
     let id = id.to_string();
     (
         CONFIDENTIAL_RELAY
-            .with_label_values(&[&id, "response"])
+            .with_label_values(&[id.as_str(), "response"])
             .get(),
         CONFIDENTIAL_RELAY
-            .with_label_values(&[&id, "transport_error"])
+            .with_label_values(&[id.as_str(), "transport_error"])
             .get(),
     )
 }
@@ -367,7 +367,7 @@ pub fn observe_public_enclave(id: u32, value: &crate::enclave::observability::Pu
         ("key_epoch", value.key_epoch as f64),
     ] {
         ENCLAVE_PUBLIC_INFO
-            .with_label_values(&[&id, field])
+            .with_label_values(&[id.as_str(), field])
             .set(value);
     }
     if let Some((component, version)) = crate::enclave::observability::deployment() {

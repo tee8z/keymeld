@@ -1071,9 +1071,6 @@ impl Coordinator {
 
             let overall_health = health && connection_health;
 
-            self.metrics
-                .update_enclave_health(enclave_id.as_u32(), overall_health);
-
             if let Some(stats) = connection_stats.get(&enclave_id) {
                 if !overall_health {
                     warn!(
@@ -1202,6 +1199,10 @@ impl Coordinator {
                 );
                 (false, None, None, None, None, None)
             };
+
+            let actual_health = actual_health && connection_health;
+            self.metrics
+                .update_enclave_health(enclave_id.as_u32(), actual_health);
 
             self.db
                 .update_enclave_health(
