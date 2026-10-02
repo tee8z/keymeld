@@ -16,7 +16,7 @@ pub fn stats_cards(stats: &AdminStats) -> Markup {
             div class="column is-3-desktop is-6-tablet" {
                 div class="box stat-card" {
                     div class="stat-value" {
-                        span class=(if stats.healthy_enclaves == stats.total_enclaves { "has-text-success" } else { "has-text-warning" }) {
+                        span class=(if stats.total_enclaves > 0 && stats.healthy_enclaves == stats.total_enclaves { "has-text-success" } else { "has-text-warning" }) {
                             (stats.healthy_enclaves) "/" (stats.total_enclaves)
                         }
                     }
@@ -26,7 +26,7 @@ pub fn stats_cards(stats: &AdminStats) -> Markup {
             div class="column is-3-desktop is-6-tablet" {
                 div class="box stat-card" {
                     div class="stat-value" { (stats.active_keygen_sessions + stats.active_signing_sessions) }
-                    div class="stat-label" { "Active Sessions" }
+                    div class="stat-label" { "Gateway active sessions" }
                 }
             }
             div class="column is-3-desktop is-6-tablet" {

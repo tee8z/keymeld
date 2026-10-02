@@ -9,6 +9,16 @@ use crate::errors::ApiError;
 use keymeld_core::identifiers::SessionId;
 
 lazy_static::lazy_static! {
+    static ref CONFIDENTIAL_RELAY: CounterVec = register_counter_vec!(
+        "keymeld_confidential_relay_total", "Opaque relay responses and transport failures; response is not signing success", &["enclave_id", "result"]
+    ).unwrap();
+    static ref ENCLAVE_PUBLIC_INFO: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_public_info", "Last public enclave observation; consult observed_at before using cached values", &["enclave_id", "field"]
+    ).unwrap();
+    static ref ENCLAVE_DEPLOYMENT: GaugeVec = register_gauge_vec!(
+        "keymeld_enclave_deployment_info", "Operator-declared enclave deployment, not attested build identity", &["enclave_id", "component", "version"]
+    ).unwrap();
+
     static ref SESSION_STATE_TRANSITIONS: CounterVec = register_counter_vec!(
         "keymeld_session_state_transitions_total",
         "Total number of session state transitions",
@@ -116,6 +126,31 @@ lazy_static::lazy_static! {
 
 #[derive(Clone, Debug)]
 pub struct Metrics;
+
+pub fn observe_confidential_relay(id: u32, response: bool) {
+    CONFIDENTIAL_RELAY
+        .with_label_values(&[
+            &id.to_string(),
+            if response {
+                "response"
+            } else {
+                "transport_error"
+            },
+        ])
+        .inc();
+}
+
+pub fn confidential_relay_counts(id: u32) -> (f64, f64) {
+    let id = id.to_string();
+    (
+        CONFIDENTIAL_RELAY
+            .with_label_values(&[&id, "response"])
+            .get(),
+        CONFIDENTIAL_RELAY
+            .with_label_values(&[&id, "transport_error"])
+            .get(),
+    )
+}
 
 impl Metrics {
     pub fn record_session_state_transition(
@@ -319,5 +354,25 @@ impl MetricsTimer {
             &self.operation,
             duration,
         );
+    }
+}
+
+/// No session IDs, payloads, policy contents, or key material enter these metrics.
+pub fn observe_public_enclave(id: u32, value: &crate::enclave::observability::PublicObservation) {
+    let id = id.to_string();
+    for (field, value) in [
+        ("observed_at", value.observed_at as f64),
+        ("uptime_seconds", value.uptime_seconds as f64),
+        ("active_sessions", value.active_sessions as f64),
+        ("key_epoch", value.key_epoch as f64),
+    ] {
+        ENCLAVE_PUBLIC_INFO
+            .with_label_values(&[&id, field])
+            .set(value);
+    }
+    if let Some((component, version)) = crate::enclave::observability::deployment() {
+        ENCLAVE_DEPLOYMENT
+            .with_label_values(&[&id, component, version])
+            .set(1.0);
     }
 }

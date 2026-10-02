@@ -22,7 +22,8 @@ pub fn dashboard_content(
 
         // Recent sessions
         div class="mt-5" {
-            h2 class="title is-5" { "Recent Sessions" }
+            h2 class="title is-5" { "Gateway-managed sessions" }
+            p { "Confidential escrow sessions stay inside enclaves. Use the enclave observations below and the coordinator entry trace for that work." }
             (sessions_table(recent_sessions, true))
         }
 

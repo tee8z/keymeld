@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod distribution;
 pub mod manager;
+pub mod observability;
 
 pub use distribution::{EnclaveAssignmentManager, SessionAssignment};
 pub use manager::{EnclaveConfig, EnclaveInfo, EnclaveManager, SigningSessionInitParams};

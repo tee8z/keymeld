@@ -15,7 +15,7 @@ pub fn enclaves_content(enclaves: &[EnclaveView]) -> Markup {
                     "Monitor enclave health and status"
                 }
             }
-            button class="button is-small is-light refresh-btn"
+            a href="/enclaves" class="button is-small is-light refresh-btn"
                    hx-get="/fragments/enclaves"
                    hx-target="#enclaves-grid"
                    hx-swap="innerHTML" {
@@ -26,7 +26,6 @@ pub fn enclaves_content(enclaves: &[EnclaveView]) -> Markup {
 
         div id="enclaves-grid"
             hx-get="/fragments/enclaves"
-            hx-trigger="every 1s"
             hx-swap="innerHTML" {
             (enclave_cards(enclaves))
         }
