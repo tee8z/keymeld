@@ -13,6 +13,7 @@ pub async fn forward(
     let envelope = decode_request(&body)?;
     let expected_header = envelope.header();
     let destination = envelope.destination_enclave;
+    let tracked = state.enclave_manager.list_enclaves().contains(&destination);
     let outcome = state
         .enclave_manager
         .send_command_to_enclave(
@@ -20,8 +21,17 @@ pub async fn forward(
             Command::new(EnclaveCommand::Confidential(Box::new(envelope))),
         )
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    accept_response(&expected_header, outcome.response).map(Json)
+        .map_err(|_| {
+            if tracked {
+                crate::metrics::observe_confidential_relay(destination.as_u32(), false);
+            }
+            StatusCode::BAD_GATEWAY
+        })?;
+    let response = accept_response(&expected_header, outcome.response);
+    if tracked {
+        crate::metrics::observe_confidential_relay(destination.as_u32(), response.is_ok());
+    }
+    response.map(Json)
 }
 
 fn decode_request(body: &[u8]) -> Result<EnclaveEnvelope, StatusCode> {

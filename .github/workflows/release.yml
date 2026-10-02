@@ -264,6 +264,14 @@ jobs:
             tar czf "release/$BINARY$SUFFIX-$VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" "$BINARY"
           done
           printf '%s\n' "$SOURCE_SHA" > "release/SOURCE$SUFFIX-$TARGET.txt"
+          # Publish the generated UI beside the binary. Source archives do
+          # not contain build.rs's app.min.js or styles.min.css bundles.
+          test -s crates/keymeld-gateway/static/app.min.js
+          test -s crates/keymeld-gateway/static/styles.min.css
+          mkdir runtime-assets
+          cp -r crates/keymeld-gateway/static runtime-assets/static
+          printf '%s\n' "$SOURCE_SHA" > runtime-assets/SOURCE.txt
+          tar czf "release/keymeld-gateway-assets$SUFFIX-$VERSION-$TARGET.tar.gz" -C runtime-assets static SOURCE.txt
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.target }}-${{ matrix.variant }}

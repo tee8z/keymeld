@@ -1,5 +1,4 @@
 use axum::{extract::State, http::HeaderMap, response::Html};
-use keymeld_core::identifiers::EnclaveId;
 
 use crate::{
     handlers::AppState,
@@ -26,6 +25,8 @@ pub async fn build_enclave_views(state: &AppState) -> Vec<EnclaveView> {
     let enclave_health = state.db.get_all_enclave_health().await.unwrap_or_default();
 
     let mut views = Vec::new();
+    let connections = state.enclave_manager.get_connection_stats();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
     for id in enclave_ids {
         let id_u32 = id.as_u32();
@@ -33,12 +34,18 @@ pub async fn build_enclave_views(state: &AppState) -> Vec<EnclaveView> {
             .iter()
             .find(|h| h.enclave_id as u32 == id_u32);
 
-        let is_healthy = health_info.map(|h| h.is_healthy).unwrap_or(false);
+        let is_healthy = health_info
+            .filter(|h| h.expires_at > now)
+            .map(|h| h.is_healthy);
         let public_key = health_info.map(|h| h.public_key.clone());
         let key_epoch = health_info.map(|h| h.key_epoch as u64);
 
-        // Count active sessions for this enclave
-        let active_sessions = count_active_sessions_for_enclave(state, &id).await;
+        let observation = state.enclave_manager.public_observation(&id);
+        let active_sessions = observation
+            .as_ref()
+            .filter(|o| now.saturating_sub(o.observed_at) <= 30)
+            .map(|o| o.active_sessions);
+        let connection = connections.get(&id);
 
         views.push(EnclaveView {
             id: id_u32,
@@ -46,33 +53,15 @@ pub async fn build_enclave_views(state: &AppState) -> Vec<EnclaveView> {
             public_key,
             key_epoch,
             active_sessions,
+            observation,
+            deployment: crate::enclave::observability::deployment().cloned(),
+            connections: connection.map(|c| c.active_connections),
+            in_flight: connection.map(|c| c.pending_requests_count),
+            failure_rate: connection.map(|c| c.prometheus_metrics.failure_rate),
+            relay: crate::metrics::confidential_relay_counts(id_u32),
         });
     }
 
     views.sort_by_key(|e| e.id);
     views
-}
-
-async fn count_active_sessions_for_enclave(state: &AppState, enclave_id: &EnclaveId) -> usize {
-    // This is a simple count - could be optimized with a dedicated query
-    let mut count = 0;
-
-    if let Ok(keygen_sessions) = state.db.list_keygen_sessions(None).await {
-        count += keygen_sessions
-            .iter()
-            .filter(|s| s.coordinator_enclave_id() == Some(*enclave_id))
-            .filter(|s| {
-                !matches!(
-                    s,
-                    crate::session::keygen::KeygenSessionStatus::Completed(_)
-                        | crate::session::keygen::KeygenSessionStatus::Failed(_)
-                )
-            })
-            .count();
-    }
-
-    // Note: Signing sessions don't have a single coordinator enclave - they use
-    // inherited_enclave_epochs from the keygen session. We only count keygen sessions here.
-
-    count
 }

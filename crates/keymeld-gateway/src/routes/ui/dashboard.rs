@@ -29,7 +29,11 @@ pub async fn build_admin_stats(state: &AppState) -> AdminStats {
     // Get enclave health
     let enclave_health = state.db.get_all_enclave_health().await.unwrap_or_default();
     let total_enclaves = state.enclave_manager.get_all_enclave_ids().len();
-    let healthy_enclaves = enclave_health.iter().filter(|e| e.is_healthy).count();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let healthy_enclaves = enclave_health
+        .iter()
+        .filter(|e| e.is_healthy && e.expires_at > now)
+        .count();
 
     // Get session stats
     let db_stats = state.db.get_stats().await.unwrap_or_default();

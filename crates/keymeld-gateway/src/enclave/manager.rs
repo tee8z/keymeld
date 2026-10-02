@@ -107,6 +107,7 @@ pub struct ComprehensiveMetrics {
 }
 
 pub struct EnclaveManager {
+    public_observations: dashmap::DashMap<EnclaveId, super::observability::PublicObservation>,
     clients: BTreeMap<EnclaveId, EnclaveClient>,
     enclave_info: Arc<dashmap::DashMap<EnclaveId, EnclaveInfo>>,
     is_configured: bool,
@@ -349,6 +350,9 @@ impl EnclaveManager {
 
         for config in enclave_configs {
             let enclave_id = EnclaveId::from(config.id);
+            // Export both outcomes before traffic arrives. An idle, configured
+            // enclave has zero relay failures, not a missing metric series.
+            crate::metrics::confidential_relay_counts(config.id);
             let client = EnclaveClient::new(
                 enclave_id,
                 config.connector.clone(),
@@ -374,12 +378,20 @@ impl EnclaveManager {
         let assignment_manager = EnclaveAssignmentManager::new(available_enclaves);
 
         Ok(Self {
+            public_observations: dashmap::DashMap::new(),
             clients,
             enclave_info: Arc::new(dashmap::DashMap::from_iter(enclave_info)),
             is_configured: false,
             assignment_manager,
             timeout_config,
         })
+    }
+
+    pub fn public_observation(
+        &self,
+        id: &EnclaveId,
+    ) -> Option<super::observability::PublicObservation> {
+        self.public_observations.get(id).map(|value| value.clone())
     }
 
     pub fn get_enclave_client(&self, enclave_id: &EnclaveId) -> Option<&EnclaveClient> {
@@ -773,6 +785,14 @@ impl EnclaveManager {
                 EnclaveOutcome::System(SystemOutcome::PublicInfo(response))
                     if response.authorization_protocol_version == 2 =>
                 {
+                    let observation = super::observability::PublicObservation {
+                        observed_at: time::OffsetDateTime::now_utc().unix_timestamp(),
+                        uptime_seconds: response.uptime_seconds,
+                        active_sessions: response.active_sessions,
+                        key_epoch: response.key_epoch,
+                    };
+                    crate::metrics::observe_public_enclave(enclave_id.as_u32(), &observation);
+                    self.public_observations.insert(*enclave_id, observation);
                     Ok((
                         response.public_key,
                         response.attestation_document,

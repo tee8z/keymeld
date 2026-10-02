@@ -55,9 +55,9 @@ test.describe("KeyMeld UI", () => {
     test("displays sessions section", async ({ page }) => {
       await page.goto("/");
 
-      // Check for "Recent Sessions" section heading on dashboard
+      // Confidential sessions are distinct from gateway-managed sessions.
       await expect(
-        page.getByRole("heading", { name: /Recent Sessions/i }),
+        page.getByRole("heading", { name: /Gateway-managed sessions/i }),
       ).toBeVisible();
     });
   });
@@ -114,6 +114,21 @@ test.describe("KeyMeld UI", () => {
       // Should show enclave information (cards or list items)
       const enclaveContent = page.locator(".card, .enclave-card, .box").first();
       await expect(enclaveContent).toBeVisible({ timeout: 10000 });
+    });
+  });
+
+  test.describe("Native enclave diagnostics", () => {
+    test.use({ javaScriptEnabled: false });
+    test("shows confidential observations and opens details without JavaScript", async ({ page }) => {
+      await page.goto("/enclaves");
+      const card = page.locator(".enclave-card").first();
+      await expect(card.getByText("Enclave sessions", { exact: true })).toBeVisible();
+      await expect(card.getByText(/confidential responses/)).toBeVisible();
+      await card.locator("summary").click();
+      await expect(card.locator("details")).toHaveAttribute("open", "");
+      await expect(card.getByText("Requests in flight", { exact: true })).toBeVisible();
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
     });
   });
 
