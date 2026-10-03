@@ -111,6 +111,19 @@ lazy_static::lazy_static! {
         &["endpoint", "method", "status_code"]
     ).unwrap();
 
+    static ref API_REQUEST_DURATION: HistogramVec = register_histogram_vec!(
+        "keymeld_api_request_duration_seconds",
+        "API request duration by matched route",
+        &["endpoint", "method"],
+        vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+    ).unwrap();
+
+    static ref ERRORS: CounterVec = register_counter_vec!(
+        "keymeld_errors_total",
+        "ERROR log lines by module that logged them",
+        &["kind"]
+    ).unwrap();
+
     static ref QUOTA_VIOLATIONS: CounterVec = register_counter_vec!(
         "keymeld_quota_violations_total",
         "Total number of quota violations",
@@ -138,6 +151,11 @@ pub fn observe_confidential_relay(id: u32, response: bool) {
             },
         ])
         .inc();
+}
+
+/// Logging hook: counts each ERROR line under the module that logged it.
+pub fn observe_error_line(target: &str) {
+    ERRORS.with_label_values(&[target]).inc();
 }
 
 pub fn confidential_relay_counts(id: u32) -> (f64, f64) {
@@ -230,6 +248,12 @@ impl Metrics {
         API_REQUESTS
             .with_label_values(&[endpoint, method, &status_code.to_string()])
             .inc();
+    }
+
+    pub fn record_api_request_duration(&self, endpoint: &str, method: &str, duration: Duration) {
+        API_REQUEST_DURATION
+            .with_label_values(&[endpoint, method])
+            .observe(duration.as_secs_f64());
     }
 
     pub fn record_quota_violation(&self, keygen_session_id: &SessionId) {
@@ -374,5 +398,19 @@ pub fn observe_public_enclave(id: u32, value: &crate::enclave::observability::Pu
         ENCLAVE_DEPLOYMENT
             .with_label_values(&[&id, component, version])
             .set(1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_lines_are_counted_by_kind() {
+        let kind = "keymeld_gateway::metrics::tests";
+        let before = ERRORS.with_label_values(&[kind]).get();
+        observe_error_line(kind);
+        observe_error_line(kind);
+        assert_eq!(ERRORS.with_label_values(&[kind]).get(), before + 2.0);
     }
 }

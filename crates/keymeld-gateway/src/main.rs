@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use keymeld_core::logging::{init_logging, LoggingConfig};
+use keymeld_core::logging::{init_logging_with_error_hook, LoggingConfig};
 use keymeld_gateway::{config::Config, startup::Application};
 use std::env;
 use tracing::{debug, info, warn};
@@ -19,7 +19,10 @@ async fn main() -> Result<()> {
         println!("{public_key}");
         return Ok(());
     }
-    init_logging(&LoggingConfig::gateway_default());
+    init_logging_with_error_hook(
+        &LoggingConfig::gateway_default(),
+        Some(keymeld_gateway::metrics::observe_error_line),
+    );
 
     info!(
         "Starting KeyMeld Gateway Service v{}",
@@ -34,7 +37,10 @@ async fn main() -> Result<()> {
             None => "Failed to load default config".to_string(),
         })?;
 
-    init_logging(&config.logging);
+    init_logging_with_error_hook(
+        &config.logging,
+        Some(keymeld_gateway::metrics::observe_error_line),
+    );
 
     let security_summary = config.security_summary();
     info!("Configuration loaded: {}", security_summary);
