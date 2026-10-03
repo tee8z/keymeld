@@ -191,7 +191,7 @@ pub async fn health_check_detail(
     path = "/enclaves",
     tag = "enclaves",
     summary = "List all available enclaves",
-    description = "Returns a list of all configured enclaves with their health status",
+    description = "Returns a list of all configured enclaves with their health status and public keys",
     responses(
         (status = 200, description = "Enclaves listed successfully", body = ListEnclavesResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -211,28 +211,13 @@ pub async fn list_enclaves(State(state): State<AppState>) -> ApiResult<Json<List
             healthy_count += 1;
         }
 
-        // Calculate uptime from startup_time if available
-        let uptime_seconds = if health_info.startup_time > 0 {
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| ApiError::Internal(format!("System time error: {e}")))?
-                .as_secs();
-            if current_time as i64 > health_info.startup_time {
-                current_time.saturating_sub(health_info.startup_time as u64)
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
+        // Session counts and uptime are operator details: the operator pages
+        // and metrics carry them, the public listing does not.
         let health_response = EnclaveHealthResponse {
             enclave_id: EnclaveId::from(health_info.enclave_id as u32),
             healthy: health_info.is_healthy,
             public_key: health_info.public_key,
             attestation_document: health_info.attestation_document,
-            active_sessions: health_info.active_sessions as u32,
-            uptime_seconds,
             key_epoch: health_info.key_epoch as u64,
             key_generation_time: health_info.key_generation_time as u64,
             last_health_check: health_info.cached_at as u64,
