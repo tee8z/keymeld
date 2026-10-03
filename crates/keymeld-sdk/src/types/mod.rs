@@ -588,7 +588,12 @@ pub struct EnclaveHealthResponse {
     pub healthy: bool,
     pub public_key: String,
     pub attestation_document: String,
+    /// Operator detail. Optional so a gateway can stop publishing it once
+    /// clients no longer require it.
+    #[serde(default)]
     pub active_sessions: u32,
+    /// Operator detail, optional for the same reason as `active_sessions`.
+    #[serde(default)]
     pub uptime_seconds: u64,
     pub key_epoch: u64,
     pub key_generation_time: u64,
@@ -866,4 +871,23 @@ pub fn validate_batch_signing_request(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enclave_listing_does_not_require_operator_counts() {
+        let listing: ListEnclavesResponse = serde_json::from_value(serde_json::json!({
+            "enclaves": [{
+                "enclave_id": 1, "healthy": true, "public_key": "", "attestation_document": "",
+                "key_epoch": 1, "key_generation_time": 0, "last_health_check": 0
+            }],
+            "total_enclaves": 1, "healthy_enclaves": 1
+        }))
+        .unwrap();
+        assert_eq!(listing.enclaves[0].active_sessions, 0);
+        assert_eq!(listing.enclaves[0].uptime_seconds, 0);
+    }
 }

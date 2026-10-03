@@ -61,7 +61,28 @@ impl LoggingConfig {
     }
 }
 
+/// Calls a hook with the target of every ERROR event that passes the filter,
+/// so a service can count error lines without parsing its own logs.
+struct ErrorHook(fn(&str));
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorHook {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() == tracing::Level::ERROR {
+            (self.0)(event.metadata().target());
+        }
+    }
+}
+
 pub fn init_logging(config: &LoggingConfig) {
+    init_logging_with_error_hook(config, None);
+}
+
+/// Like `init_logging`, but also reports each logged ERROR event's target to `on_error`.
+pub fn init_logging_with_error_hook(config: &LoggingConfig, on_error: Option<fn(&str)>) {
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
@@ -83,6 +104,7 @@ pub fn init_logging(config: &LoggingConfig) {
             ($layer:expr) => {{
                 let subscriber = tracing_subscriber::registry()
                     .with(env_filter.clone())
+                    .with(on_error.map(ErrorHook))
                     .with($layer);
                 if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
                     eprintln!("Failed to set global tracing subscriber: {}", e);
@@ -188,6 +210,24 @@ mod tests {
         assert_eq!(enclave_config.disable_ansi, Some(true));
         assert_eq!(gateway_config.format.as_deref(), Some("compact"));
         assert_eq!(enclave_config.format.as_deref(), Some("compact"));
+    }
+
+    #[test]
+    fn test_error_hook_sees_only_error_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ERRORS: AtomicUsize = AtomicUsize::new(0);
+        fn hook(target: &str) {
+            assert_eq!(target, "keymeld_core::logging::tests");
+            ERRORS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let subscriber = tracing_subscriber::registry().with(ErrorHook(hook));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("not counted");
+            tracing::error!("counted");
+            tracing::error!("counted");
+        });
+        assert_eq!(ERRORS.load(Ordering::SeqCst), 2);
     }
 
     #[test]
