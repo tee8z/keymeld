@@ -588,13 +588,8 @@ pub struct EnclaveHealthResponse {
     pub healthy: bool,
     pub public_key: String,
     pub attestation_document: String,
-    /// Operator detail. Optional so a gateway can stop publishing it once
-    /// clients no longer require it.
-    #[serde(default)]
-    pub active_sessions: u32,
-    /// Operator detail, optional for the same reason as `active_sessions`.
-    #[serde(default)]
-    pub uptime_seconds: u64,
+    // Session counts and uptime are operator details. They stay on the operator
+    // pages and in metrics; older gateways that still send them are accepted.
     pub key_epoch: u64,
     pub key_generation_time: u64,
     pub last_health_check: u64,
@@ -887,7 +882,22 @@ mod tests {
             "total_enclaves": 1, "healthy_enclaves": 1
         }))
         .unwrap();
-        assert_eq!(listing.enclaves[0].active_sessions, 0);
-        assert_eq!(listing.enclaves[0].uptime_seconds, 0);
+        assert_eq!(listing.enclaves[0].key_epoch, 1);
+    }
+
+    #[test]
+    fn enclave_listing_accepts_and_drops_operator_counts_from_older_gateways() {
+        let listing: ListEnclavesResponse = serde_json::from_value(serde_json::json!({
+            "enclaves": [{
+                "enclave_id": 1, "healthy": true, "public_key": "", "attestation_document": "",
+                "active_sessions": 3, "uptime_seconds": 60,
+                "key_epoch": 1, "key_generation_time": 0, "last_health_check": 0
+            }],
+            "total_enclaves": 1, "healthy_enclaves": 1
+        }))
+        .unwrap();
+        let published = serde_json::to_value(&listing).unwrap();
+        assert!(published["enclaves"][0].get("active_sessions").is_none());
+        assert!(published["enclaves"][0].get("uptime_seconds").is_none());
     }
 }
