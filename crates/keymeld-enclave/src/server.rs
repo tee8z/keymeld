@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
 use tokio_vsock::{VsockAddr, VsockListener};
@@ -90,6 +91,8 @@ pub async fn run_until_stopped(
 
 pub struct EnclaveServer {
     config: ServerConfig,
+    operator: Arc<EnclaveOperator>,
+    session_expiry: crate::confidential::SessionExpiry,
     command_handler: Arc<crate::channel::AuthenticatedCommandHandler>,
     active_connections: Arc<AtomicU32>,
     shutdown_signal: Arc<AtomicBool>,
@@ -109,6 +112,8 @@ impl EnclaveServer {
         ));
         Ok(Self {
             config,
+            operator,
+            session_expiry: crate::confidential::SessionExpiry::from_env()?,
             command_handler,
             active_connections: Arc::new(AtomicU32::new(0)),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
@@ -246,9 +251,34 @@ impl EnclaveServer {
                 if server.shutdown_signal.load(Ordering::Acquire) {
                     break;
                 }
+                server.release_idle_sessions();
                 server.log_server_stats().await;
             }
         });
+    }
+
+    /// Release the sessions that are due, then log what is held by kind and state. These
+    /// are counts only: the host reads this output.
+    fn release_idle_sessions(&self) {
+        let expired = self
+            .operator
+            .expire_sessions(&self.session_expiry, Instant::now());
+        if expired.keygen + expired.signing > 0 {
+            info!(
+                "Released idle sessions: keygen={}, signing={}",
+                expired.keygen, expired.signing
+            );
+        }
+        let held = self.operator.session_counts();
+        info!(
+            "Session Stats: enclave_id={}, keygen_registering={}, keygen_completed={}, keygen_failed={}, signing_active={}, signing_finished={}",
+            self.operator.enclave_id,
+            held.keygen_registering,
+            held.keygen_completed,
+            held.keygen_failed,
+            held.signing_active,
+            held.signing_finished
+        );
     }
 
     async fn log_server_stats(&self) {

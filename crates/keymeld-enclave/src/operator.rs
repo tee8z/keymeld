@@ -84,6 +84,17 @@ impl ServerCommandHandler<Command, Outcome> for EnclaveCommandHandler {
     }
 }
 
+/// Held sessions by kind and state. A signing session is finished once this enclave's
+/// part in its round has ended.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionCounts {
+    pub(crate) keygen_registering: usize,
+    pub(crate) keygen_completed: usize,
+    pub(crate) keygen_failed: usize,
+    pub(crate) signing_active: usize,
+    pub(crate) signing_finished: usize,
+}
+
 pub struct EnclaveOperator {
     pub enclave_id: EnclaveId,
     pub sessions: Arc<DashMap<SessionId, ContextAwareSession>>,
@@ -267,7 +278,7 @@ impl EnclaveOperator {
                     )),
                 )?;
 
-                self.sessions.remove(&session_id);
+                self.drop_session(&session_id);
                 Ok(EnclaveOutcome::System(SystemOutcome::Success))
             }
         }
@@ -829,6 +840,30 @@ impl EnclaveOperator {
             }
             _ => Ok(KeygenOutcome::Success),
         }
+    }
+
+    /// Remove a session together with the task that served it.
+    pub(crate) fn drop_session(&self, session_id: &SessionId) {
+        self.sessions.remove(session_id);
+        self.queue.forget_session(session_id);
+    }
+
+    /// The sessions this enclave holds, by kind and state. Counts only, so that they can
+    /// be logged where the host reads them.
+    pub(crate) fn session_counts(&self) -> SessionCounts {
+        let mut counts = SessionCounts::default();
+        for session in self.sessions.iter() {
+            match &session.status {
+                OperatorStatus::Keygen(KeygenStatus::Completed(_)) => counts.keygen_completed += 1,
+                OperatorStatus::Keygen(KeygenStatus::Failed(_)) => counts.keygen_failed += 1,
+                OperatorStatus::Keygen(_) => counts.keygen_registering += 1,
+                OperatorStatus::Signing(_) if session.signing_round_finished() => {
+                    counts.signing_finished += 1
+                }
+                OperatorStatus::Signing(_) => counts.signing_active += 1,
+            }
+        }
+        counts
     }
 
     async fn handle_get_public_info(&self) -> Result<EnclaveOutcome, EnclaveError> {
