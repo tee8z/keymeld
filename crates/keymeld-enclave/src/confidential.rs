@@ -12,6 +12,7 @@ use keymeld_core::{
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, Weak},
+    time::{Duration, Instant},
 };
 use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
@@ -20,6 +21,8 @@ use zeroize::Zeroizing;
 const MAX_SESSIONS: usize = 4096;
 const MAX_REPLAYS: usize = 16384;
 const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+/// Shorter periods could release a session between two commands of one round.
+const MIN_EXPIRY_SECS: u64 = 60;
 
 pub(crate) fn rejected() -> EnclaveError {
     EnclaveError::Validation(ValidationError::Other(
@@ -27,11 +30,67 @@ pub(crate) fn rejected() -> EnclaveError {
     ))
 }
 
+/// When the enclave releases the sessions of confidential clients. Nothing else does: the
+/// relay is not trusted to close a session, and a client is not allowed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionExpiry {
+    /// A keygen session and the signing sessions started from it are released once none
+    /// of them has been used for this long. Its client restores it as after a restart.
+    pub(crate) idle_keygen: Duration,
+    /// A signing session is released this long after this enclave's part in its round
+    /// ended.
+    pub(crate) finished_signing: Duration,
+}
+impl Default for SessionExpiry {
+    fn default() -> Self {
+        Self {
+            idle_keygen: Duration::from_secs(48 * 60 * 60),
+            finished_signing: Duration::from_secs(10 * 60),
+        }
+    }
+}
+impl SessionExpiry {
+    /// `ENCLAVE_SESSION_IDLE_SECS` and `ENCLAVE_FINISHED_SIGNING_SECS` replace the defaults.
+    pub(crate) fn from_env() -> anyhow::Result<Self> {
+        let default = Self::default();
+        let read = |name: &str| expiry_period(name, std::env::var(name).ok().as_deref());
+        Ok(Self {
+            idle_keygen: read("ENCLAVE_SESSION_IDLE_SECS")?.unwrap_or(default.idle_keygen),
+            finished_signing: read("ENCLAVE_FINISHED_SIGNING_SECS")?
+                .unwrap_or(default.finished_signing),
+        })
+    }
+}
+
+fn expiry_period(name: &str, value: Option<&str>) -> anyhow::Result<Option<Duration>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let seconds: u64 = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{name} must be a whole number of seconds"))?;
+    anyhow::ensure!(
+        seconds >= MIN_EXPIRY_SECS,
+        "{name} must be at least {MIN_EXPIRY_SECS} seconds"
+    );
+    Ok(Some(Duration::from_secs(seconds)))
+}
+
+/// What one pass of [`EnclaveOperator::expire_sessions`] released.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExpiredSessions {
+    pub(crate) keygen: usize,
+    pub(crate) signing: usize,
+}
+
 #[derive(Clone)]
 struct SessionOwner {
     creator_key: Vec<u8>,
     signing_key: Vec<u8>,
     route_id: Uuid,
+    /// The keygen session a signing session was started from.
+    keygen: Option<SessionId>,
+    last_used: Instant,
 }
 impl SessionOwner {
     fn allows(&self, request: &ConfidentialRequest) -> bool {
@@ -39,12 +98,17 @@ impl SessionOwner {
             && (request.authority_public_key == self.creator_key
                 || request.authority_public_key == self.signing_key)
     }
+    fn idle_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_used)
+    }
 }
 
 struct CachedResponse {
     request_digest: [u8; 32],
     response: EnclaveEnvelope,
     last_access: u64,
+    /// The sessions the request named and the keygen sessions those belong to.
+    sessions: Vec<SessionId>,
 }
 
 #[derive(Default)]
@@ -56,11 +120,57 @@ struct State {
 }
 
 impl State {
+    /// Record a use of each session, and of the keygen session a signing session was
+    /// started from.
+    fn touch(&mut self, sessions: &[SessionId], now: Instant) {
+        for id in sessions {
+            let keygen = match self.owners.get_mut(id) {
+                Some(owner) => {
+                    owner.last_used = now;
+                    owner.keygen.clone()
+                }
+                None => continue,
+            };
+            if let Some(keygen) = keygen {
+                if let Some(owner) = self.owners.get_mut(&keygen) {
+                    owner.last_used = now;
+                }
+            }
+        }
+    }
+
+    /// The sessions a cached reply is dropped with.
+    fn reply_sessions(&self, sessions: &[SessionId]) -> Vec<SessionId> {
+        let mut all = sessions.to_vec();
+        for id in sessions {
+            if let Some(keygen) = self.owners.get(id).and_then(|owner| owner.keygen.clone()) {
+                if !all.contains(&keygen) {
+                    all.push(keygen);
+                }
+            }
+        }
+        all
+    }
+
+    /// Drop every cached reply of a keygen session and of its signing sessions. An exact
+    /// retry then runs again, as it does after a restart.
+    fn forget_replies(&mut self, keygen: &SessionId) {
+        let reply_bytes = &mut self.reply_bytes;
+        self.replies.retain(|_, cached| {
+            let keep = !cached.sessions.contains(keygen);
+            if !keep {
+                *reply_bytes = reply_bytes.saturating_sub(cached.response.ciphertext.len());
+            }
+            keep
+        });
+    }
+
     fn cache_response(
         &mut self,
         request_key: (Vec<u8>, String),
         digest: [u8; 32],
         response: EnclaveEnvelope,
+        sessions: Vec<SessionId>,
         max_entries: usize,
         max_bytes: usize,
     ) {
@@ -101,6 +211,7 @@ impl State {
                 request_digest: digest,
                 response,
                 last_access: access,
+                sessions,
             },
         );
     }
@@ -134,6 +245,22 @@ impl ConfidentialDispatcher {
             }
         };
         Ok(gate.lock_owned().await)
+    }
+
+    /// As [`Self::lock`], for a caller that must not wait behind a running command.
+    fn try_lock(&self, session: &SessionId) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let gate = {
+            let mut gates = self.locks.lock().ok()?;
+            gates.retain(|_, value| value.strong_count() > 0);
+            if let Some(gate) = gates.get(session).and_then(Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(session.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        gate.try_lock_owned().ok()
     }
 
     pub(crate) fn reject_legacy(&self, command: &EnclaveCommand) -> Result<(), EnclaveError> {
@@ -256,13 +383,15 @@ impl EnclaveOperator {
         for id in &ids {
             _session_gates.push(self.confidential.lock(id).await?);
         }
+        let now = Instant::now();
         if matches!(
             request.command.command,
             EnclaveCommand::System(SystemCommand::CheckKeygenSession { .. })
         ) {
             {
-                let state = self.confidential.state.lock().map_err(|_| rejected())?;
+                let mut state = self.confidential.state.lock().map_err(|_| rejected())?;
                 self.authorize_confidential(&state, request)?;
+                state.touch(&ids, now);
             }
             let outcome = self
                 .handle_native_command(request.command.clone(), true)
@@ -288,15 +417,19 @@ impl EnclaveOperator {
             let mut state = self.confidential.state.lock().map_err(|_| rejected())?;
             state.access_counter = state.access_counter.saturating_add(1);
             let access = state.access_counter;
-            if let Some(cached) = state.replies.get_mut(&request_key) {
+            let cached = state.replies.get_mut(&request_key).map(|cached| {
                 cached.last_access = access;
-                return if cached.request_digest == digest {
-                    Ok(cached.response.clone())
-                } else {
-                    Err(rejected())
-                };
+                (cached.request_digest == digest).then(|| cached.response.clone())
+            });
+            if let Some(cached) = cached {
+                let response = cached.ok_or_else(rejected)?;
+                state.touch(&ids, now);
+                return Ok(response);
             }
-            self.authorize_confidential(&state, request)?
+            let new_owner = self.authorize_confidential(&state, request)?;
+            // Only an authorized command, or an exact retry of one, counts as a use.
+            state.touch(&ids, now);
+            new_owner
         };
         let outcome = self
             .handle_native_command(request.command.clone(), true)
@@ -318,7 +451,7 @@ impl EnclaveOperator {
             } else {
                 // Failed initial admission cannot reserve an existing session
                 // or leave a half-created native state to block a valid retry.
-                self.sessions.remove(&id);
+                self.drop_session(&id);
             }
         }
         let outcome = outcome.unwrap_or_else(|error| {
@@ -330,15 +463,139 @@ impl EnclaveOperator {
         let response = ConfidentialResponse::encrypt(request, outcome, enclave_secret)
             .map_err(|_| rejected())?;
         let mut state = self.confidential.state.lock().map_err(|_| rejected())?;
+        let sessions = state.reply_sessions(&ids);
         state.cache_response(
             request_key,
             digest,
             response.clone(),
+            sessions,
             MAX_REPLAYS,
             MAX_REPLAY_BYTES,
         );
         drop(state);
         Ok(response)
+    }
+
+    /// Release the confidential sessions that are due under `expiry`, as of `now`.
+    ///
+    /// Releasing a keygen session leaves this enclave as a restart would, for that session
+    /// alone: the session, the signing sessions started from it, their owners and their
+    /// cached replies all go, and its client restores it from its journal when it next needs
+    /// it. A signing session whose round has ended here goes on its own and keeps its cached
+    /// replies, which still answer a late exact retry. One whose round is unfinished stays
+    /// until its keygen session goes, because only then can its client tell that the round
+    /// was lost. A session that is serving a command is left for the next pass.
+    pub(crate) fn expire_sessions(&self, expiry: &SessionExpiry, now: Instant) -> ExpiredSessions {
+        let mut expired = ExpiredSessions::default();
+        let (keygens, signings): (Vec<SessionId>, Vec<SessionId>) = {
+            let Ok(state) = self.confidential.state.lock() else {
+                return expired;
+            };
+            let due = |keygen: bool, limit: Duration| -> Vec<SessionId> {
+                state
+                    .owners
+                    .iter()
+                    .filter(|(_, owner)| {
+                        owner.keygen.is_none() == keygen && owner.idle_for(now) >= limit
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            };
+            (
+                due(true, expiry.idle_keygen),
+                due(false, expiry.finished_signing),
+            )
+        };
+        for keygen in keygens {
+            let Some(_gate) = self.confidential.try_lock(&keygen) else {
+                continue;
+            };
+            // No signing session can start while the gate is held. A command may have used
+            // the session since it was listed, so read it again.
+            let family: Vec<SessionId> = {
+                let Ok(state) = self.confidential.state.lock() else {
+                    return expired;
+                };
+                let idle = state
+                    .owners
+                    .get(&keygen)
+                    .is_some_and(|owner| owner.idle_for(now) >= expiry.idle_keygen);
+                if !idle {
+                    continue;
+                }
+                state
+                    .owners
+                    .iter()
+                    .filter(|(_, owner)| owner.keygen.as_ref() == Some(&keygen))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            };
+            let gates: Vec<_> = family
+                .iter()
+                .filter_map(|id| self.confidential.try_lock(id))
+                .collect();
+            if gates.len() != family.len() {
+                continue;
+            }
+            // A child command can finish and refresh its parent while we acquire
+            // the family gates. Check again with every command excluded.
+            {
+                let Ok(state) = self.confidential.state.lock() else {
+                    return expired;
+                };
+                if !state
+                    .owners
+                    .get(&keygen)
+                    .is_some_and(|owner| owner.idle_for(now) >= expiry.idle_keygen)
+                {
+                    continue;
+                }
+            }
+            for id in family.iter().chain(std::iter::once(&keygen)) {
+                self.drop_session(id);
+            }
+            let Ok(mut state) = self.confidential.state.lock() else {
+                return expired;
+            };
+            for id in family.iter().chain(std::iter::once(&keygen)) {
+                state.owners.remove(id);
+            }
+            state.forget_replies(&keygen);
+            expired.keygen += 1;
+            expired.signing += family.len();
+        }
+        for signing in signings {
+            let Some(_gate) = self.confidential.try_lock(&signing) else {
+                continue;
+            };
+            {
+                let Ok(state) = self.confidential.state.lock() else {
+                    return expired;
+                };
+                // Its keygen session may have taken it along above.
+                let idle = state
+                    .owners
+                    .get(&signing)
+                    .is_some_and(|owner| owner.idle_for(now) >= expiry.finished_signing);
+                if !idle {
+                    continue;
+                }
+            }
+            let finished = self
+                .sessions
+                .get(&signing)
+                .is_none_or(|session| session.signing_round_finished());
+            if !finished {
+                continue;
+            }
+            self.drop_session(&signing);
+            let Ok(mut state) = self.confidential.state.lock() else {
+                return expired;
+            };
+            state.owners.remove(&signing);
+            expired.signing += 1;
+        }
+        expired
     }
 
     fn authorize_confidential(
@@ -387,6 +644,8 @@ impl EnclaveOperator {
                         creator_key: cmd.authorization_manifest.manifest.creator_pubkey.clone(),
                         signing_key: cmd.authorization_manifest.manifest.signing_pubkey.clone(),
                         route_id: request.header.opaque_route_id,
+                        keygen: None,
+                        last_used: Instant::now(),
                     },
                 )))
             }
@@ -409,7 +668,14 @@ impl EnclaveOperator {
                 {
                     return Err(rejected());
                 }
-                Ok(Some((cmd.signing_session_id.clone(), owner)))
+                Ok(Some((
+                    cmd.signing_session_id.clone(),
+                    SessionOwner {
+                        keygen: Some(cmd.keygen_session_id.clone()),
+                        last_used: Instant::now(),
+                        ..owner
+                    },
+                )))
             }
             EnclaveCommand::Musig(_) => {
                 require_owner(&request.command.command.session_id()?)?;
@@ -472,6 +738,12 @@ impl EnclaveOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::{
+        context_aware_session::ContextAwareSession,
+        session_context::SessionContext,
+        states::{KeygenStatus, OperatorStatus, SigningStatus},
+        EnclaveSharedContext, KeygenInitialized, SigningFailed,
+    };
     use keymeld_core::{
         confidential::{RoutingHeader, TRANSPORT_VERSION},
         identifiers::EnclaveId,
@@ -534,7 +806,61 @@ mod tests {
                 creator_key: public(3),
                 signing_key: public(5),
                 route_id,
+                keygen: None,
+                last_used: Instant::now(),
             },
+        );
+        id
+    }
+    fn native_context() -> Arc<std::sync::RwLock<EnclaveSharedContext>> {
+        Arc::new(std::sync::RwLock::new(EnclaveSharedContext::new(
+            EnclaveId::new(1),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            None,
+            keymeld_core::managed_socket::config::TimeoutConfig::default(),
+        )))
+    }
+    /// An owned keygen session that the native state machine holds too.
+    fn held_keygen(operator: &EnclaveOperator, route_id: Uuid) -> SessionId {
+        let id = owned_session(operator, route_id);
+        operator.sessions.insert(
+            id.clone(),
+            ContextAwareSession::new(
+                OperatorStatus::Keygen(KeygenStatus::Initialized(KeygenInitialized::new(
+                    id.clone(),
+                ))),
+                SessionContext::new_keygen(id.clone()),
+                native_context(),
+            ),
+        );
+        id
+    }
+    /// The owner of a signing session started from `keygen`.
+    fn owned_signing(operator: &EnclaveOperator, keygen: &SessionId) -> SessionId {
+        let id = SessionId::new_v7();
+        let mut state = operator.confidential.state.lock().unwrap();
+        let owner = SessionOwner {
+            keygen: Some(keygen.clone()),
+            ..state.owners[keygen].clone()
+        };
+        state.owners.insert(id.clone(), owner);
+        id
+    }
+    /// A signing session of `keygen` whose round has ended on this enclave.
+    fn finished_signing(operator: &EnclaveOperator, keygen: &SessionId) -> SessionId {
+        let id = owned_signing(operator, keygen);
+        operator.sessions.insert(
+            id.clone(),
+            ContextAwareSession::new(
+                OperatorStatus::Signing(SigningStatus::Failed(SigningFailed::new(
+                    id.clone(),
+                    std::time::SystemTime::now(),
+                    "refused".into(),
+                ))),
+                SessionContext::new_signing(id.clone(), keygen.clone(), Vec::new()),
+                native_context(),
+            ),
         );
         id
     }
@@ -644,6 +970,7 @@ mod tests {
                 (public(3), other.correlation_id.clone()),
                 [9; 32],
                 other,
+                Vec::new(),
                 1,
                 MAX_REPLAY_BYTES,
             );
@@ -688,6 +1015,184 @@ mod tests {
             .owners
             .is_empty());
         assert!(operator.sessions.is_empty());
+    }
+
+    #[test]
+    fn finished_signing_sessions_are_released_before_their_keygen_session() {
+        let operator = operator();
+        let keygen = held_keygen(&operator, Uuid::now_v7());
+        let signing = finished_signing(&operator, &keygen);
+        let expiry = SessionExpiry::default();
+        let now = Instant::now();
+        assert_eq!(
+            operator.expire_sessions(&expiry, now),
+            ExpiredSessions::default()
+        );
+        assert_eq!(operator.sessions.len(), 2);
+
+        let expired = operator.expire_sessions(&expiry, now + expiry.finished_signing);
+        assert_eq!(
+            expired,
+            ExpiredSessions {
+                keygen: 0,
+                signing: 1
+            }
+        );
+        assert!(operator.sessions.contains_key(&keygen));
+        assert!(!operator.sessions.contains_key(&signing));
+        let state = operator.confidential.state.lock().unwrap();
+        assert!(state.owners.contains_key(&keygen));
+        assert!(!state.owners.contains_key(&signing));
+    }
+
+    #[tokio::test]
+    async fn idle_keygen_sessions_are_released_with_their_signing_sessions_and_replies() {
+        let operator = operator();
+        let route = Uuid::now_v7();
+        let keygen = held_keygen(&operator, route);
+        let signing = finished_signing(&operator, &keygen);
+        let in_use = held_keygen(&operator, route);
+        let (request, command) = prepare(read_command(keygen.clone()), route, 3);
+        operator.handle_command(command.clone()).await.unwrap();
+        let (_, other) = prepare(read_command(in_use.clone()), route, 3);
+        operator.handle_command(other).await.unwrap();
+        assert_eq!(operator.confidential.state.lock().unwrap().replies.len(), 2);
+
+        let expiry = SessionExpiry::default();
+        let later = Instant::now() + expiry.idle_keygen;
+        operator
+            .confidential
+            .state
+            .lock()
+            .unwrap()
+            .touch(std::slice::from_ref(&in_use), later);
+        let expired = operator.expire_sessions(&expiry, later);
+        assert_eq!(
+            expired,
+            ExpiredSessions {
+                keygen: 1,
+                signing: 1
+            }
+        );
+        assert!(!operator.sessions.contains_key(&keygen));
+        assert!(!operator.sessions.contains_key(&signing));
+        assert!(operator.sessions.contains_key(&in_use));
+        {
+            let state = operator.confidential.state.lock().unwrap();
+            assert_eq!(state.owners.keys().collect::<Vec<_>>(), [&in_use]);
+            assert_eq!(state.replies.len(), 1);
+            let cached: usize = state
+                .replies
+                .values()
+                .map(|cached| cached.response.ciphertext.len())
+                .sum();
+            assert_eq!(state.reply_bytes, cached);
+        }
+        // As after a restart, the cache no longer answers for the released session, and a
+        // command that is not its start is refused.
+        assert!(matches!(
+            read_response(operator.handle_command(command).await.unwrap(), &request),
+            EnclaveOutcome::Error(_)
+        ));
+        assert_eq!(operator.confidential.state.lock().unwrap().replies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_serving_a_command_is_left_for_the_next_pass() {
+        let operator = operator();
+        let keygen = held_keygen(&operator, Uuid::now_v7());
+        let expiry = SessionExpiry::default();
+        let later = Instant::now() + expiry.idle_keygen;
+        let serving = operator.confidential.lock(&keygen).await.unwrap();
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions::default()
+        );
+        assert!(operator.sessions.contains_key(&keygen));
+        drop(serving);
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions {
+                keygen: 1,
+                signing: 0
+            }
+        );
+        assert!(operator.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_child_keeps_its_entire_family_until_the_next_pass() {
+        let operator = operator();
+        let keygen = held_keygen(&operator, Uuid::now_v7());
+        let signing = finished_signing(&operator, &keygen);
+        let expiry = SessionExpiry::default();
+        let later = Instant::now() + expiry.idle_keygen;
+        let serving = operator.confidential.lock(&signing).await.unwrap();
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions::default()
+        );
+        assert_eq!(operator.sessions.len(), 2);
+        operator
+            .confidential
+            .state
+            .lock()
+            .unwrap()
+            .touch(std::slice::from_ref(&signing), later);
+        drop(serving);
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions::default()
+        );
+        assert_eq!(operator.sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_authorized_command_counts_as_a_use_of_the_session_and_its_keygen_session() {
+        let operator = operator();
+        let route = Uuid::now_v7();
+        let keygen = owned_session(&operator, route);
+        let signing = owned_signing(&operator, &keygen);
+        let last_used =
+            |id: &SessionId| operator.confidential.state.lock().unwrap().owners[id].last_used;
+        let (keygen_created, signing_created) = (last_used(&keygen), last_used(&signing));
+
+        // Another authority is refused, and leaves both sessions as idle as they were.
+        let (_, refused) = prepare(read_command(signing.clone()), route, 6);
+        operator.handle_command(refused).await.unwrap();
+        assert_eq!(last_used(&keygen), keygen_created);
+        assert_eq!(last_used(&signing), signing_created);
+
+        let before = Instant::now();
+        let (_, command) = prepare(read_command(signing.clone()), route, 3);
+        operator.handle_command(command).await.unwrap();
+        assert!(last_used(&signing) >= before);
+        assert!(last_used(&keygen) >= before);
+
+        // So a keygen session lives for as long as one of its signing sessions is used.
+        let expiry = SessionExpiry::default();
+        let later = Instant::now() + expiry.idle_keygen;
+        operator
+            .confidential
+            .state
+            .lock()
+            .unwrap()
+            .touch(std::slice::from_ref(&signing), later);
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions::default()
+        );
+    }
+
+    #[test]
+    fn expiry_periods_are_whole_seconds_with_a_floor() {
+        assert_eq!(expiry_period("PERIOD", None).unwrap(), None);
+        assert_eq!(
+            expiry_period("PERIOD", Some("3600")).unwrap(),
+            Some(Duration::from_secs(3600))
+        );
+        assert!(expiry_period("PERIOD", Some("59")).is_err());
+        assert!(expiry_period("PERIOD", Some("an hour")).is_err());
     }
 }
 

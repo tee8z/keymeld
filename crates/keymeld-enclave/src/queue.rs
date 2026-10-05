@@ -294,6 +294,11 @@ impl Queue {
         }
     }
 
+    /// Drop the task of a session that was removed. Its channel closes, which ends the task.
+    pub fn forget_session(&self, session_id: &SessionId) {
+        self.session_tasks.write().unwrap().remove(session_id);
+    }
+
     pub fn active_task_count(&self) -> usize {
         self.session_tasks.read().unwrap().len()
     }
@@ -466,6 +471,11 @@ mod tests {
         // The task handle remains alive in the queue
         assert_eq!(queue.active_task_count(), 1);
         assert!(queue.has_active_task(&session_id));
+
+        // A removed session takes its task with it
+        queue.forget_session(&session_id);
+        assert_eq!(queue.active_task_count(), 0);
+        assert!(!queue.has_active_task(&session_id));
     }
 
     #[tokio::test]

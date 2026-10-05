@@ -2,7 +2,7 @@ use crate::operations::{
     context::EnclaveSharedContext,
     keygen_data::KeygenSessionData,
     session_context::SessionContext,
-    states::{create_failed_state, KeygenStatus, OperatorStatus},
+    states::{create_failed_state, KeygenStatus, OperatorStatus, SigningStatus},
     SessionKind,
 };
 use keymeld_core::{
@@ -168,6 +168,18 @@ impl ContextAwareSession {
 
     pub fn check_for_failure(&self) -> Result<(), EnclaveError> {
         self.status.check_for_failure()
+    }
+
+    /// Whether this enclave's part in a signing round has ended. Only the coordinator's
+    /// enclave finalizes; any other is done once it has returned its partial signatures.
+    pub(crate) fn signing_round_finished(&self) -> bool {
+        match &self.status {
+            OperatorStatus::Signing(SigningStatus::Completed(_) | SigningStatus::Failed(_)) => true,
+            OperatorStatus::Signing(SigningStatus::CollectingPartialSignatures(state)) => {
+                state.coordinator_data().is_none()
+            }
+            _ => false,
+        }
     }
 
     pub fn session_id(&self) -> &SessionId {

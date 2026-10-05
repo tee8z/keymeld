@@ -483,6 +483,54 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         &roster.roster.aggregate_public_key,
         [44; 32],
     );
+
+    // The enclave releases the finished signing session first. Its result is already in
+    // the journal, so repeating the round sends nothing.
+    let operator = state.operators.lock().unwrap()[&EnclaveId::new(1)].clone();
+    let expiry = SessionExpiry::default();
+    assert!(operator.sessions.contains_key(&fresh));
+    let expired = operator.expire_sessions(&expiry, Instant::now() + expiry.finished_signing);
+    assert_eq!(
+        expired,
+        ExpiredSessions {
+            keygen: 0,
+            signing: 1
+        }
+    );
+    assert!(!operator.sessions.contains_key(&fresh));
+    assert!(operator.sessions.contains_key(&session_id));
+    let count = state.requests.lock().unwrap().len();
+    session.sign_prepared_batch(&fresh, 300, &[]).await.unwrap();
+    assert_eq!(state.requests.lock().unwrap().len(), count);
+
+    // An idle keygen session is released like a restart of that session alone, and the
+    // journal restores it the same way.
+    let expired = operator.expire_sessions(&expiry, Instant::now() + expiry.idle_keygen);
+    assert_eq!(
+        expired,
+        ExpiredSessions {
+            keygen: 1,
+            signing: 0
+        }
+    );
+    assert!(operator.sessions.is_empty());
+    session.restore_keygen(&registrations).await.unwrap();
+    assert!(operator.sessions.contains_key(&session_id));
+    let restored = SessionId::new_v7();
+    session
+        .prepare_signing_batch(&restored, &[BatchSigningItem::new([45; 32])])
+        .await
+        .unwrap();
+    let result = session
+        .sign_prepared_batch(&restored, 300, &[])
+        .await
+        .unwrap();
+    verify_signature(
+        &result,
+        &credentials,
+        &roster.roster.aggregate_public_key,
+        [45; 32],
+    );
     for wire in state
         .requests
         .lock()
