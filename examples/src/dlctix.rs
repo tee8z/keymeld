@@ -152,6 +152,8 @@ pub async fn run_dlctix_batch_test(config: ExampleConfig) -> Result<()> {
         fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: Amount::from_sat(FUNDING_AMOUNT_SATS),
         relative_locktime_block_delta: 1,
+        anchor: None,
+        outcome_bound_splits: false,
     };
 
     contract_params

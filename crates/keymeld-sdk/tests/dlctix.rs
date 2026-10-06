@@ -62,6 +62,8 @@ fn contract_fixture() -> (TicketedDLC, BTreeMap<[u8; 33], SecretKey>) {
         fee_rate: FeeRate::from_sat_per_vb_u32(1),
         funding_value: Amount::from_sat(300_000),
         relative_locktime_block_delta: 1,
+        anchor: None,
+        outcome_bound_splits: false,
     };
     (TicketedDLC::new(params, OutPoint::null()).unwrap(), keys)
 }
