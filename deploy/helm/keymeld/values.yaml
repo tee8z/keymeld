@@ -118,7 +118,7 @@ enclave:
       cid: 4
       port: 8000
   eifPath: /opt/keymeld/keymeld.eif
-  vsockTimeoutSecs: 300
+  vsockTimeoutSecs: 900
   sessionInitTimeoutSecs: 1800
   signingTimeoutSecs: 600
 

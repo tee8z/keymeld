@@ -592,8 +592,9 @@ where
                         u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
 
                     if message_len > timeout_config.max_message_size_bytes {
-                        error!("Message too large: {message_len} bytes");
-                        continue;
+                        // The unread body would be parsed as the next frame header.
+                        error!("Message too large: {message_len} bytes; closing connection");
+                        break;
                     }
 
                     // Read message body

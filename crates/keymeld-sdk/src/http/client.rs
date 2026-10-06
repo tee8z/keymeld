@@ -3,6 +3,11 @@ use crate::error::{ApiError, NetworkError, SdkError};
 use crate::types::ErrorResponse;
 use serde::{de::DeserializeOwned, Serialize};
 
+/// One confidential command may sign a full batch inside the enclave. Outlast the
+/// gateway's default 900-second wait so the relay, not the client, reports a stall.
+#[cfg(not(target_arch = "wasm32"))]
+const CONFIDENTIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(960);
+
 #[derive(Clone)]
 pub struct HttpClient {
     client: reqwest::Client,
@@ -101,14 +106,15 @@ impl HttpClient {
                 "Confidential request exceeds transport limit".into(),
             ));
         }
-        let response = self
+        let request = self
             .client
             .post(url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .body(bytes)
-            .send()
-            .await?;
+            .body(bytes);
+        #[cfg(not(target_arch = "wasm32"))]
+        let request = request.timeout(self.config.timeout.max(CONFIDENTIAL_TIMEOUT));
+        let response = request.send().await?;
         if !response.status().is_success() {
             return Err(SdkError::Internal(
                 "Confidential relay rejected request".into(),

@@ -890,6 +890,11 @@ fn bip340_permission_is_verifier_authorized_and_signs_only_with_the_participant_
         scope: bip340_scope(key(2), 3),
     };
     grant.operation.validate_action(&action, &policy).unwrap();
+    // A two-place pool of 20 players needs 1,182 items; the cap leaves room for a retry.
+    let full = Action::SignBip340 {
+        scope: bip340_scope(key(2), MAX_BATCH_ITEMS),
+    };
+    grant.operation.validate_action(&full, &policy).unwrap();
     // It is not a MuSig2 permit, a release, or another participant's key.
     let musig = policy.grants["sign"].operation.exact().unwrap();
     assert!(grant.operation.validate_action(musig, &policy).is_err());

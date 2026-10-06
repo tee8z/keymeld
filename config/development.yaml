@@ -110,15 +110,15 @@ enclaves:
   # ============================================================================
   connection_load_threshold: 50
 
-  vsock_timeout_secs: 600 # Timeout for VSock operations and request/response cycles
+  vsock_timeout_secs: 900 # Timeout for VSock operations and request/response cycles (a full signing batch can take ~5 minutes)
   nonce_generation_timeout_secs: 180 # Timeout for cryptographic nonce generation
   session_init_timeout_secs: 1800 # Timeout for session initialization (key generation setup)
   signing_timeout_secs: 600 # Timeout for cryptographic signing operations
   network_write_timeout_secs: 5 # Timeout for individual network write operations
-  network_read_timeout_secs: 300 # Timeout for reading crypto operation responses
+  network_read_timeout_secs: 900 # Timeout for reading crypto operation responses
   pool_acquire_timeout_secs: 10 # Timeout for acquiring connections from pool (wait for permit if at limit)
   connection_retry_delay_ms: 100 # Delay between connection retry attempts
-  max_message_size_bytes: 16777216 # Maximum message size (16MB) for VSock communication
+  max_message_size_bytes: 34605056 # Maximum VSock frame (~33 MiB, one full confidential envelope); smaller values are raised to this
 coordinator:
   # ============================================================================
   # COORDINATOR TUNING - processing_interval_ms and batch_size

@@ -56,10 +56,10 @@ data:
       session_init_timeout_secs: {{ .Values.enclave.sessionInitTimeoutSecs }}
       signing_timeout_secs: {{ .Values.enclave.signingTimeoutSecs }}
       network_write_timeout_secs: 5
-      network_read_timeout_secs: 300
+      network_read_timeout_secs: 900
       pool_acquire_timeout_secs: 30
       connection_retry_delay_ms: 100
-      max_message_size_bytes: 16777216
+      max_message_size_bytes: 34605056
     {{- end }}
     coordinator:
       processing_interval_ms: {{ .Values.config.coordinator.processingIntervalMs }}
