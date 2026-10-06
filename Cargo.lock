@@ -1604,9 +1604,9 @@ dependencies = [
 
 [[package]]
 name = "dlctix"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "206fb7e6901075ea180c74d873d9f91386f25d01bb5b8851ff184a45494ec567"
+checksum = "69196bb1dc8322e46ccec91e95428504fa1314c999f564dd16b33b2e14e01485"
 dependencies = [
  "bitcoin",
  "hex",
