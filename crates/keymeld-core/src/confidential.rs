@@ -12,9 +12,16 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub const TRANSPORT_VERSION: u16 = 1;
-pub const MAX_PLAINTEXT_BYTES: usize = 8 * 1024 * 1024;
+/// Holds an escrow command whose encrypted request is a full
+/// [`crate::escrow::MAX_PAYLOAD_BYTES`] payload (base64 in JSON), and the largest signing
+/// round: 21 participants' nonces for [`crate::escrow::MAX_BATCH_ITEMS`] adaptor items, about
+/// 456 bytes per participant and item once encrypted and hex encoded.
+pub const MAX_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CIPHERTEXT_BYTES: usize = MAX_PLAINTEXT_BYTES + 512;
 pub const MAX_WIRE_BYTES: usize = MAX_CIPHERTEXT_BYTES * 2 + 1024;
+// An escrow command carries its encrypted request as base64 inside the plaintext.
+const _: () =
+    assert!(crate::escrow::MAX_PAYLOAD_BYTES.div_ceil(3) * 4 + 64 * 1024 <= MAX_PLAINTEXT_BYTES);
 
 fn valid_correlation(value: &str) -> bool {
     value.len() == 64
@@ -529,5 +536,30 @@ mod tests {
         assert!(serde_json::from_value::<EnclaveEnvelope>(wire).is_err());
         envelope.ciphertext = "00".repeat(MAX_CIPHERTEXT_BYTES + 1);
         assert!(envelope.validate_bounds().is_err());
+    }
+
+    /// The largest signing round sends every participant's nonces for every item in one
+    /// command: 20 players and the coordinator, each with one adaptor nonce per item.
+    #[test]
+    fn a_full_signing_round_fits_one_message() {
+        use crate::escrow::MAX_BATCH_ITEMS;
+        use crate::protocol::NonceData;
+        const PARTICIPANTS: usize = 21;
+        const G: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let nonce: crate::PubNonce = format!("{G}{G}").parse().unwrap();
+        let batch = NonceData::Batch(
+            (0..MAX_BATCH_ITEMS)
+                .map(|_| {
+                    (
+                        Uuid::now_v7(),
+                        Box::new(NonceData::Adaptor(vec![(Uuid::now_v7(), nonce.clone())])),
+                    )
+                })
+                .collect(),
+        );
+        // Session encryption adds its context, nonce and tag; hex doubles all of it.
+        let participant = 2 * (serde_json::to_vec(&batch).unwrap().len() + 64);
+        let round = PARTICIPANTS * (participant + 64);
+        assert!(round + 64 * 1024 <= MAX_PLAINTEXT_BYTES, "{round}");
     }
 }

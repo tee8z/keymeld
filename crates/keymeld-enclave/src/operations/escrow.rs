@@ -34,6 +34,8 @@ use zeroize::Zeroizing;
 
 const MAX_REQUEST_CACHE_BYTES: usize = escrow::MAX_PREPARATION_CACHE_BYTES;
 const MAX_CACHED_RESPONSE_BYTES: usize = escrow::PREPARATION_RESPONSE_RESERVATION_BYTES;
+/// A verifier checks every item of a signing scope, up to [`escrow::MAX_BATCH_ITEMS`].
+const VERIFIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn invalid(message: impl ToString) -> EnclaveError {
     EnclaveError::Validation(ValidationError::Other(message.to_string()))
@@ -883,7 +885,7 @@ async fn verify_execution(
                 .ok_or_else(|| invalid("Missing verifier selection"))?;
             let exact = verifier_action(prepared);
             tokio::time::timeout(
-                std::time::Duration::from_secs(60),
+                VERIFIER_TIMEOUT,
                 context
                     .escrow_verifiers
                     .get(&selection.id, selection.version)?
@@ -935,7 +937,7 @@ async fn restore_execution(
             .ok_or_else(|| invalid("Missing verifier selection"))?;
         let exact = verifier_action(prepared);
         tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            VERIFIER_TIMEOUT,
             context
                 .escrow_verifiers
                 .get(&selection.id, selection.version)?
@@ -1411,7 +1413,7 @@ pub(crate) async fn handle_snapshot(
                         .as_ref()
                         .ok_or_else(|| invalid("Missing verifier"))?;
                     tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
+                        VERIFIER_TIMEOUT,
                         context
                             .escrow_verifiers
                             .get(&selection.id, selection.version)?

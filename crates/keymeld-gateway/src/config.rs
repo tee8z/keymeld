@@ -1,7 +1,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use anyhow::{Context, Result};
-use keymeld_core::managed_socket::config::{RetryConfig, TimeoutConfig};
+use keymeld_core::managed_socket::config::{RetryConfig, TimeoutConfig, MIN_MESSAGE_SIZE_BYTES};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -257,9 +257,12 @@ impl From<&EnclaveConfig> for TimeoutConfig {
             connection_retry_delay_ms: config
                 .connection_retry_delay_ms
                 .unwrap_or(defaults.connection_retry_delay_ms),
+            // Enclaves frame at the default size; a smaller relay limit would drop full
+            // confidential envelopes and the batches that need them.
             max_message_size_bytes: config
                 .max_message_size_bytes
-                .unwrap_or(defaults.max_message_size_bytes),
+                .unwrap_or(defaults.max_message_size_bytes)
+                .max(MIN_MESSAGE_SIZE_BYTES),
             max_channel_size: config.max_channel_size.unwrap_or(defaults.max_channel_size),
             connection_load_threshold: config
                 .connection_load_threshold
@@ -933,6 +936,23 @@ require_tls = false
         config.server.port = 8090;
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_smaller_configured_frame_still_carries_a_full_confidential_envelope() {
+        let mut enclaves = EnclaveConfig {
+            max_message_size_bytes: Some(16 * 1024 * 1024),
+            ..EnclaveConfig::default()
+        };
+        assert_eq!(
+            TimeoutConfig::from(&enclaves).max_message_size_bytes,
+            MIN_MESSAGE_SIZE_BYTES
+        );
+        enclaves.max_message_size_bytes = Some(2 * MIN_MESSAGE_SIZE_BYTES);
+        assert_eq!(
+            TimeoutConfig::from(&enclaves).max_message_size_bytes,
+            2 * MIN_MESSAGE_SIZE_BYTES
+        );
     }
 
     #[test]

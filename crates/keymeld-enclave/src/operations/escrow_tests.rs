@@ -1173,3 +1173,73 @@ fn contract_scope_sealed_state_shrinks_for_large_pools() {
         assert!(v2_request * 5 < v1_request, "{v1_request} -> {v2_request}");
     }
 }
+
+/// The coordinator's permit in a two-place pool of `players`: P(N,2) outcome transactions
+/// with adaptor points and 2N+2 refund and expiry transactions list all N+1 signers, and
+/// each outcome's two splits list the coordinator and that outcome's two winners.
+fn two_place_scope(players: usize) -> SigningScope {
+    let signers = contract_scope(players).0.batch[0].signers.clone();
+    let outcomes = players * (players - 1);
+    let item = |index: usize, signers: &[ScopeSigner], subset_id: Option<Uuid>| SigningItem {
+        item_id: Uuid::now_v7(),
+        message_digest: escrow::sha256(&index.to_le_bytes()),
+        subset_id,
+        signers: signers.to_vec(),
+        tweak: KeyTweak::TaprootKeyPath,
+        adaptor: if index < outcomes {
+            AdaptorContext::Single {
+                adaptor_id: Uuid::now_v7(),
+                point: PublicKeyBytes::new(&public_key(&[(index % 250) as u8 + 1; 32])).unwrap(),
+            }
+        } else {
+            AdaptorContext::None
+        },
+    };
+    let full = (0..outcomes + 2 * players + 2).map(|index| item(index, &signers, None));
+    let splits = (0..2 * outcomes).map(|index| {
+        item(
+            outcomes + 2 * players + 2 + index,
+            &signers[..3],
+            Some(Uuid::now_v7()),
+        )
+    });
+    SigningScope {
+        session_tweak: KeyTweak::None,
+        batch: full.chain(splits).collect(),
+    }
+}
+
+#[test]
+fn a_two_place_pool_of_twenty_fits_one_permit_and_one_signing_request() {
+    let f = fixture(false);
+    let (prepared, attempt) = prepare(&f, "sign");
+    let mut state = unseal_prepared(&f.context, &prepared.sealed_state);
+    let scope = two_place_scope(20);
+    assert_eq!(scope.batch.len(), 1182);
+    assert!(scope.batch.len() <= escrow::MAX_BATCH_ITEMS);
+    state.action = Action::Sign {
+        scope: scope.clone(),
+    };
+    let action = Payload::encode(&state.action).unwrap();
+    let sealed = seal_state(&f.context, SealedState::Prepared { prepared: state }).unwrap();
+    let restored = unseal_prepared(&f.context, &sealed);
+    assert_eq!(restored.action, Action::Sign { scope });
+    // A signing retry sends the scope as verifier parameters beside its prior receipt.
+    let request = command(
+        &f,
+        Operation::Prepare,
+        Some(("sign", &attempt)),
+        &PrepareEscrowRequest {
+            schema_version: escrow::SCHEMA_VERSION,
+            binding_receipt: bind(&f).sealed_state,
+            action_id: "sign".into(),
+            attempt: attempt.clone(),
+            action: None,
+            action_parameters: action,
+            prior_preparation_receipts: vec![sealed],
+        },
+    );
+    let size = serde_json::to_vec(&request).unwrap().len();
+    println!("two places, 20 players: signing request {size} bytes");
+    assert!(size + 64 * 1024 <= keymeld_core::confidential::MAX_PLAINTEXT_BYTES);
+}

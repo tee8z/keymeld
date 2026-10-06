@@ -60,15 +60,15 @@ enclaves:
       cid: 5 # TEMPLATE - Override with KEYMELD_ENCLAVE_2_CID
       port: 8000
   max_channel_size: 1000 # Internal message buffer size per connection - controls backpressure when requests queue up faster than they can be processed
-  vsock_timeout_secs: 300 # Timeout for VSock operations and request/response cycles (5 minutes for crypto operations)
+  vsock_timeout_secs: 900 # Timeout for VSock operations and request/response cycles (a full signing batch can take ~5 minutes)
   nonce_generation_timeout_secs: 180 # Timeout for cryptographic nonce generation (3 minutes)
   session_init_timeout_secs: 1800 # Timeout for session initialization (30 minutes for complex key generation)
   signing_timeout_secs: 600 # Timeout for cryptographic signing operations (10 minutes)
   network_write_timeout_secs: 5 # Timeout for individual network write operations
-  network_read_timeout_secs: 300 # Timeout for reading crypto operation responses (5 minutes)
+  network_read_timeout_secs: 900 # Timeout for reading crypto operation responses (15 minutes)
   pool_acquire_timeout_secs: 30 # Timeout for acquiring connections from pool (30 seconds in production)
   connection_retry_delay_ms: 100 # Delay between connection retry attempts (100ms)
-  max_message_size_bytes: 16777216 # Maximum message size (16MB) for VSock communication
+  max_message_size_bytes: 34605056 # Maximum VSock frame (~33 MiB, one full confidential envelope); smaller values are raised to this
 coordinator:
   processing_interval_ms: 100 # How often coordinator processes pending sessions (faster processing for production)
   batch_size: 100 # Number of sessions to process in each batch

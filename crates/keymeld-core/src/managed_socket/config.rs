@@ -32,19 +32,26 @@ fn default_connection_load_threshold() -> u32 {
     50
 }
 
+/// The smallest frame that carries a full confidential envelope: its hex ciphertext plus the
+/// command around it. The relay never splits one.
+pub const MIN_MESSAGE_SIZE_BYTES: usize = crate::confidential::MAX_WIRE_BYTES + 1024 * 1024;
+
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
-            vsock_timeout_secs: 300,                  // 5 minutes for crypto operations
-            nonce_generation_timeout_secs: 180,       // 3 minutes
-            session_init_timeout_secs: 1800,          // 30 minutes
-            signing_timeout_secs: 600,                // 10 minutes
-            network_write_timeout_secs: 5,            // 5 seconds for individual network writes
-            network_read_timeout_secs: 300, // 5 minutes for reading crypto operation responses
-            pool_acquire_timeout_secs: 30,  // 30 seconds for acquiring connections from pool
+            // A full batch of 1,536 items for 21 signers costs about 5-10 ms per item and
+            // signer in one command, up to about five minutes.
+            vsock_timeout_secs: 900,
+            nonce_generation_timeout_secs: 180, // 3 minutes
+            session_init_timeout_secs: 1800,    // 30 minutes
+            signing_timeout_secs: 600,          // 10 minutes
+            network_write_timeout_secs: 5,      // 5 seconds for individual network writes
+            // The relay closes a connection that waits this long for any response.
+            network_read_timeout_secs: 900,
+            pool_acquire_timeout_secs: 30, // 30 seconds for acquiring connections from pool
             connection_retry_delay_ms: 100, // 100ms delay between connection retries
-            max_message_size_bytes: 16 * 1024 * 1024, // 16MB - optimal for MuSig2 + adaptor signatures (up to ~200 participants)
-            max_channel_size: 1000,                   // Maximum channel buffer size
+            max_message_size_bytes: MIN_MESSAGE_SIZE_BYTES,
+            max_channel_size: 1000, // Maximum channel buffer size
             connection_load_threshold: default_connection_load_threshold(),
         }
     }
@@ -185,14 +192,16 @@ mod tests {
     #[test]
     fn test_timeout_config_defaults() {
         let config = TimeoutConfig::default();
-        assert_eq!(config.vsock_timeout_secs, 300);
+        assert_eq!(config.vsock_timeout_secs, 900);
         assert_eq!(config.nonce_generation_timeout_secs, 180);
         assert_eq!(config.session_init_timeout_secs, 1800);
         assert_eq!(config.network_write_timeout_secs, 5);
-        assert_eq!(config.network_read_timeout_secs, 300);
+        assert_eq!(config.network_read_timeout_secs, 900);
         assert_eq!(config.pool_acquire_timeout_secs, 30);
         assert_eq!(config.connection_retry_delay_ms, 100);
-        assert_eq!(config.max_message_size_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.max_message_size_bytes, MIN_MESSAGE_SIZE_BYTES);
+        // A full confidential envelope travels as one frame.
+        assert!(crate::confidential::MAX_WIRE_BYTES < config.max_message_size_bytes);
         assert_eq!(config.max_channel_size, 1000);
         assert_eq!(config.connection_load_threshold, 50);
         assert!(config.validate().is_ok());
@@ -234,12 +243,12 @@ mod tests {
     #[test]
     fn test_timeout_config_duration_conversions() {
         let config = TimeoutConfig::default();
-        assert_eq!(config.vsock_timeout(), Duration::from_secs(300));
+        assert_eq!(config.vsock_timeout(), Duration::from_secs(900));
         assert_eq!(config.nonce_generation_timeout(), Duration::from_secs(180));
         assert_eq!(config.session_init_timeout(), Duration::from_secs(1800));
         assert_eq!(config.signing_timeout(), Duration::from_secs(600));
         assert_eq!(config.network_write_timeout(), Duration::from_secs(5));
-        assert_eq!(config.network_read_timeout(), Duration::from_secs(300));
+        assert_eq!(config.network_read_timeout(), Duration::from_secs(900));
         assert_eq!(config.pool_acquire_timeout(), Duration::from_secs(30));
         assert_eq!(config.connection_retry_delay(), Duration::from_millis(100));
     }

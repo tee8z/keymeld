@@ -18,20 +18,27 @@ use zeroize::{Zeroize, Zeroizing};
 pub mod protocol;
 
 pub const SCHEMA_VERSION: u16 = 2;
-pub const MAX_WIRE_BYTES: usize = 4 * 1024 * 1024;
+/// Bounds any escrow plaintext before it is parsed, including a sealed state at
+/// [`MAX_PAYLOAD_BYTES`] after inflation.
+pub const MAX_WIRE_BYTES: usize = 2 * MAX_PAYLOAD_BYTES;
 pub const MAX_POLICY_BYTES: usize = 256 * 1024;
-pub const MAX_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+/// Sized for a signing permit at [`MAX_BATCH_ITEMS`]: an item whose JSON lists 21 signers
+/// takes about 4.7 KB, so a two-place pool of 20 players (1,182 items, most of them
+/// three-signer splits) needs about 2.1 MB of scope before its request wraps it again.
+pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SECRET_BYTES: usize = 4096;
 pub const MAX_SECRETS: usize = 16;
 pub const MAX_ACTIONS: usize = 32;
 /// Shared full-response budget for Bind/Prepare. Execution recovery is independent.
-pub const MAX_PREPARATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PREPARATION_CACHE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_PREPARATION_REQUESTS_PER_PARTICIPANT: usize = MAX_ACTIONS * 4;
 /// Worst-case response reservation while asynchronous preparation runs.
 pub const PREPARATION_RESPONSE_RESERVATION_BYTES: usize = MAX_PAYLOAD_BYTES * 2 + 8192;
 /// Maximum authenticated renewal candidates per release permission and receipt chain.
 pub const MAX_PREPARATIONS_PER_ACTION: u16 = 16;
-pub const MAX_BATCH_ITEMS: usize = 256;
+/// A two-place pool of 20 players needs P(20,2)·3 + 2·20 + 2 = 1,182 signing items; the
+/// rest is headroom for a signing retry.
+pub const MAX_BATCH_ITEMS: usize = 1536;
 pub const MAX_SIGNERS: usize = 256;
 
 fn invalid(message: &str) -> KeyMeldError {
