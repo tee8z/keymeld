@@ -243,12 +243,12 @@ mod tests {
     #[test]
     fn test_timeout_config_duration_conversions() {
         let config = TimeoutConfig::default();
-        assert_eq!(config.vsock_timeout(), Duration::from_secs(300));
+        assert_eq!(config.vsock_timeout(), Duration::from_secs(900));
         assert_eq!(config.nonce_generation_timeout(), Duration::from_secs(180));
         assert_eq!(config.session_init_timeout(), Duration::from_secs(1800));
         assert_eq!(config.signing_timeout(), Duration::from_secs(600));
         assert_eq!(config.network_write_timeout(), Duration::from_secs(5));
-        assert_eq!(config.network_read_timeout(), Duration::from_secs(300));
+        assert_eq!(config.network_read_timeout(), Duration::from_secs(900));
         assert_eq!(config.pool_acquire_timeout(), Duration::from_secs(30));
         assert_eq!(config.connection_retry_delay(), Duration::from_millis(100));
     }
