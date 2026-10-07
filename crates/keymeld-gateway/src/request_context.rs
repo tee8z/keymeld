@@ -5,7 +5,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use std::{sync::Arc, time::Instant};
+use std::{fmt, sync::Arc, time::Instant};
 use tracing::Instrument;
 
 pub(crate) static REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -62,16 +62,48 @@ pub(crate) async fn request_context(
         response.headers_mut().insert(REQUEST_ID.clone(), value);
     }
     if logs_requests_to(&route) {
-        tracing::info!(
-            target: "http",
-            "http rid={rid} prid={prid} sid={sid} ip={ip} method={} route={} status={} ms={} user=-",
-            log_value(method.as_str()),
-            log_value(&route),
-            response.status().as_u16(),
-            start.elapsed().as_millis(),
-        );
+        let line = RequestLine {
+            rid: &rid,
+            prid: &prid,
+            sid: &sid,
+            ip: &ip,
+            method: method.as_str(),
+            route: &route,
+            status: response.status().as_u16(),
+            ms: start.elapsed().as_millis(),
+        };
+        tracing::info!(target: "http", "{line}");
     }
     response
+}
+
+/// The contract's request line, written once per answered request.
+struct RequestLine<'a> {
+    rid: &'a str,
+    prid: &'a str,
+    sid: &'a str,
+    ip: &'a str,
+    method: &'a str,
+    route: &'a str,
+    status: u16,
+    ms: u128,
+}
+
+impl fmt::Display for RequestLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "http rid={} prid={} sid={} ip={} method={} route={} status={} ms={} user=-",
+            self.rid,
+            self.prid,
+            self.sid,
+            self.ip,
+            log_value(self.method),
+            log_value(self.route),
+            self.status,
+            self.ms,
+        )
+    }
 }
 
 fn header<'a>(request: &'a Request, name: &HeaderName) -> Option<&'a str> {
@@ -143,6 +175,24 @@ mod tests {
         assert!(!valid_session_id("short"));
         assert!(!valid_session_id(&"a".repeat(33)));
         assert!(!valid_session_id("abcdefghijklmnop=="));
+    }
+
+    #[test]
+    fn request_line_matches_the_contract() {
+        let line = RequestLine {
+            rid: "0192f0c4-7a3e-7c1d-9b5e-3f2a1c4d5e6f",
+            prid: "-",
+            sid: "Zx_9-abcdefghijkl",
+            ip: "192.0.2.7",
+            method: "GET",
+            route: "/api/v1/enclaves/{enclave_id}/public-key",
+            status: 200,
+            ms: 37,
+        };
+        assert_eq!(
+            line.to_string(),
+            "http rid=0192f0c4-7a3e-7c1d-9b5e-3f2a1c4d5e6f prid=- sid=Zx_9-abcdefghijkl ip=192.0.2.7 method=GET route=/api/v1/enclaves/{enclave_id}/public-key status=200 ms=37 user=-"
+        );
     }
 
     #[test]

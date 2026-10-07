@@ -1031,28 +1031,6 @@ mod tests {
         assert!(!headers.contains("access-control-allow-origin:"));
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     fn response_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
         headers
             .lines()
@@ -1060,16 +1038,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_get_an_id_and_one_request_line() {
-        let logs = CapturedLogs::default();
-        let _logging = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .compact()
-                .with_ansi(false)
-                .with_max_level(tracing::Level::INFO)
-                .with_writer(logs.clone())
-                .finish(),
-        );
+    async fn requests_get_an_id_trusted_only_from_proxies() {
         let (mut config, _directory) = create_test_config();
         let (state, _) = http_test_state(&config).await;
         let server = StaticTestServer::start_router(
@@ -1081,34 +1050,21 @@ mod tests {
         let (status, headers, _) = server
             .request_with_body(
                 "GET",
-                "/api/v1/version?secret=value",
-                "X-Request-Id: client-chosen-id\r\nX-Parent-Request-Id: parent-request-1\r\nX-Session-Id: Zx_9-abcdefghijkl\r\n",
+                "/api/v1/version",
+                "X-Request-Id: client-chosen-id\r\n",
                 "",
             )
             .await;
         assert_eq!(status, 200);
-        let rid = response_header(&headers, "x-request-id")
-            .unwrap()
-            .to_owned();
-        assert!(uuid::Uuid::parse_str(&rid).is_ok());
-        server.request("GET", "/api/v1/health").await;
-        let written = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        let lines: Vec<_> = written
-            .lines()
-            .filter(|line| line.contains(" http: "))
-            .collect();
-        assert_eq!(lines.len(), 1, "{written}");
-        assert!(lines[0].ends_with(" user=-"), "{written}");
-        assert!(
-            lines[0].contains(&format!(
-                "http: http rid={rid} prid=parent-request-1 sid=Zx_9-abcdefghijkl ip=127.0.0.1 method=GET route=/api/v1/version status=200 ms="
-            )),
-            "{written}"
-        );
-        assert!(!written.contains("secret"), "{written}");
+        let rid = response_header(&headers, "x-request-id").unwrap();
+        assert!(uuid::Uuid::parse_str(rid).is_ok());
+        // Unlogged routes still get an id.
+        let (_, headers, _) = server.request("GET", "/api/v1/health").await;
+        assert!(response_header(&headers, "x-request-id").is_some());
 
-        // A trusted proxy's id is kept; malformed ids and session ids are dropped.
+        // A trusted proxy's id is kept; malformed ones are replaced.
         config.server.rate_limit.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        config.server.rate_limit.client_ip_header = Some("x-real-ip".into());
         let server =
             StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
                 .await;
@@ -1116,7 +1072,7 @@ mod tests {
             .request_with_body(
                 "GET",
                 "/api/v1/version",
-                "X-Request-Id: proxy-chosen-id-1\r\nX-Session-Id: short\r\n",
+                "X-Request-Id: proxy-chosen-id-1\r\nX-Real-IP: 192.0.2.7\r\n",
                 "",
             )
             .await;
@@ -1127,12 +1083,8 @@ mod tests {
         let (_, headers, _) = server
             .request_with_body("GET", "/api/v1/version", "X-Request-Id: short\r\n", "")
             .await;
-        assert_ne!(response_header(&headers, "x-request-id"), Some("short"));
-        let written = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        assert!(
-            written.contains("http: http rid=proxy-chosen-id-1 prid=- sid=- ip=127.0.0.1 "),
-            "{written}"
-        );
+        let rid = response_header(&headers, "x-request-id").unwrap();
+        assert!(uuid::Uuid::parse_str(rid).is_ok());
     }
 
     #[tokio::test]

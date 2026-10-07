@@ -2760,7 +2760,6 @@ dependencies = [
  "toml 0.9.11+spec-1.1.0",
  "tower-http 0.7.1",
  "tracing",
- "tracing-subscriber",
  "utoipa",
  "utoipa-scalar",
  "uuid",
