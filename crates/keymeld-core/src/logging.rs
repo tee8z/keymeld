@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Once;
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
+use tracing_subscriber::{
+    layer::{Layered, SubscriberExt},
+    EnvFilter, Layer, Registry,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
@@ -86,73 +89,86 @@ pub fn init_logging_with_error_hook(config: &LoggingConfig, on_error: Option<fn(
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
-        let component = config.component.as_deref().unwrap_or("keymeld");
-
-        let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            let default_filter = match config.level.as_str() {
-                "trace" => format!("{component}=trace,tower_http=debug"),
-                "debug" => format!("{component}=debug,tower_http=debug"),
-                "info" => format!("{component}=info,tower_http=info"),
-                "warn" => format!("{component}=warn,tower_http=warn"),
-                "error" => format!("{component}=error,tower_http=error"),
-                _ => format!("{component}=info,tower_http=info"),
-            };
-            default_filter.into()
-        });
-
-        macro_rules! init_subscriber {
-            ($layer:expr) => {{
-                let subscriber = tracing_subscriber::registry()
-                    .with(env_filter.clone())
-                    .with(on_error.map(ErrorHook))
-                    .with($layer);
-                if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
-                    eprintln!("Failed to set global tracing subscriber: {}", e);
-                }
-            }};
-        }
-
-        let include_target = config.include_target.unwrap_or(true);
-        let include_thread_ids = config.include_thread_ids.unwrap_or(true);
-        let disable_ansi = config.disable_ansi.unwrap_or(false);
-
-        if config.enable_json.unwrap_or(false) {
-            init_subscriber!(tracing_subscriber::fmt::layer()
-                .json()
-                .with_target(include_target)
-                .with_thread_ids(include_thread_ids)
-                .with_ansi(!disable_ansi));
-        } else {
-            match config.format.as_deref() {
-                Some("compact") => {
-                    init_subscriber!(tracing_subscriber::fmt::layer()
-                        .compact()
-                        .with_target(include_target)
-                        .with_thread_ids(include_thread_ids)
-                        .with_ansi(!disable_ansi));
-                }
-                Some("pretty") => {
-                    init_subscriber!(tracing_subscriber::fmt::layer()
-                        .pretty()
-                        .with_target(include_target)
-                        .with_thread_ids(include_thread_ids)
-                        .with_ansi(!disable_ansi));
-                }
-                _ => {
-                    init_subscriber!(tracing_subscriber::fmt::layer()
-                        .with_target(include_target)
-                        .with_thread_ids(include_thread_ids)
-                        .with_ansi(!disable_ansi));
-                }
-            }
+        if let Err(e) = tracing::subscriber::set_global_default(subscriber(config, on_error)) {
+            eprintln!("Failed to set global tracing subscriber: {}", e);
         }
 
         tracing::debug!(
-            component = component,
+            component = config.component.as_deref().unwrap_or("keymeld"),
             level = config.level,
             "Logging initialized"
         );
     });
+}
+
+/// Logs on the calling thread until the guard is dropped. A service uses this
+/// while it loads its configuration, then calls `init_logging_with_error_hook`
+/// with the configured settings, which take over from there.
+pub fn startup_logging(
+    config: &LoggingConfig,
+    on_error: Option<fn(&str)>,
+) -> tracing::subscriber::DefaultGuard {
+    tracing::subscriber::set_default(subscriber(config, on_error))
+}
+
+type BaseSubscriber = Layered<Option<ErrorHook>, Layered<EnvFilter, Registry>>;
+
+/// Directives used when RUST_LOG is unset. Request lines use the `http` target.
+fn default_directives(config: &LoggingConfig) -> String {
+    let component = config.component.as_deref().unwrap_or("keymeld");
+    let level = match config.level.as_str() {
+        level @ ("trace" | "debug" | "info" | "warn" | "error") => level,
+        _ => "info",
+    };
+    let tower_http = if level == "trace" { "debug" } else { level };
+    format!("{component}={level},http={level},tower_http={tower_http}")
+}
+
+fn subscriber(
+    config: &LoggingConfig,
+    on_error: Option<fn(&str)>,
+) -> impl tracing::Subscriber + Send + Sync + 'static {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_directives(config)));
+
+    let include_target = config.include_target.unwrap_or(true);
+    let include_thread_ids = config.include_thread_ids.unwrap_or(true);
+    let disable_ansi = config.disable_ansi.unwrap_or(false);
+
+    let fmt_layer: Box<dyn Layer<BaseSubscriber> + Send + Sync> =
+        if config.enable_json.unwrap_or(false) {
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(include_target)
+                .with_thread_ids(include_thread_ids)
+                .with_ansi(!disable_ansi)
+                .boxed()
+        } else {
+            match config.format.as_deref() {
+                Some("compact") => tracing_subscriber::fmt::layer()
+                    .compact()
+                    .with_target(include_target)
+                    .with_thread_ids(include_thread_ids)
+                    .with_ansi(!disable_ansi)
+                    .boxed(),
+                Some("pretty") => tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_target(include_target)
+                    .with_thread_ids(include_thread_ids)
+                    .with_ansi(!disable_ansi)
+                    .boxed(),
+                _ => tracing_subscriber::fmt::layer()
+                    .with_target(include_target)
+                    .with_thread_ids(include_thread_ids)
+                    .with_ansi(!disable_ansi)
+                    .boxed(),
+            }
+        };
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(on_error.map(ErrorHook))
+        .with(fmt_layer)
 }
 
 #[cfg(test)]
@@ -228,6 +244,34 @@ mod tests {
             tracing::error!("counted");
         });
         assert_eq!(ERRORS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn default_directives_include_request_lines() {
+        let mut config = LoggingConfig::gateway_default();
+        assert_eq!(
+            default_directives(&config),
+            "keymeld_gateway=info,http=info,tower_http=info"
+        );
+        config.level = "trace".to_string();
+        assert_eq!(
+            default_directives(&config),
+            "keymeld_gateway=trace,http=trace,tower_http=debug"
+        );
+        config.level = "info,keymeld_gateway=debug".to_string();
+        assert_eq!(
+            default_directives(&config),
+            "keymeld_gateway=info,http=info,tower_http=info"
+        );
+    }
+
+    #[test]
+    fn startup_logging_is_scoped_to_its_guard() {
+        let guard = startup_logging(&LoggingConfig::gateway_default(), None);
+        assert!(tracing::dispatcher::get_default(|dispatch| dispatch
+            .downcast_ref::<tracing::subscriber::NoSubscriber>()
+            .is_none()));
+        drop(guard);
     }
 
     #[test]

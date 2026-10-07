@@ -76,10 +76,10 @@ coordinator:
   processing_timeout_mins: 1 # Timeout for processing individual sessions
 logging:
   level: "info" # Log level (info/warn/error for production to reduce noise)
-  format: "json" # Log format (json for structured logging in production)
-  enable_json: true # Output logs in JSON format for log aggregation systems
-  enable_file_output: true # Write logs to file for persistence and rotation
-  file_path: "/var/log/keymeld/keymeld.log" # Log file path (ensure directory exists and is writable)
+  format: "compact" # Log format; log collectors read the level from compact text lines
+  enable_json: false # Output logs in JSON format instead
+  enable_file_output: false # Not implemented; logs go to stdout
+  file_path: null # Not implemented
 security:
   enable_attestation: true # Requires a pinned channel policy; rejects the dangerous unattested bypass
   strict_validation: true # Enable strict security validation (required for production)

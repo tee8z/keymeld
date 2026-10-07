@@ -162,8 +162,8 @@ config:
     processingTimeoutMins: 1
   logging:
     level: "info"
-    format: "json"
-    enableJson: true
+    format: "compact"
+    enableJson: false
     enableFileOutput: false
   security:
     enableAttestation: true

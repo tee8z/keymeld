@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use keymeld_core::logging::{init_logging_with_error_hook, LoggingConfig};
+use keymeld_core::logging::{init_logging_with_error_hook, startup_logging, LoggingConfig};
 use keymeld_gateway::{config::Config, startup::Application};
 use std::env;
 use tracing::{debug, info, warn};
@@ -19,7 +19,9 @@ async fn main() -> Result<()> {
         println!("{public_key}");
         return Ok(());
     }
-    init_logging_with_error_hook(
+    // Defaults apply until the configuration is loaded; its logging settings then
+    // replace them for the rest of the process.
+    let startup = startup_logging(
         &LoggingConfig::gateway_default(),
         Some(keymeld_gateway::metrics::observe_error_line),
     );
@@ -37,6 +39,7 @@ async fn main() -> Result<()> {
             None => "Failed to load default config".to_string(),
         })?;
 
+    drop(startup);
     init_logging_with_error_hook(
         &config.logging,
         Some(keymeld_gateway::metrics::observe_error_line),
