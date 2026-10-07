@@ -1,5 +1,5 @@
 use crate::{
-    admission::{limit_admission, AdmissionLimiter},
+    admission::{limit_admission, AdmissionLimiter, ClientAddress},
     config::{Config, GatewayLimits, TransportMode},
     coordinator::Coordinator,
     database::Database,
@@ -9,6 +9,7 @@ use crate::{
     kms,
     metrics::Metrics,
     middleware::metrics_middleware,
+    request_context::{self, request_context},
     routes,
 };
 use anyhow::{anyhow, Context, Result};
@@ -45,13 +46,9 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::OpenApi;
 
 use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    decompression::RequestDecompressionLayer,
+    compression::CompressionLayer, cors::CorsLayer, decompression::RequestDecompressionLayer,
     services::ServeDir,
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing::Level;
 use tracing::{error, info, warn};
 
 fn suggest_port_conflict_resolution(addr: SocketAddr) {
@@ -564,16 +561,15 @@ impl Application {
             .nest("/api/v1", api_routes)
             .merge(static_file_routes(&static_dir));
 
+        // The request context wraps metrics, so slow-request warnings carry the rid.
         let mut app = app
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(DefaultMakeSpan::new().level(Level::DEBUG))
-                    .on_request(DefaultOnRequest::new().level(Level::DEBUG))
-                    .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
-            )
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 metrics_middleware,
+            ))
+            .layer(middleware::from_fn_with_state(
+                Arc::new(ClientAddress::new(&config.server.rate_limit)?),
+                request_context,
             ))
             .with_state(state);
 
@@ -596,8 +592,10 @@ impl Application {
                         header::CONTENT_ENCODING,
                         HeaderName::from_static("x-session-signature"),
                         HeaderName::from_static("x-user-signature"),
+                        request_context::PARENT_REQUEST_ID.clone(),
+                        request_context::SESSION_ID.clone(),
                     ])
-                    .expose_headers([header::RETRY_AFTER]),
+                    .expose_headers([header::RETRY_AFTER, request_context::REQUEST_ID.clone()]),
             );
         }
 
@@ -1031,6 +1029,143 @@ mod tests {
             .await;
         assert_eq!(status, 200);
         assert!(!headers.contains("access-control-allow-origin:"));
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn response_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+        headers
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
+    }
+
+    #[tokio::test]
+    async fn requests_get_an_id_and_one_request_line() {
+        let logs = CapturedLogs::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .compact()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(logs.clone())
+                .finish(),
+        );
+        let (mut config, _directory) = create_test_config();
+        let (state, _) = http_test_state(&config).await;
+        let server = StaticTestServer::start_router(
+            Application::build_router(state.clone(), &config).unwrap(),
+        )
+        .await;
+
+        // A client cannot choose its own request id.
+        let (status, headers, _) = server
+            .request_with_body(
+                "GET",
+                "/api/v1/version?secret=value",
+                "X-Request-Id: client-chosen-id\r\nX-Parent-Request-Id: parent-request-1\r\nX-Session-Id: Zx_9-abcdefghijkl\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(status, 200);
+        let rid = response_header(&headers, "x-request-id")
+            .unwrap()
+            .to_owned();
+        assert!(uuid::Uuid::parse_str(&rid).is_ok());
+        server.request("GET", "/api/v1/health").await;
+        let written = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = written
+            .lines()
+            .filter(|line| line.contains(" http: "))
+            .collect();
+        assert_eq!(lines.len(), 1, "{written}");
+        assert!(lines[0].ends_with(" user=-"), "{written}");
+        assert!(
+            lines[0].contains(&format!(
+                "http: http rid={rid} prid=parent-request-1 sid=Zx_9-abcdefghijkl ip=127.0.0.1 method=GET route=/api/v1/version status=200 ms="
+            )),
+            "{written}"
+        );
+        assert!(!written.contains("secret"), "{written}");
+
+        // A trusted proxy's id is kept; malformed ids and session ids are dropped.
+        config.server.rate_limit.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        let (_, headers, _) = server
+            .request_with_body(
+                "GET",
+                "/api/v1/version",
+                "X-Request-Id: proxy-chosen-id-1\r\nX-Session-Id: short\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(
+            response_header(&headers, "x-request-id"),
+            Some("proxy-chosen-id-1")
+        );
+        let (_, headers, _) = server
+            .request_with_body("GET", "/api/v1/version", "X-Request-Id: short\r\n", "")
+            .await;
+        assert_ne!(response_header(&headers, "x-request-id"), Some("short"));
+        let written = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            written.contains("http: http rid=proxy-chosen-id-1 prid=- sid=- ip=127.0.0.1 "),
+            "{written}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_admits_request_context_headers() {
+        let (mut config, _directory) = create_test_config();
+        config.server.cors_allowed_origins = vec!["https://wallet.example".into()];
+        let (state, _) = http_test_state(&config).await;
+        let server =
+            StaticTestServer::start_router(Application::build_router(state, &config).unwrap())
+                .await;
+        let (status, headers, _) = server
+            .request_with_body(
+                "OPTIONS",
+                "/api/v1/keygen/reserve",
+                "Origin: https://wallet.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: x-parent-request-id,x-session-id\r\n",
+                "",
+            )
+            .await;
+        assert_eq!(status, 200);
+        let allowed = response_header(&headers, "access-control-allow-headers").unwrap();
+        assert!(allowed.contains("x-parent-request-id"), "{headers}");
+        assert!(allowed.contains("x-session-id"), "{headers}");
+        let (_, headers, _) = server
+            .request_with_body(
+                "GET",
+                "/api/v1/version",
+                "Origin: https://wallet.example\r\n",
+                "",
+            )
+            .await;
+        let exposed = response_header(&headers, "access-control-expose-headers").unwrap();
+        assert!(exposed.contains("x-request-id"), "{headers}");
+        assert!(response_header(&headers, "x-request-id").is_some());
     }
 
     #[tokio::test]

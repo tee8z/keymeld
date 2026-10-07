@@ -15,8 +15,65 @@ use std::{
 
 pub(crate) struct AdmissionLimiter {
     config: RateLimitConfig,
-    client_ip_header: Option<HeaderName>,
+    client_address: ClientAddress,
     buckets: Mutex<Buckets>,
+}
+
+/// Resolves a request's client IP: the TCP peer, or the configured header when
+/// the peer is a trusted proxy. Admission and request logging share it.
+pub(crate) struct ClientAddress {
+    trusted_proxy_ips: Vec<IpAddr>,
+    client_ip_header: Option<HeaderName>,
+}
+
+impl ClientAddress {
+    pub(crate) fn new(config: &RateLimitConfig) -> anyhow::Result<Self> {
+        Ok(Self {
+            trusted_proxy_ips: config
+                .trusted_proxy_ips
+                .iter()
+                .map(|ip| ip.to_canonical())
+                .collect(),
+            client_ip_header: config
+                .client_ip_header
+                .as_ref()
+                .map(|name| HeaderName::from_bytes(name.as_bytes()))
+                .transpose()?,
+        })
+    }
+
+    pub(crate) fn peer(request: &Request) -> Option<IpAddr> {
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip().to_canonical())
+    }
+
+    pub(crate) fn is_trusted_proxy(&self, peer: IpAddr) -> bool {
+        self.trusted_proxy_ips.contains(&peer)
+    }
+
+    pub(crate) fn client_ip(&self, request: &Request) -> Result<IpAddr, StatusCode> {
+        let peer = Self::peer(request).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        if self.is_trusted_proxy(peer) {
+            if let Some(header) = &self.client_ip_header {
+                // Trust one overwritten address only. Forwarded chains and duplicate
+                // headers are ambiguous, even when the immediate peer is trusted.
+                let mut values = request.headers().get_all(header).iter();
+                let value = values.next().ok_or(StatusCode::BAD_REQUEST)?;
+                if values.next().is_some() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                return value
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.parse::<IpAddr>().ok())
+                    .map(|ip| ip.to_canonical())
+                    .ok_or(StatusCode::BAD_REQUEST);
+            }
+        }
+        Ok(peer)
+    }
 }
 
 struct Buckets {
@@ -56,50 +113,13 @@ impl AdmissionLimiter {
         let now = Instant::now();
         Ok(Arc::new(Self {
             config: config.clone(),
-            client_ip_header: config
-                .client_ip_header
-                .as_ref()
-                .map(|name| HeaderName::from_bytes(name.as_bytes()))
-                .transpose()?,
+            client_address: ClientAddress::new(config)?,
             buckets: Mutex::new(Buckets {
                 global: Bucket::new(config.global_burst, now),
                 clients: HashMap::new(),
                 next_cleanup: now,
             }),
         }))
-    }
-
-    fn client_ip(&self, request: &Request) -> Result<IpAddr, StatusCode> {
-        let peer = request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .0
-            .ip()
-            .to_canonical();
-        if self
-            .config
-            .trusted_proxy_ips
-            .iter()
-            .any(|ip| ip.to_canonical() == peer)
-        {
-            if let Some(header) = &self.client_ip_header {
-                // Trust one overwritten address only. Forwarded chains and duplicate
-                // headers are ambiguous, even when the immediate peer is trusted.
-                let mut values = request.headers().get_all(header).iter();
-                let value = values.next().ok_or(StatusCode::BAD_REQUEST)?;
-                if values.next().is_some() {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-                return value
-                    .to_str()
-                    .ok()
-                    .and_then(|value| value.parse::<IpAddr>().ok())
-                    .map(|ip| ip.to_canonical())
-                    .ok_or(StatusCode::BAD_REQUEST);
-            }
-        }
-        Ok(peer)
     }
 
     fn admit(&self, ip: IpAddr, now: Instant) -> Result<(), Duration> {
@@ -173,7 +193,7 @@ pub(crate) async fn limit_admission(
     {
         return next.run(request).await;
     }
-    let ip = match limiter.client_ip(&request) {
+    let ip = match limiter.client_address.client_ip(&request) {
         Ok(ip) => ip,
         Err(status) => return status.into_response(),
     };
