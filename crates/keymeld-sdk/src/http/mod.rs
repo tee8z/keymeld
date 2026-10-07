@@ -1,3 +1,3 @@
 mod client;
 
-pub use client::HttpClient;
+pub use client::{HttpClient, RequestHeaders};

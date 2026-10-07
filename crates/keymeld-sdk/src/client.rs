@@ -1,7 +1,7 @@
 use crate::config::{HttpConfig, PollingConfig};
 use crate::credentials::UserCredentials;
 use crate::error::SdkError;
-use crate::http::HttpClient;
+use crate::http::{HttpClient, RequestHeaders};
 use crate::managers::{HealthManager, KeygenManager, SigningManager};
 use crate::types::UserId;
 
@@ -99,11 +99,11 @@ impl KeyMeldClient {
     }
 }
 
-#[derive(Debug)]
 pub struct KeyMeldClientBuilder {
     gateway_url: String,
     user_id: UserId,
     http_client: Option<reqwest::Client>,
+    request_headers: Option<RequestHeaders>,
     credentials: Option<UserCredentials>,
     http_config: HttpConfig,
     polling_config: PollingConfig,
@@ -117,6 +117,7 @@ impl KeyMeldClientBuilder {
             gateway_url: gateway_url.to_string(),
             user_id,
             http_client: None,
+            request_headers: None,
             credentials: None,
             http_config: HttpConfig::default(),
             polling_config: PollingConfig::default(),
@@ -127,6 +128,13 @@ impl KeyMeldClientBuilder {
 
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = Some(client);
+        self
+    }
+
+    /// Adds the provider's headers to every request the client sends, for example
+    /// `X-Parent-Request-Id` from the caller's request context.
+    pub fn request_headers(mut self, request_headers: RequestHeaders) -> Self {
+        self.request_headers = Some(request_headers);
         self
     }
 
@@ -166,6 +174,10 @@ impl KeyMeldClientBuilder {
             Some(client) => HttpClient::with_reqwest_client(client, self.http_config),
             None => HttpClient::with_config(self.http_config)?,
         };
+        let http = match self.request_headers {
+            Some(request_headers) => http.with_request_headers(request_headers),
+            None => http,
+        };
 
         let base_url = self.gateway_url.trim_end_matches('/').to_string();
 
@@ -178,6 +190,22 @@ impl KeyMeldClientBuilder {
             attestation_policy: self.attestation_policy,
             trust_unattested_enclaves: self.trust_unattested_enclaves,
         })
+    }
+}
+
+impl std::fmt::Debug for KeyMeldClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyMeldClientBuilder")
+            .field("gateway_url", &self.gateway_url)
+            .field("user_id", &self.user_id)
+            .field("http_client", &self.http_client)
+            .field("request_headers", &self.request_headers.is_some())
+            .field("credentials", &self.credentials)
+            .field("http_config", &self.http_config)
+            .field("polling_config", &self.polling_config)
+            .field("attestation_policy", &self.attestation_policy)
+            .field("trust_unattested_enclaves", &self.trust_unattested_enclaves)
+            .finish()
     }
 }
 
@@ -195,6 +223,35 @@ mod tests {
         assert_eq!(client.base_url(), "https://gateway.example.com");
         assert_eq!(client.user_id(), &user_id);
         assert!(!client.has_credentials());
+    }
+
+    #[tokio::test]
+    async fn builder_request_headers_reach_the_gateway() {
+        use reqwest::header::{HeaderName, HeaderValue};
+        use std::sync::Arc;
+        let mut server = mockito::Server::new_async().await;
+        let health = server
+            .mock("GET", "/api/v1/health")
+            .match_header("x-parent-request-id", "0192f0c4-parent")
+            .with_body(r#"{"status":"healthy"}"#)
+            .create_async()
+            .await;
+        let client = KeyMeldClient::builder(&server.url(), UserId::new_v7())
+            .request_headers(Arc::new(|| {
+                vec![(
+                    HeaderName::from_static("x-parent-request-id"),
+                    HeaderValue::from_static("0192f0c4-parent"),
+                )]
+            }))
+            .build()
+            .unwrap();
+        let response: serde_json::Value = client
+            .http()
+            .get(&client.url("/api/v1/health"), &[])
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "healthy");
+        health.assert_async().await;
     }
 
     #[test]

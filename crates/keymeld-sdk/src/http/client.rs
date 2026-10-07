@@ -1,7 +1,14 @@
 use crate::config::HttpConfig;
 use crate::error::{ApiError, NetworkError, SdkError};
 use crate::types::ErrorResponse;
+use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::Method;
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
+
+/// Returns headers to add to every outgoing request. It is called as each request
+/// is built, so it can read the caller's current context, such as a request id.
+pub type RequestHeaders = Arc<dyn Fn() -> Vec<(HeaderName, HeaderValue)> + Send + Sync>;
 
 /// One confidential command may sign a full batch inside the enclave. Outlast the
 /// gateway's default 900-second wait so the relay, not the client, reports a stall.
@@ -12,6 +19,7 @@ const CONFIDENTIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 pub struct HttpClient {
     client: reqwest::Client,
     config: HttpConfig,
+    request_headers: Option<RequestHeaders>,
 }
 
 impl HttpClient {
@@ -34,11 +42,35 @@ impl HttpClient {
             .build()
             .map_err(|e| SdkError::Network(NetworkError::ConnectionFailed(e.to_string())))?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            request_headers: None,
+        })
     }
 
     pub fn with_reqwest_client(client: reqwest::Client, config: HttpConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            request_headers: None,
+        }
+    }
+
+    /// Adds the provider's headers to every request this client sends.
+    pub fn with_request_headers(mut self, request_headers: RequestHeaders) -> Self {
+        self.request_headers = Some(request_headers);
+        self
+    }
+
+    fn request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
+        let mut request = self.client.request(method, url);
+        if let Some(request_headers) = &self.request_headers {
+            for (name, value) in request_headers() {
+                request = request.header(name, value);
+            }
+        }
+        request
     }
 
     pub async fn get<T: DeserializeOwned>(
@@ -46,7 +78,9 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<T, SdkError> {
-        let mut request = self.client.get(url).header("Accept", "application/json");
+        let mut request = self
+            .request(Method::GET, url)
+            .header("Accept", "application/json");
 
         // Add custom headers
         for (key, value) in headers {
@@ -67,7 +101,9 @@ impl HttpClient {
     ) -> Result<Res, SdkError> {
         let json_body = serde_json::to_vec(body)?;
 
-        let mut request = self.client.post(url).header("Accept", "application/json");
+        let mut request = self
+            .request(Method::POST, url)
+            .header("Accept", "application/json");
 
         // Add custom headers
         for (key, value) in headers {
@@ -107,8 +143,7 @@ impl HttpClient {
             ));
         }
         let request = self
-            .client
-            .post(url)
+            .request(Method::POST, url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(bytes);
@@ -162,7 +197,9 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<Res, SdkError> {
-        let mut request = self.client.post(url).header("Accept", "application/json");
+        let mut request = self
+            .request(Method::POST, url)
+            .header("Accept", "application/json");
 
         // Add custom headers
         for (key, value) in headers {
@@ -181,7 +218,7 @@ impl HttpClient {
         body: &Req,
         headers: &[(&str, &str)],
     ) -> Result<(), SdkError> {
-        let mut request = self.client.post(url).json(body);
+        let mut request = self.request(Method::POST, url).json(body);
         for (key, value) in headers {
             request = request.header(*key, *value);
         }
@@ -194,7 +231,7 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<(), SdkError> {
-        let mut request = self.client.post(url);
+        let mut request = self.request(Method::POST, url);
 
         // Add custom headers
         for (key, value) in headers {
@@ -242,7 +279,9 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<T, SdkError> {
-        let mut request = self.client.delete(url).header("Accept", "application/json");
+        let mut request = self
+            .request(Method::DELETE, url)
+            .header("Accept", "application/json");
 
         // Add custom headers
         for (key, value) in headers {
@@ -323,6 +362,7 @@ impl std::fmt::Debug for HttpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpClient")
             .field("config", &self.config)
+            .field("request_headers", &self.request_headers.is_some())
             .finish()
     }
 }
@@ -362,5 +402,48 @@ mod tests {
             ));
         }
         limited.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn request_header_provider_is_read_for_every_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/first")
+            .match_header("x-parent-request-id", "parent-1")
+            .with_body("{}")
+            .create_async()
+            .await;
+        let second = server
+            .mock("POST", "/second")
+            .match_header("x-parent-request-id", "parent-2")
+            .match_header("x-user-signature", "signature")
+            .with_body("{}")
+            .create_async()
+            .await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let client = HttpClient::default().with_request_headers(Arc::new(move || {
+            let call = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            vec![(
+                HeaderName::from_static("x-parent-request-id"),
+                HeaderValue::from_str(&format!("parent-{call}")).unwrap(),
+            )]
+        }));
+        client
+            .get::<serde_json::Value>(&format!("{}/first", server.url()), &[])
+            .await
+            .unwrap();
+        client
+            .post::<_, serde_json::Value>(
+                &format!("{}/second", server.url()),
+                &serde_json::json!({}),
+                &[("X-User-Signature", "signature")],
+            )
+            .await
+            .unwrap();
+        first.assert_async().await;
+        second.assert_async().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

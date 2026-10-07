@@ -35,7 +35,7 @@ pub use keymeld_core::validation;
 pub use keymeld_core::{escrow, escrow_capabilities, escrow_protocol};
 
 #[cfg(feature = "client")]
-pub use http::HttpClient;
+pub use http::{HttpClient, RequestHeaders};
 
 #[cfg(feature = "client")]
 pub use client::{KeyMeldClient, KeyMeldClientBuilder};
