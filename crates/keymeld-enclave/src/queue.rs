@@ -1,3 +1,4 @@
+use crate::operations::session_context::ProcessedCommand;
 use crate::operations::{context_aware_session::ContextAwareSession, SessionContext};
 use dashmap::DashMap;
 use keymeld_core::{
@@ -227,6 +228,14 @@ impl Queue {
                 return current_session;
             }
 
+            // Authenticate retry metadata before changing the state. Keep no payload copy.
+            let processed = match ProcessedCommand::new(command.command_id, &command.command) {
+                Ok(processed) => processed,
+                Err(error) => {
+                    processing_result = Some(Err(error));
+                    return current_session;
+                }
+            };
             // Process the inner EnclaveCommand using the session's owned context
             match current_session.process(&command.command) {
                 Ok(()) => {
@@ -238,7 +247,7 @@ impl Queue {
 
                     current_session
                         .session_context
-                        .add_processed_command(command.clone());
+                        .add_processed_command(processed);
 
                     if let Err(e) = current_session.check_for_failure() {
                         info!(
