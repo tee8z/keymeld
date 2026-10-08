@@ -1,6 +1,6 @@
 use musig2::{BinaryEncoding, PartialSignature, SecondRound};
 use std::collections::BTreeMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use keymeld_core::{identifiers::UserId, protocol::FinalizedData};
@@ -73,7 +73,7 @@ impl MusigProcessor {
                 .batch_second_rounds
                 .insert(batch_item_id, second_round);
 
-            info!(
+            debug!(
                 "Finalized batch second round for user {} batch_item {} in session {}",
                 user_id, batch_item_id, session_id
             );
@@ -145,7 +145,7 @@ impl MusigProcessor {
 
                 second_rounds.insert(adaptor_id, second_round);
 
-                info!(
+                debug!(
                     "Finalized batch adaptor second round for user {} batch_item {} adaptor {} in session {}",
                     user_id, batch_item_id, adaptor_id, session_id
                 );
@@ -310,7 +310,7 @@ impl MusigProcessor {
                     }
                     None => {
                         // User is not in this subset - will skip
-                        warn!(
+                        debug!(
                             "User {} is not in subset {} for batch_item {}, will skip signature",
                             user_id, subset_id, batch_item_id
                         );
@@ -432,7 +432,7 @@ impl MusigProcessor {
                     FinalizedData::FinalSignature(final_sig.to_vec()),
                 );
 
-                info!(
+                debug!(
                     "Finalized batch signature for batch_item {} in session {}",
                     batch_item_id, session_id
                 );
@@ -511,7 +511,7 @@ impl MusigProcessor {
 
                         adaptor_results.push((adaptor_id, sig_bytes));
 
-                        info!(
+                        debug!(
                             "Finalized batch adaptor signature for batch_item {} adaptor {} in session {}",
                             batch_item_id, adaptor_id, session_id
                         );
