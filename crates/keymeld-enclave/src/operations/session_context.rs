@@ -1,7 +1,10 @@
 use super::keygen_data::KeygenSessionData;
 use crate::musig::MusigProcessor;
 use crate::operations::{context::EnclaveSharedContext, states::signing::CoordinatorData};
-use keymeld_core::protocol::{KeygenCommand, KeygenCommandKind, MusigCommand, SigningCommandKind};
+use keymeld_core::protocol::{
+    EnclaveCommandKind, KeygenCommand, KeygenCommandKind, MusigCommand, MusigCommandKind,
+    SigningCommandKind,
+};
 use keymeld_core::{
     crypto::{EncryptedData, SessionSecret},
     identifiers::{SessionId, UserId},
@@ -12,6 +15,7 @@ use keymeld_core::{
     KeyMaterial,
 };
 use keymeld_core::{hash_message, EnclaveId};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -36,7 +40,7 @@ pub struct KeygenSessionContext {
     pub coordinator_user_id: Option<UserId>,
     pub encrypted_public_keys_for_response: Vec<EncryptedParticipantPublicKey>,
     pub session_enclave_public_keys: BTreeMap<EnclaveId, String>, // Other enclaves in this session
-    pub command_history: Vec<Command>, // Track processed commands for idempotency
+    pub command_history: Vec<ProcessedCommand>,
 }
 
 #[derive(Debug)]
@@ -52,23 +56,76 @@ pub struct SigningSessionContext {
     pub nonces: BTreeMap<UserId, Vec<u8>>,
     pub partial_signatures: BTreeMap<UserId, Vec<u8>>,
     pub session_enclave_public_keys: BTreeMap<EnclaveId, String>, // Other enclaves in this session
-    pub command_history: Vec<Command>, // Track processed commands for idempotency
+    pub command_history: Vec<ProcessedCommand>,
+}
+
+/// Retry metadata must not retain multi-megabyte escrow transcripts for a keygen's lifetime.
+/// The digest covers the same canonical command bytes previously compared on every retry.
+#[derive(Debug)]
+pub struct ProcessedCommand {
+    pub command_id: uuid::Uuid,
+    kind: EnclaveCommandKind,
+    user: Option<UserId>,
+    digest: [u8; 32],
+}
+
+impl ProcessedCommand {
+    pub fn new(command_id: uuid::Uuid, command: &EnclaveCommand) -> Result<Self, EnclaveError> {
+        Ok(Self {
+            command_id,
+            kind: command.kind(),
+            user: match command {
+                EnclaveCommand::Musig(MusigCommand::Keygen(command)) => command.user_id(),
+                _ => None,
+            },
+            digest: command_digest(command)?,
+        })
+    }
+}
+
+impl TryFrom<Command> for ProcessedCommand {
+    type Error = EnclaveError;
+
+    fn try_from(command: Command) -> Result<Self, Self::Error> {
+        Self::new(command.command_id, &command.command)
+    }
+}
+
+fn command_digest(command: &EnclaveCommand) -> Result<[u8; 32], EnclaveError> {
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let invalid = || {
+        EnclaveError::Validation(keymeld_core::protocol::ValidationError::Other(
+            "Cannot authenticate command retry".into(),
+        ))
+    };
+    // Bincode writes ordinary Vec<u8> elements individually. Buffer those writes
+    // so hashing a large escrow payload does not update SHA-256 once per byte.
+    let mut writer = std::io::BufWriter::new(HashWriter(Sha256::new()));
+    bincode::serialize_into(&mut writer, command).map_err(|_| invalid())?;
+    Ok(writer
+        .into_inner()
+        .map_err(|_| invalid())?
+        .0
+        .finalize()
+        .into())
 }
 
 /// A completed protocol stage may be replayed only with its original inputs.
 /// Comparing command kind alone can hide a changed nonce or signing transcript.
 fn verify_exact_retry(
     current: &EnclaveCommand,
-    previous: &EnclaveCommand,
+    previous: &ProcessedCommand,
 ) -> Result<bool, EnclaveError> {
-    let encode = |command: &EnclaveCommand| {
-        bincode::serialize(command).map_err(|_| {
-            EnclaveError::Validation(keymeld_core::protocol::ValidationError::Other(
-                "Cannot authenticate command retry".into(),
-            ))
-        })
-    };
-    if encode(current)? != encode(previous)? {
+    if command_digest(current)? != previous.digest {
         return Err(EnclaveError::Validation(
             keymeld_core::protocol::ValidationError::Other(
                 "Processed command retry contains different inputs".into(),
@@ -146,11 +203,11 @@ impl SessionContext {
                     MusigCommand::Signing(signing_cmd) => {
                         let signing_kind: SigningCommandKind = signing_cmd.into();
                         for processed_cmd in command_history {
-                            if let EnclaveCommand::Musig(MusigCommand::Signing(prev_signing)) =
-                                &processed_cmd.command
+                            if let EnclaveCommandKind::Musig(MusigCommandKind::Signing(prev_kind)) =
+                                &processed_cmd.kind
                             {
-                                if signing_kind == prev_signing.into() {
-                                    return verify_exact_retry(cmd, &processed_cmd.command);
+                                if signing_kind == *prev_kind {
+                                    return verify_exact_retry(cmd, processed_cmd);
                                 }
                             }
                         }
@@ -160,11 +217,11 @@ impl SessionContext {
                     // Keygen Init: Once per session (check: command type + session ID)
                     MusigCommand::Keygen(KeygenCommand::InitSession(_)) => {
                         for processed_cmd in command_history {
-                            if let EnclaveCommand::Musig(MusigCommand::Keygen(
-                                KeygenCommand::InitSession(_),
-                            )) = &processed_cmd.command
+                            if let EnclaveCommandKind::Musig(MusigCommandKind::Keygen(
+                                KeygenCommandKind::InitSession,
+                            )) = &processed_cmd.kind
                             {
-                                return verify_exact_retry(cmd, &processed_cmd.command);
+                                return verify_exact_retry(cmd, processed_cmd);
                             }
                         }
                         Ok(false)
@@ -176,14 +233,13 @@ impl SessionContext {
                         let keygen_kind: KeygenCommandKind = keygen_cmd.into();
 
                         for processed_cmd in command_history {
-                            if let EnclaveCommand::Musig(MusigCommand::Keygen(prev_keygen)) =
-                                &processed_cmd.command
+                            if let EnclaveCommandKind::Musig(MusigCommandKind::Keygen(prev_kind)) =
+                                &processed_cmd.kind
                             {
-                                let prev_kind: KeygenCommandKind = prev_keygen.into();
-                                if keygen_kind == prev_kind {
-                                    if let Some(prev_user) = prev_keygen.user_id() {
-                                        if current_user == Some(prev_user) {
-                                            return verify_exact_retry(cmd, &processed_cmd.command);
+                                if keygen_kind == *prev_kind {
+                                    if let Some(prev_user) = &processed_cmd.user {
+                                        if current_user.as_ref() == Some(prev_user) {
+                                            return verify_exact_retry(cmd, processed_cmd);
                                         }
                                     }
                                 }
@@ -203,7 +259,7 @@ impl SessionContext {
     }
 
     /// Add a processed command to the history for idempotency tracking
-    pub fn add_processed_command(&mut self, cmd: Command) {
+    pub fn add_processed_command(&mut self, cmd: ProcessedCommand) {
         match self {
             SessionContext::Keygen(ctx) => ctx.command_history.push(cmd),
             SessionContext::Signing(ctx) => ctx.command_history.push(cmd),
@@ -244,11 +300,11 @@ impl SigningSessionContext {
                     MusigCommand::Signing(signing_cmd) => {
                         let signing_kind: SigningCommandKind = signing_cmd.into();
                         for processed_cmd in &self.command_history {
-                            if let EnclaveCommand::Musig(MusigCommand::Signing(prev_signing)) =
-                                &processed_cmd.command
+                            if let EnclaveCommandKind::Musig(MusigCommandKind::Signing(prev_kind)) =
+                                &processed_cmd.kind
                             {
-                                if signing_kind == prev_signing.into() {
-                                    return verify_exact_retry(cmd, &processed_cmd.command);
+                                if signing_kind == *prev_kind {
+                                    return verify_exact_retry(cmd, processed_cmd);
                                 }
                             }
                         }
@@ -264,7 +320,7 @@ impl SigningSessionContext {
     }
 
     /// Add a processed command to the history for idempotency tracking
-    pub fn add_processed_command(&mut self, cmd: Command) {
+    pub fn add_processed_command(&mut self, cmd: ProcessedCommand) {
         self.command_history.push(cmd);
     }
 }
@@ -440,12 +496,75 @@ mod retry_tests {
     }
 
     #[test]
+    fn large_escrow_requests_retain_only_bounded_retry_metadata() {
+        use keymeld_core::escrow::{
+            protocol::{EscrowCommand, Operation, Payload, RequestContext},
+            ApplicationContext, EscrowContext,
+        };
+        let session = SessionId::new_v7();
+        let command =
+            EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(EscrowCommand {
+                context: RequestContext {
+                    schema_version: keymeld_core::escrow::SCHEMA_VERSION,
+                    operation: Operation::Bind,
+                    escrow: EscrowContext {
+                        keygen_session_id: session.clone(),
+                        user_id: UserId::new_v7(),
+                        escrow_id: uuid::Uuid::now_v7(),
+                        manifest_digest: [1; 32],
+                        application: ApplicationContext::commit("test".into(), 1, b"policy")
+                            .unwrap(),
+                    },
+                    policy_digest: [2; 32],
+                    request_id: uuid::Uuid::now_v7(),
+                    action_id: None,
+                    attempt: None,
+                    keygen_session_id: None,
+                },
+                encrypted_request: Payload::new(vec![42; 6 * 1024 * 1024]).unwrap(),
+                authorization: vec![3; 64],
+            })));
+        // The streaming digest covers exactly the old comparison's encoding.
+        let encoded = bincode::serialize(&command).unwrap();
+        assert_eq!(
+            command_digest(&command).unwrap().as_slice(),
+            Sha256::digest(&encoded).as_slice()
+        );
+        drop(encoded);
+        let mut context = SessionContext::new_keygen(session);
+        let ids: Vec<_> = (0..16).map(|_| uuid::Uuid::now_v7()).collect();
+        for id in &ids {
+            context.add_processed_command(ProcessedCommand::new(*id, &command).unwrap());
+        }
+        let SessionContext::Keygen(context) = context else {
+            unreachable!()
+        };
+        assert_eq!(context.command_history.len(), ids.len());
+        assert!(std::mem::size_of::<ProcessedCommand>() <= 128);
+        assert!(
+            context.command_history.capacity() * std::mem::size_of::<ProcessedCommand>() <= 4096
+        );
+        for (processed, id) in context.command_history.iter().zip(ids) {
+            assert_eq!(processed.command_id, id);
+            assert!(verify_exact_retry(&command, processed).unwrap());
+        }
+        let mut changed = command;
+        let EnclaveCommand::Musig(MusigCommand::Keygen(KeygenCommand::Escrow(ref mut escrow))) =
+            changed
+        else {
+            unreachable!()
+        };
+        escrow.authorization[0] ^= 1;
+        assert!(verify_exact_retry(&changed, &context.command_history[0]).is_err());
+    }
+
+    #[test]
     fn exact_retry_is_accepted_by_both_context_entrypoints() {
         let session = SessionId::new_v7();
         let command = nonce_command(&session, "encrypted-nonce");
         let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
         assert!(!context.check_command_idempotency(&command).unwrap());
-        context.add_processed_command(Command::new(command.clone()));
+        context.add_processed_command(Command::new(command.clone()).try_into().unwrap());
         assert!(context.check_command_idempotency(&command).unwrap());
         let SessionContext::Signing(signing) = context else {
             unreachable!()
@@ -458,7 +577,7 @@ mod retry_tests {
         let session = SessionId::new_v7();
         let command = nonce_command(&session, "original-encrypted-nonce");
         let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
-        context.add_processed_command(Command::new(command.clone()));
+        context.add_processed_command(Command::new(command.clone()).try_into().unwrap());
         for change_session in [false, true] {
             let mut changed = command.clone();
             let EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::DistributeNonces(
@@ -491,9 +610,9 @@ mod retry_tests {
             }),
         ));
         let mut context = SessionContext::new_signing(session, SessionId::new_v7(), vec![1; 32]);
-        context.add_processed_command(Command::new(nonce));
+        context.add_processed_command(Command::new(nonce).try_into().unwrap());
         assert!(!context.check_command_idempotency(&original).unwrap());
-        context.add_processed_command(Command::new(original.clone()));
+        context.add_processed_command(Command::new(original.clone()).try_into().unwrap());
         let mut changed = original;
         let EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::FinalizeSignature(
             ref mut inner,

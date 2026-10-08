@@ -130,6 +130,15 @@ impl CollectingPartialSignatures {
             self.session_id
         );
 
+        // The partial-signature response was already returned in the previous
+        // command. Only this participant's rounds are used by finalization;
+        // the other local copies would repeat the same signature checks.
+        if let Some(coordinator) = &self.coordinator_data {
+            self.musig_processor
+                .retain_aggregation_rounds(&coordinator.user_id)
+                .map_err(|error| EnclaveError::Internal(InternalError::Other(error.to_string())))?;
+        }
+
         let encrypted_partial_signatures = &finalize_cmd.partial_signatures;
 
         // Get session secret for decryption

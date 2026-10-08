@@ -25,6 +25,7 @@ reqwest = { workspace = true, default-features = false, features = ["json", "gzi
 tokio = { workspace = true, features = ["time"], optional = true }
 flate2 = { version = "1.1", optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+futures = { workspace = true, optional = true }
 utoipa = { version = "6.0.0", features = ["uuid"], optional = true }
 dlctix = { version = "0.2.1", optional = true }
 
@@ -32,7 +33,7 @@ dlctix = { version = "0.2.1", optional = true }
 default = ["client"]
 
 # HTTP client support (works on both native and WASM via target_arch detection)
-client = ["dep:reqwest", "dep:tokio", "dep:flate2", "dep:gloo-timers"]
+client = ["dep:reqwest", "dep:tokio", "dep:flate2", "dep:gloo-timers", "dep:futures"]
 
 # Types only (no HTTP client, for shared type definitions)
 types-only = []

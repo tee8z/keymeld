@@ -658,7 +658,7 @@ mod registration_tests {
         let saved_command = keymeld_core::protocol::Command::new(registration.clone());
         session
             .session_context
-            .add_processed_command(saved_command.clone());
+            .add_processed_command(saved_command.clone().try_into().unwrap());
         let sessions = Arc::new(dashmap::DashMap::new());
         sessions.insert(session_id.clone(), session);
         let queue = crate::queue::Queue::new(sessions.clone());

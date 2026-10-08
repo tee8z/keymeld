@@ -1,6 +1,6 @@
 use musig2::{secp256k1::SecretKey, FirstRound, PubNonce, SecNonceSpices};
 use std::collections::BTreeMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use keymeld_core::{crypto::SecureCrypto, identifiers::UserId, protocol::NonceData, KeyMaterial};
@@ -143,7 +143,7 @@ impl MusigProcessor {
                     }
                     Err(e) => {
                         // User is not in this subset - skip this batch item
-                        warn!(
+                        debug!(
                             "Skipping batch_item {} for user {}: {}",
                             batch_item_id, user_id, e
                         );

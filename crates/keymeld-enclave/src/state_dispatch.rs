@@ -7,12 +7,12 @@
 //!               -> GeneratingPartialSignatures -> CollectingPartialSignatures
 //!               -> FinalizingSignature -> Completed
 
+use crate::operations::session_context::ProcessedCommand;
 use crate::operations::states::{keygen, signing, KeygenStatus, SigningStatus};
 use crate::operations::{EnclaveSharedContext, KeygenSessionContext, SigningSessionContext};
 use keymeld_core::identifiers::SessionId;
 use keymeld_core::protocol::{
-    Command, EnclaveCommand, EnclaveError, KeygenCommand, MusigCommand, SigningCommand,
-    ValidationError,
+    EnclaveCommand, EnclaveError, KeygenCommand, MusigCommand, SigningCommand, ValidationError,
 };
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, warn};
@@ -158,6 +158,7 @@ impl SigningStatus {
             return Ok(self);
         }
 
+        let processed = ProcessedCommand::new(uuid::Uuid::now_v7(), cmd)?;
         let result = match (self, signing_cmd) {
             // Initialized + InitSession => GeneratingNonces
             (SigInitialized(s), SigInitSession(c)) => s.init_session(c, signing_ctx, enclave_ctx),
@@ -202,8 +203,7 @@ impl SigningStatus {
 
         result
             .inspect(|_| {
-                let command = Command::from(cmd.clone());
-                signing_ctx.add_processed_command(command);
+                signing_ctx.add_processed_command(processed);
             })
             .or_else(|e| {
                 warn!("Signing session {} failed: {}", session_id, e);

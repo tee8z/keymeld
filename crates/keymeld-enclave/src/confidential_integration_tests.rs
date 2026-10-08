@@ -22,11 +22,16 @@ use keymeld_sdk::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+type RoundRendezvous = Arc<Mutex<Option<(usize, Arc<tokio::sync::Barrier>)>>>;
+
 #[derive(Clone)]
 pub(super) struct RelayState {
     pub(super) operators: Arc<Mutex<BTreeMap<EnclaveId, Arc<EnclaveOperator>>>>,
     pub(super) requests: Arc<Mutex<Vec<String>>>,
     pub(super) responses: Arc<Mutex<Vec<String>>>,
+    /// Require the next requests to arrive together before any can complete.
+    pub(super) rendezvous: RoundRendezvous,
+    pub(super) lose_next_response: Arc<Mutex<Option<EnclaveId>>>,
 }
 
 pub(super) async fn public_key(
@@ -43,7 +48,23 @@ pub(super) async fn public_key(
 pub(super) async fn relay(
     State(state): State<RelayState>,
     Json(envelope): Json<EnclaveEnvelope>,
-) -> Json<EnclaveEnvelope> {
+) -> Result<Json<EnclaveEnvelope>, axum::http::StatusCode> {
+    let destination = envelope.destination_enclave;
+    let barrier = {
+        let mut rendezvous = state.rendezvous.lock().unwrap();
+        match rendezvous.as_mut() {
+            Some((remaining, barrier)) if *remaining > 0 => {
+                *remaining -= 1;
+                Some(barrier.clone())
+            }
+            _ => None,
+        }
+    };
+    if let Some(barrier) = barrier {
+        tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait())
+            .await
+            .expect("independent enclave requests were serialized");
+    }
     state
         .requests
         .lock()
@@ -64,7 +85,12 @@ pub(super) async fn relay(
         .lock()
         .unwrap()
         .push(serde_json::to_string(&response).unwrap());
-    Json(*response)
+    let mut lose = state.lose_next_response.lock().unwrap();
+    if *lose == Some(destination) {
+        *lose = None;
+        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(Json(*response))
 }
 
 #[derive(Default)]
@@ -124,6 +150,11 @@ async fn native_musig_rounds_are_confidential_durable_and_restore_without_reusin
     run_native_flow(false, 1).await;
 }
 
+#[tokio::test]
+async fn native_signing_rounds_send_independent_enclave_requests_together() {
+    run_native_flow(false, 2).await;
+}
+
 #[cfg(feature = "escrow")]
 #[tokio::test]
 async fn trusted_verifier_authorizes_exact_native_signing_only_inside_confidential_transport() {
@@ -160,6 +191,8 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         operators: Arc::new(Mutex::new(operators)),
         requests: Default::default(),
         responses: Default::default(),
+        rendezvous: Default::default(),
+        lose_next_response: Default::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -405,6 +438,102 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
             .prepare_signing_batch(&signing_id, &[altered])
             .await
             .is_err());
+    }
+    if !with_policy && enclave_count > 1 {
+        let before = state.requests.lock().unwrap().len();
+        checkpoint.fail_next.store(true, Ordering::SeqCst);
+        assert!(session
+            .sign_prepared_batch(&signing_id, 300, &[])
+            .await
+            .is_err());
+        assert_eq!(
+            state.requests.lock().unwrap().len(),
+            before,
+            "a parallel round transmitted before its checkpoint succeeded"
+        );
+        // None of this round's requests ran. Their identities must all survive
+        // the retry, and both the nonce and partial rounds must overlap.
+        let stage = format!("sign/{signing_id}/nonces");
+        let ids: Vec<_> = enclave_keys
+            .keys()
+            .map(|id| {
+                (
+                    *id,
+                    session.recorded_command(&stage, *id).unwrap().command_id,
+                )
+            })
+            .collect();
+        *state.rendezvous.lock().unwrap() = Some((4, Arc::new(tokio::sync::Barrier::new(2))));
+        let result = session
+            .sign_prepared_batch(&signing_id, 300, &[])
+            .await
+            .unwrap();
+        verify_signature(
+            &result,
+            &credentials,
+            &roster.roster.aggregate_public_key,
+            [42; 32],
+        );
+        for (id, command_id) in ids {
+            assert_eq!(
+                session.recorded_command(&stage, id).unwrap().command_id,
+                command_id
+            );
+        }
+        assert_eq!(state.rendezvous.lock().unwrap().as_ref().unwrap().0, 0);
+
+        // Lose one nonce response after its enclave has executed the command.
+        // The other peer's authenticated outcome must remain durable, and the
+        // retry must reuse the lost command instead of generating another nonce.
+        let lost_session = SessionId::new_v7();
+        session
+            .prepare_signing_batch(&lost_session, &[BatchSigningItem::new([44; 32])])
+            .await
+            .unwrap();
+        *state.lose_next_response.lock().unwrap() = Some(EnclaveId::new(1));
+        assert!(session
+            .sign_prepared_batch(&lost_session, 300, &[])
+            .await
+            .is_err());
+        let lost_stage = format!("sign/{lost_session}/nonces");
+        assert!(session
+            .command_outcome(&lost_stage, EnclaveId::new(1))
+            .is_none());
+        assert!(session
+            .command_outcome(&lost_stage, EnclaveId::new(2))
+            .is_some());
+        let saved: ConfidentialJournal =
+            serde_json::from_str(checkpoint.saved.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert!(saved
+            .command_outcome(&lost_stage, EnclaveId::new(2))
+            .is_some());
+        let original_id = session
+            .recorded_command(&lost_stage, EnclaveId::new(1))
+            .unwrap()
+            .command_id;
+        let before_retry = state.requests.lock().unwrap().len();
+        let result = session
+            .sign_prepared_batch(&lost_session, 300, &[])
+            .await
+            .unwrap();
+        verify_signature(
+            &result,
+            &credentials,
+            &roster.roster.aggregate_public_key,
+            [44; 32],
+        );
+        assert_eq!(
+            session
+                .recorded_command(&lost_stage, EnclaveId::new(1))
+                .unwrap()
+                .command_id,
+            original_id
+        );
+        assert_eq!(
+            state.requests.lock().unwrap().len() - before_retry,
+            4,
+            "retry must send one pending nonce request, two partial rounds and finalization"
+        );
     }
     let result = session
         .sign_prepared_batch(&signing_id, 300, &[])
