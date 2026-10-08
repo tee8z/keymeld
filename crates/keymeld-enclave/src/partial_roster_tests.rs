@@ -123,6 +123,8 @@ async fn enclaves() -> Enclaves {
         .map(|id| (id, operator(id)))
         .collect();
     let state = RelayState {
+        rendezvous: Default::default(),
+        lose_next_response: Default::default(),
         operators: Arc::new(Mutex::new(operators)),
         requests: Default::default(),
         responses: Default::default(),

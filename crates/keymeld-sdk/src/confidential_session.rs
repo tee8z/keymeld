@@ -193,6 +193,23 @@ impl<'a> ConfidentialSession<'a> {
     where
         F: FnOnce() -> Result<EnclaveCommand, SdkError>,
     {
+        let key = self.record_command(stage, enclave_id, input, build)?;
+        self.execute_commands(&[(enclave_id, key)])
+            .await?
+            .pop()
+            .ok_or_else(|| invalid("Confidential command returned no outcome"))
+    }
+
+    fn record_command<T: Serialize, F>(
+        &mut self,
+        stage: &str,
+        enclave_id: EnclaveId,
+        input: &T,
+        build: F,
+    ) -> Result<String, SdkError>
+    where
+        F: FnOnce() -> Result<EnclaveCommand, SdkError>,
+    {
         if stage.is_empty() || stage.len() > 256 {
             return Err(invalid("Invalid confidential journal stage"));
         }
@@ -230,27 +247,69 @@ impl<'a> ConfidentialSession<'a> {
                 },
             );
         }
-        // Also retry a previously failed storage write before any transmission.
-        self.checkpoint.save(self.journal).await?;
-        let saved = self
-            .journal
-            .commands
-            .get(&key)
-            .expect("inserted journal entry");
-        let outcome = match &saved.outcome {
-            Some(outcome) => outcome.clone(),
-            None => {
-                self.transport
-                    .execute(enclave, &saved.request, self.reply_key)
-                    .await?
+        Ok(key)
+    }
+
+    /// Each member targets a different enclave in one protocol round. Persist all
+    /// exact requests before sending any, then wait for every response even if a
+    /// peer fails. A retry reuses requests and completed outcomes from the journal.
+    async fn round_commands<T: Serialize + Clone>(
+        &mut self,
+        stage: &str,
+        commands: Vec<(EnclaveId, T)>,
+        build: impl Fn(T) -> EnclaveCommand,
+    ) -> Result<Vec<EnclaveOutcome>, SdkError> {
+        let mut seen = BTreeSet::new();
+        let mut keys = Vec::with_capacity(commands.len());
+        for (enclave_id, command) in commands {
+            if !seen.insert(enclave_id) {
+                return Err(invalid("Confidential round repeats an enclave"));
             }
-        };
-        self.journal
-            .commands
-            .get_mut(&key)
-            .expect("inserted journal entry")
-            .outcome = Some(outcome.clone());
+            let key =
+                self.record_command(stage, enclave_id, &command, || Ok(build(command.clone())))?;
+            keys.push((enclave_id, key));
+        }
+        self.execute_commands(&keys).await
+    }
+
+    async fn execute_commands(
+        &mut self,
+        keys: &[(EnclaveId, String)],
+    ) -> Result<Vec<EnclaveOutcome>, SdkError> {
+        // Also retry a failed storage write before any transmission.
         self.checkpoint.save(self.journal).await?;
+        let results = futures::future::join_all(keys.iter().map(|(id, key)| {
+            let saved = &self.journal.commands[key];
+            let enclave = &self.enclaves[id];
+            let transport = &self.transport;
+            let reply_key = self.reply_key;
+            async move {
+                match &saved.outcome {
+                    Some(outcome) => Ok(outcome.clone()),
+                    None => transport.execute(enclave, &saved.request, reply_key).await,
+                }
+            }
+        }))
+        .await;
+        // Save every authenticated response, including rejections, before returning
+        // the first error. A peer's transport failure must not discard successes.
+        for ((_, key), result) in keys.iter().zip(&results) {
+            if let Ok(outcome) = result {
+                self.journal
+                    .commands
+                    .get_mut(key)
+                    .expect("recorded command")
+                    .outcome = Some(outcome.clone());
+            }
+        }
+        self.checkpoint.save(self.journal).await?;
+        results
+            .into_iter()
+            .map(|result| Self::command_response(result?))
+            .collect()
+    }
+
+    fn command_response(outcome: Outcome) -> Result<EnclaveOutcome, SdkError> {
         match outcome.response {
             EnclaveOutcome::Error(keymeld_core::protocol::ErrorResponse {
                 error: keymeld_core::protocol::EnclaveError::EscrowPreparationExhausted { reason },
@@ -1064,31 +1123,35 @@ impl<'a> ConfidentialSession<'a> {
         for (user, enclave) in &self.recipients.user_enclave_assignments {
             grouped.entry(*enclave).or_default().push(user.clone());
         }
-        let mut nonces = BTreeMap::new();
-        for (enclave_id, users) in &grouped {
-            let cmd = InitSigningSessionCommand {
-                keygen_session_id: self.manifest.manifest.keygen_session_id.clone(),
-                signing_session_id: session.clone(),
-                signing_authorization: signing_authorization.clone(),
-                user_ids: users.clone(),
-                encrypted_taproot_tweak: self.manifest.manifest.encrypted_taproot_tweak.clone(),
-                expected_participant_count: self.recipients.user_enclave_assignments.len(),
-                approval_signatures: approvals.to_vec(),
-                batch_items: items.clone(),
-            };
-            let copy = cmd.clone();
-            let result = self
-                .command_once(
-                    &format!("sign/{session}/nonces"),
+        let nonce_commands = grouped
+            .iter()
+            .map(|(enclave_id, users)| {
+                (
                     *enclave_id,
-                    &cmd,
-                    move || {
-                        Ok(EnclaveCommand::Musig(MusigCommand::Signing(
-                            SigningCommand::InitSession(copy),
-                        )))
+                    InitSigningSessionCommand {
+                        keygen_session_id: self.manifest.manifest.keygen_session_id.clone(),
+                        signing_session_id: session.clone(),
+                        signing_authorization: signing_authorization.clone(),
+                        user_ids: users.clone(),
+                        encrypted_taproot_tweak: self
+                            .manifest
+                            .manifest
+                            .encrypted_taproot_tweak
+                            .clone(),
+                        expected_participant_count: self.recipients.user_enclave_assignments.len(),
+                        approval_signatures: approvals.to_vec(),
+                        batch_items: items.clone(),
                     },
                 )
-                .await?;
+            })
+            .collect();
+        let results = self
+            .round_commands(&format!("sign/{session}/nonces"), nonce_commands, |cmd| {
+                EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::InitSession(cmd)))
+            })
+            .await?;
+        let mut nonces = BTreeMap::new();
+        for (users, result) in grouped.values().zip(results) {
             let EnclaveOutcome::Musig(MusigOutcome::Signing(SigningOutcome::Nonces(response))) =
                 result
             else {
@@ -1102,25 +1165,31 @@ impl<'a> ConfidentialSession<'a> {
             collect_peer_values(users, response.nonces, &mut nonces)?;
         }
         let nonces: Vec<_> = nonces.into_iter().collect();
-        let mut partials = BTreeMap::new();
-        for (enclave_id, users) in &grouped {
-            let cmd = DistributeNoncesCommand {
-                signing_session_id: session.clone(),
-                nonces: nonces.clone(),
-            };
-            let copy = cmd.clone();
-            let result = self
-                .command_once(
-                    &format!("sign/{session}/partials"),
+        let partial_commands = grouped
+            .keys()
+            .map(|enclave_id| {
+                (
                     *enclave_id,
-                    &cmd,
-                    move || {
-                        Ok(EnclaveCommand::Musig(MusigCommand::Signing(
-                            SigningCommand::DistributeNonces(copy),
-                        )))
+                    DistributeNoncesCommand {
+                        signing_session_id: session.clone(),
+                        nonces: nonces.clone(),
                     },
                 )
-                .await?;
+            })
+            .collect();
+        let results = self
+            .round_commands(
+                &format!("sign/{session}/partials"),
+                partial_commands,
+                |cmd| {
+                    EnclaveCommand::Musig(MusigCommand::Signing(SigningCommand::DistributeNonces(
+                        cmd,
+                    )))
+                },
+            )
+            .await?;
+        let mut partials = BTreeMap::new();
+        for (users, result) in grouped.values().zip(results) {
             let EnclaveOutcome::Musig(MusigOutcome::Signing(SigningOutcome::PartialSignature(
                 response,
             ))) = result

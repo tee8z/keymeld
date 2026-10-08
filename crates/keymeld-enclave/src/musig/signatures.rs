@@ -242,6 +242,32 @@ impl MusigProcessor {
     }
 
     /// Add batch partial signatures from a remote participant.
+    /// After local partials have been returned, only the coordinator's rounds
+    /// produce final signatures. Drop the other copies before aggregation so
+    /// every incoming partial is verified once against the round we finalize.
+    /// This must not run before the local partial-signature response is built.
+    pub(crate) fn retain_aggregation_rounds(
+        &mut self,
+        coordinator: &UserId,
+    ) -> Result<(), MusigError> {
+        let user = self
+            .user_sessions
+            .get(coordinator)
+            .ok_or_else(|| MusigError::UserNotFound(coordinator.clone()))?;
+        if !user.coordinator || user.private_key.is_none() {
+            return Err(MusigError::NotReady(
+                "Aggregation requires the local coordinator".into(),
+            ));
+        }
+        for (id, user) in &mut self.user_sessions {
+            if id != coordinator {
+                user.batch_second_rounds.clear();
+                user.batch_adaptor_second_rounds.clear();
+            }
+        }
+        Ok(())
+    }
+
     pub fn add_batch_partial_signatures(
         &mut self,
         user_id: &UserId,
@@ -555,4 +581,133 @@ impl MusigProcessor {
 pub enum BatchPartialSigData {
     Regular { signature: Vec<u8>, nonce: Vec<u8> },
     Adaptor(Vec<(Uuid, Vec<u8>, Vec<u8>)>), // Vec of (adaptor_id, sig_bytes, nonce_bytes)
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+    use crate::musig::types::{AdaptorConfig, BatchItemData, ParticipantSettings};
+    use keymeld_core::{protocol::TaprootTweak, KeyMaterial, SessionId};
+    use musig2::secp256k1::{SecretKey, SECP256K1};
+
+    #[test]
+    fn one_aggregation_copy_checks_regular_and_adaptor_partials_from_every_signer() {
+        let session = SessionId::new_v7();
+        let users = [UserId::new_v7(), UserId::new_v7()];
+        let secrets = [[31; 32], [32; 32]];
+        let mut processor =
+            MusigProcessor::new(&session, TaprootTweak::None, Some(2), users.to_vec());
+        for (user, secret) in users.iter().zip(secrets) {
+            processor
+                .add_participant(
+                    user.clone(),
+                    SecretKey::from_byte_array(secret)
+                        .unwrap()
+                        .public_key(SECP256K1),
+                )
+                .unwrap();
+        }
+        processor.create_key_aggregation_context(&session).unwrap();
+        let ordered = processor.session_metadata.get_all_participant_ids();
+        for (user, secret) in users.iter().zip(secrets) {
+            let index = ordered.iter().position(|id| id == user).unwrap();
+            processor
+                .store_user_private_key(
+                    user,
+                    KeyMaterial::new(secret.to_vec()),
+                    index,
+                    user == &users[0],
+                    ParticipantSettings::default(),
+                )
+                .unwrap();
+        }
+        let regular = Uuid::now_v7();
+        let adaptor = Uuid::now_v7();
+        let point = SecretKey::from_byte_array([33; 32])
+            .unwrap()
+            .public_key(SECP256K1);
+        let config = AdaptorConfig::single(hex::encode(point.serialize()));
+        let items = [(regular, vec![]), (adaptor, vec![config])]
+            .into_iter()
+            .map(|(id, configs)| {
+                (
+                    id,
+                    BatchItemData {
+                        batch_item_id: id,
+                        message: vec![42; 32],
+                        adaptor_configs: configs,
+                        adaptor_final_signatures: BTreeMap::new(),
+                        taproot_tweak: TaprootTweak::None,
+                        subset_id: None,
+                    },
+                )
+            })
+            .collect();
+        processor.set_batch_items(items).unwrap();
+        let mut nonces = Vec::new();
+        for user in &users {
+            let data = processor.get_user_session_data(user).unwrap();
+            nonces.push((
+                user.clone(),
+                processor
+                    .generate_batch_nonces(
+                        user,
+                        data.signer_index,
+                        data.private_key.as_ref().unwrap(),
+                    )
+                    .unwrap(),
+            ));
+        }
+        for (user, nonces) in nonces {
+            processor.store_batch_nonces(&user, nonces).unwrap();
+        }
+        processor.check_nonce_completion().unwrap();
+        for user in &users {
+            processor.finalize_batch_nonce_rounds(user).unwrap();
+        }
+        let partials: Vec<_> = users
+            .iter()
+            .map(|user| {
+                (
+                    user.clone(),
+                    processor.get_user_batch_partial_signatures(user).unwrap(),
+                )
+            })
+            .collect();
+        assert!(processor.retain_aggregation_rounds(&users[1]).is_err());
+        processor.retain_aggregation_rounds(&users[0]).unwrap();
+        processor.retain_aggregation_rounds(&users[0]).unwrap();
+        assert!(!processor.all_batch_signatures_complete());
+        for item in [regular, adaptor] {
+            let mut corrupted = partials[1].1[&item].clone();
+            match &mut corrupted {
+                BatchPartialSigData::Regular { signature, .. } => signature[0] ^= 1,
+                BatchPartialSigData::Adaptor(signatures) => signatures[0].1[0] ^= 1,
+            }
+            assert!(processor
+                .add_batch_partial_signatures(&users[1], BTreeMap::from([(item, corrupted)]))
+                .is_err());
+            assert!(!processor.all_batch_signatures_complete());
+        }
+        for (user, partials) in partials {
+            processor
+                .add_batch_partial_signatures(&user, partials)
+                .unwrap();
+        }
+        assert!(processor.all_batch_signatures_complete());
+        let aggregate = processor.get_aggregate_pubkey().unwrap();
+        let results = processor.finalize_batch(&users[0]).unwrap();
+        assert_eq!(results.len(), 2);
+        let FinalizedData::FinalSignature(signature) = &results[&regular] else {
+            panic!("regular result")
+        };
+        let signature: [u8; 64] = signature.as_slice().try_into().unwrap();
+        musig2::verify_single(aggregate, signature, [42; 32]).unwrap();
+        let FinalizedData::AdaptorSignatures(signatures) = &results[&adaptor] else {
+            panic!("adaptor result")
+        };
+        assert_eq!(signatures.len(), 1);
+        let signature = musig2::AdaptorSignature::from_bytes(&signatures[0].1).unwrap();
+        musig2::adaptor::verify_single(aggregate, &signature, [42; 32], point).unwrap();
+    }
 }
