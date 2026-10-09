@@ -272,9 +272,9 @@ impl EnclaveServer {
         }
         #[cfg(feature = "escrow")]
         if let Some(budget) = self.operator.response_budget() {
-            let (used, limit, rejected) = budget.snapshot();
-            info!("Escrow Admission: enclave_id={}, response_reserved_bytes={}, response_budget_bytes={}, rejected_total={}",
-                self.operator.enclave_id, used, limit, rejected);
+            let budget = budget.snapshot();
+            info!("Escrow Admission: enclave_id={}, response_reserved_bytes={}, response_retained_bytes={}, response_budget_bytes={}, rejected_total={}",
+                self.operator.enclave_id, budget.used, budget.retained, budget.limit, budget.rejected);
         }
         let held = self.operator.session_counts();
         info!(

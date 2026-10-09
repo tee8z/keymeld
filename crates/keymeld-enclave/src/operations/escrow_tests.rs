@@ -853,9 +853,13 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
         handle(&f.completed, &f.context, &rebind, 1),
         Err(EnclaveError::EscrowPreparationExhausted { .. })
     ));
-    let (used, limit, _) = f.context.response_budget.snapshot();
-    let _other_sessions = f.context.response_budget.reserve(limit - used).unwrap();
-    assert_eq!(f.context.response_budget.snapshot().0, limit);
+    let held = f.context.response_budget.snapshot();
+    let _other_sessions = f
+        .context
+        .response_budget
+        .reserve(held.limit - held.used)
+        .unwrap();
+    assert_eq!(f.context.response_budget.snapshot().used, held.limit);
     let cached_count = escrow_state.inner.lock().unwrap().requests.len();
     for (permission, prepared, attempt) in candidates {
         let execute = execute_command(&f, permission, &attempt, prepared.sealed_state, proof());
@@ -1316,23 +1320,24 @@ fn preparation_reply_budget_is_shared_across_sessions_and_exact_retries_do_not_r
     };
     let initial = bind_command(&first);
     let reply = handle(&first.completed, &first.context, &initial, 1).unwrap();
-    let retained = budget.snapshot().0;
+    let retained = budget.snapshot().used;
     assert!(retained > 0 && retained < MAX_CACHED_RESPONSE_BYTES);
+    assert_eq!(budget.snapshot().retained, retained);
     let cached = handle(&first.completed, &first.context, &initial, 1).unwrap();
     assert_eq!(cached.output, reply.output);
-    assert_eq!(budget.snapshot().0, retained);
+    assert_eq!(budget.snapshot().used, retained);
     let next = bind_command(&second);
     // Retryable, unlike a spent per-permission or per-session bound.
     assert!(matches!(
         handle(&second.completed, &second.context, &next, 1),
         Err(EnclaveError::EscrowPreparationBusy { .. })
     ));
-    assert_eq!(budget.snapshot().0, retained);
+    assert_eq!(budget.snapshot().used, retained);
     drop(first);
-    assert_eq!(budget.snapshot().0, 0);
+    assert_eq!(budget.snapshot().used, 0);
     handle(&second.completed, &second.context, &next, 1).unwrap();
     drop(second);
-    assert_eq!(budget.snapshot().0, 0);
+    assert_eq!(budget.snapshot().used, 0);
 }
 
 #[test]

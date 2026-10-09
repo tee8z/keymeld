@@ -706,12 +706,14 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
     #[cfg(feature = "escrow")]
     let pressure = {
         let budget = operator.response_budget().unwrap();
-        let (used, limit, _) = budget.snapshot();
-        budget.reserve(limit - used).unwrap()
+        let held = budget.snapshot();
+        let mut pressure = budget.reserve(held.limit - held.used).unwrap();
+        assert!(pressure.retain(held.limit - held.used));
+        pressure
     };
     let pressure_expiry = operator.memory_aware_expiry(&expiry);
     #[cfg(feature = "escrow")]
-    assert_eq!(pressure_expiry.idle_keygen, Duration::from_secs(300));
+    assert_eq!(pressure_expiry.idle_keygen, PRESSURED_IDLE_KEYGEN);
     let expired = operator.expire_sessions(
         &pressure_expiry,
         Instant::now() + pressure_expiry.idle_keygen,

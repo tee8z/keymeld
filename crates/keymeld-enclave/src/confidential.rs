@@ -41,6 +41,11 @@ pub(crate) struct SessionExpiry {
     /// ended.
     pub(crate) finished_signing: Duration,
 }
+/// Idle keygen retention while retained preparation replies pressure the shared budget
+/// (see [`crate::operations::response_budget`]). A released session's client restores it
+/// from its journal, so this only trades an exact-retry window for memory.
+#[cfg(feature = "escrow")]
+const PRESSURED_IDLE_KEYGEN: Duration = Duration::from_secs(5 * 60);
 impl Default for SessionExpiry {
     fn default() -> Self {
         Self {
@@ -487,7 +492,7 @@ impl EnclaveOperator {
             .is_some_and(|budget| budget.pressured())
         {
             return SessionExpiry {
-                idle_keygen: configured.idle_keygen.min(Duration::from_secs(5 * 60)),
+                idle_keygen: configured.idle_keygen.min(PRESSURED_IDLE_KEYGEN),
                 finished_signing: configured.finished_signing,
             };
         }
@@ -1049,9 +1054,16 @@ mod tests {
             configured.idle_keygen
         );
         let budget = operator.response_budget().unwrap();
-        let pressure = budget.reserve(budget.snapshot().1).unwrap();
+        let limit = budget.snapshot().limit;
+        let mut pressure = budget.reserve(limit).unwrap();
+        assert_eq!(
+            operator.memory_aware_expiry(&configured).idle_keygen,
+            configured.idle_keygen,
+            "pending reservations drain on their own"
+        );
+        assert!(pressure.retain(limit));
         let expiry = operator.memory_aware_expiry(&configured);
-        assert_eq!(expiry.idle_keygen, Duration::from_secs(300));
+        assert_eq!(expiry.idle_keygen, PRESSURED_IDLE_KEYGEN);
         assert_eq!(expiry.finished_signing, configured.finished_signing);
         assert_eq!(
             operator.expire_sessions(&expiry, Instant::now()),
