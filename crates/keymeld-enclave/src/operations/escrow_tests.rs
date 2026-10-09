@@ -1333,3 +1333,28 @@ fn preparation_reply_budget_is_shared_across_sessions_and_exact_retries_do_not_r
     drop(second);
     assert_eq!(budget.snapshot().0, 0);
 }
+
+#[test]
+fn a_committed_trial_keeps_the_live_policy_bindings_and_reply_cache() {
+    let user = UserId::new_v7();
+    let mut state = SessionState::default();
+    state.bindings.insert(user.clone(), [1; 32]);
+    state.cached_response_bytes = 4096;
+    state
+        .inflight_request_ids
+        .insert((user.clone(), Uuid::now_v7()), [2; 32]);
+    let mut trial = state.transition();
+    assert!(
+        trial.bindings.is_empty(),
+        "a trial copied bindings it never commits"
+    );
+    let key = (user.clone(), "refund".to_string());
+    trial
+        .execution_receipts
+        .insert(key.clone(), Arc::new(Payload::new(vec![3]).unwrap()));
+    state.commit(trial);
+    assert_eq!(state.execution_receipts[&key].as_bytes(), [3].as_slice());
+    assert_eq!(state.bindings[&user], [1; 32]);
+    assert_eq!(state.cached_response_bytes, 4096);
+    assert_eq!(state.inflight_request_ids.len(), 1);
+}
