@@ -852,6 +852,16 @@ impl EnclaveOperator {
         self.queue.forget_session(session_id);
     }
 
+    #[cfg(feature = "escrow")]
+    pub(crate) fn response_budget(
+        &self,
+    ) -> Option<std::sync::Arc<crate::operations::response_budget::ResponseBudget>> {
+        self.context
+            .read()
+            .ok()
+            .map(|context| context.response_budget.clone())
+    }
+
     /// The sessions this enclave holds, by kind and state. Counts only, so that they can
     /// be logged where the host reads them.
     pub(crate) fn session_counts(&self) -> SessionCounts {

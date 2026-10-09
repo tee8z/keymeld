@@ -260,14 +260,21 @@ impl EnclaveServer {
     /// Release the sessions that are due, then log what is held by kind and state. These
     /// are counts only: the host reads this output.
     fn release_idle_sessions(&self) {
-        let expired = self
-            .operator
-            .expire_sessions(&self.session_expiry, Instant::now());
+        let expired = self.operator.expire_sessions(
+            &self.operator.memory_aware_expiry(&self.session_expiry),
+            Instant::now(),
+        );
         if expired.keygen + expired.signing > 0 {
             info!(
                 "Released idle sessions: keygen={}, signing={}",
                 expired.keygen, expired.signing
             );
+        }
+        #[cfg(feature = "escrow")]
+        if let Some(budget) = self.operator.response_budget() {
+            let (used, limit, rejected) = budget.snapshot();
+            info!("Escrow Admission: enclave_id={}, response_reserved_bytes={}, response_budget_bytes={}, rejected_total={}",
+                self.operator.enclave_id, used, limit, rejected);
         }
         let held = self.operator.session_counts();
         info!(

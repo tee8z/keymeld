@@ -3,7 +3,9 @@
 //! A proof unlocks only its signed action. Signing permits are bound to one
 //! signing session; they never authorize exporting keys. Receipts authenticate
 //! restart recovery, but host-controlled storage is not an antirollback oracle.
-use super::{context::EnclaveSharedContext, states::keygen::Completed};
+use super::{
+    context::EnclaveSharedContext, response_budget::ResponseCharge, states::keygen::Completed,
+};
 use crate::escrow_verifier::{
     BindView, ExecutionView, PreparationView, PreparedAction as VerifierPreparedAction,
     RegistrationView,
@@ -59,7 +61,7 @@ struct SessionState {
     executions: BTreeMap<(UserId, String), Arc<ExecutedAction>>,
     // One canonical successful receipt per permission, never one per retry.
     execution_receipts: BTreeMap<(UserId, String), Arc<Payload>>,
-    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], EscrowResponse)>,
+    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], EscrowResponse, ResponseCharge)>,
     cached_response_bytes: usize,
     inflight_request_ids: BTreeMap<(UserId, uuid::Uuid), [u8; 32]>,
     required_bindings: BTreeMap<UserId, Arc<Binding>>,
@@ -889,6 +891,7 @@ struct Reservation {
     state: Arc<EscrowSessionState>,
     key: (UserId, String),
     request_key: (UserId, uuid::Uuid),
+    cache: Option<ResponseCharge>,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -1171,7 +1174,8 @@ pub(crate) async fn handle_snapshot(
             .clone()
             .unwrap_or_else(|| "@bind".into()),
     );
-    let _reservation = loop {
+    let mut cache_reservation = None;
+    let mut reservation = loop {
         let waiter = {
             let mut state = metadata
                 .escrow_state
@@ -1197,7 +1201,7 @@ pub(crate) async fn handle_snapshot(
                     "Successful execution request identity was reused with changed inputs",
                 ));
             }
-            if let Some((digest, reply)) = state.requests.get(&request_key) {
+            if let Some((digest, reply, _charge)) = state.requests.get(&request_key) {
                 if *digest != request_digest {
                     return Err(invalid("Escrow request ID was reused with changed inputs"));
                 }
@@ -1244,6 +1248,20 @@ pub(crate) async fn handle_snapshot(
                         "Session preparation response cache budget reached",
                     ));
                 }
+                // Reserve before invoking a verifier or causing any effect.
+                // Exact replies above and Execute/recovery remain available.
+                if command.context.operation != Operation::Execute {
+                    cache_reservation = Some(
+                        context
+                            .response_budget
+                            .reserve(MAX_CACHED_RESPONSE_BYTES)
+                            .ok_or_else(|| {
+                                preparation_exhausted(
+                                    "Enclave preparation response cache budget reached",
+                                )
+                            })?,
+                    );
+                }
                 state
                     .inflight_request_ids
                     .insert(request_key.clone(), request_digest);
@@ -1261,6 +1279,7 @@ pub(crate) async fn handle_snapshot(
                 state: metadata.escrow_state.clone(),
                 key: reservation_key,
                 request_key: request_key.clone(),
+                cache: cache_reservation.take(),
             };
         }
     };
@@ -1676,11 +1695,27 @@ pub(crate) async fn handle_snapshot(
         .map_err(|_| invalid("Escrow state lock poisoned"))?;
     if state
         .inflight
-        .get(&_reservation.key)
+        .get(&reservation.key)
         .is_none_or(|(digest, _)| *digest != request_digest)
     {
         return Err(invalid("Escrow preparation reservation changed"));
     }
+    let retained_reply = if command.context.operation != Operation::Execute {
+        let bytes = result.output.as_bytes().len()
+            + result.sealed_state.as_bytes().len()
+            + result.enclave_signature.len()
+            + 4096;
+        let mut charge = reservation
+            .cache
+            .take()
+            .ok_or_else(|| invalid("Missing preparation reply reservation"))?;
+        if !charge.retain(bytes) {
+            return Err(invalid("Preparation reply exceeds its wire reservation"));
+        }
+        Some((bytes, charge))
+    } else {
+        None
+    };
     // Check all transitions before any commit, so a failed install has no effect.
     let mut next = state.transition();
     if let Some(binding) = new_binding {
@@ -1706,15 +1741,13 @@ pub(crate) async fn handle_snapshot(
     state.executions = next.executions;
     state.execution_receipts = next.execution_receipts;
     state.permits = next.permits;
-    if command.context.operation != Operation::Execute {
-        state.cached_response_bytes += result.output.as_bytes().len()
-            + result.sealed_state.as_bytes().len()
-            + result.enclave_signature.len()
-            + 4096;
+    if let Some((bytes, charge)) = retained_reply {
+        state.cached_response_bytes += bytes;
         state
             .requests
-            .insert(request_key, (request_digest, result.clone()));
+            .insert(request_key, (request_digest, result.clone(), charge));
     }
+
     Ok(result)
 }
 

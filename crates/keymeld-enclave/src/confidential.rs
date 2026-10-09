@@ -480,6 +480,23 @@ impl EnclaveOperator {
         Ok(response)
     }
 
+    pub(crate) fn memory_aware_expiry(&self, configured: &SessionExpiry) -> SessionExpiry {
+        #[cfg(feature = "escrow")]
+        if self
+            .response_budget()
+            .is_some_and(|budget| budget.pressured())
+        {
+            return SessionExpiry {
+                idle_keygen: configured.idle_keygen.min(Duration::from_secs(5 * 60)),
+                finished_signing: configured.finished_signing,
+            };
+        }
+        SessionExpiry {
+            idle_keygen: configured.idle_keygen,
+            finished_signing: configured.finished_signing,
+        }
+    }
+
     /// Release the confidential sessions that are due under `expiry`, as of `now`.
     ///
     /// Releasing a keygen session leaves this enclave as a restart would, for that session
@@ -1019,6 +1036,40 @@ mod tests {
             .owners
             .is_empty());
         assert!(operator.sessions.is_empty());
+    }
+
+    #[cfg(feature = "escrow")]
+    #[tokio::test]
+    async fn memory_pressure_releases_idle_sessions_but_preserves_serving_sessions() {
+        let operator = operator();
+        let keygen = held_keygen(&operator, Uuid::now_v7());
+        let configured = SessionExpiry::default();
+        assert_eq!(
+            operator.memory_aware_expiry(&configured).idle_keygen,
+            configured.idle_keygen
+        );
+        let budget = operator.response_budget().unwrap();
+        let pressure = budget.reserve(budget.snapshot().1).unwrap();
+        let expiry = operator.memory_aware_expiry(&configured);
+        assert_eq!(expiry.idle_keygen, Duration::from_secs(300));
+        assert_eq!(expiry.finished_signing, configured.finished_signing);
+        assert_eq!(
+            operator.expire_sessions(&expiry, Instant::now()),
+            ExpiredSessions::default()
+        );
+        let serving = operator.confidential.lock(&keygen).await.unwrap();
+        let later = Instant::now() + expiry.idle_keygen;
+        assert_eq!(
+            operator.expire_sessions(&expiry, later),
+            ExpiredSessions::default()
+        );
+        drop(serving);
+        assert_eq!(operator.expire_sessions(&expiry, later).keygen, 1);
+        drop(pressure);
+        assert_eq!(
+            operator.memory_aware_expiry(&configured).idle_keygen,
+            configured.idle_keygen
+        );
     }
 
     #[test]

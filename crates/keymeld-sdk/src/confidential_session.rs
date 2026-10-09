@@ -30,6 +30,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     pin::Pin,
+    sync::Arc,
 };
 use uuid::Uuid;
 
@@ -76,18 +77,21 @@ struct JournalEntry {
 }
 
 impl JournalEntry {
-    fn record_outcome(&mut self, outcome: &Outcome) {
+    fn record_outcome(entry: &mut Arc<Self>, outcome: &Outcome) {
         // A retry passes back this same saved outcome. Avoid invalidating an
         // unchanged entry, while newly authenticated results get a new identity.
-        if self.outcome.is_none() {
-            self.revision = JournalEntryRevision::default();
-            self.outcome = Some(outcome.clone());
+        if entry.outcome.is_none() {
+            let entry = Arc::make_mut(entry);
+            entry.revision = JournalEntryRevision::default();
+            entry.outcome = Some(outcome.clone());
         }
     }
 
-    fn clear_outcome(&mut self) {
-        if self.outcome.take().is_some() {
-            self.revision = JournalEntryRevision::default();
+    fn clear_outcome(entry: &mut Arc<Self>) {
+        if entry.outcome.is_some() {
+            let entry = Arc::make_mut(entry);
+            entry.outcome = None;
+            entry.revision = JournalEntryRevision::default();
         }
     }
 }
@@ -105,10 +109,13 @@ struct SavedBatch {
 /// Store it as JSON or another self-describing format. Fields that later releases add are
 /// omitted from JSON while unset, so a journal saved by an earlier release still decodes;
 /// binary layouts such as bincode change between releases.
+/// Clones share immutable entry payloads. Recording or clearing an outcome
+/// detaches only that entry; independent enclave lanes cannot change each other.
+/// The Arc wrappers are transparent to the existing JSON format.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ConfidentialJournal {
-    commands: BTreeMap<String, JournalEntry>,
-    signing_batches: BTreeMap<SessionId, SavedBatch>,
+    commands: BTreeMap<String, Arc<JournalEntry>>,
+    signing_batches: BTreeMap<SessionId, Arc<SavedBatch>>,
     opaque_route_id: Option<Uuid>,
     aborted_signing_sessions: BTreeSet<SessionId>,
 }
@@ -297,12 +304,12 @@ impl<'a> ConfidentialSession<'a> {
             )?;
             self.journal.commands.insert(
                 key.clone(),
-                JournalEntry {
+                Arc::new(JournalEntry {
                     revision: JournalEntryRevision::default(),
                     input_commitment: commitment,
                     request,
                     outcome: None,
-                },
+                }),
             );
         }
         Ok(key)
@@ -358,7 +365,7 @@ impl<'a> ConfidentialSession<'a> {
                     .commands
                     .get_mut(key)
                     .expect("recorded command");
-                entry.record_outcome(outcome);
+                JournalEntry::record_outcome(entry, outcome);
             }
         }
         self.checkpoint.save(self.journal).await?;
@@ -551,7 +558,7 @@ impl<'a> ConfidentialSession<'a> {
                     // Execute restores its sealed preparation and binding before
                     // reinstalling effects. Retain Bind/Prepare outputs: repeating
                     // Prepare could otherwise create a different external invoice.
-                    saved.clear_outcome();
+                    JournalEntry::clear_outcome(saved);
                 }
             }
             self.checkpoint.save(self.journal).await?;
@@ -1134,11 +1141,11 @@ impl<'a> ConfidentialSession<'a> {
                 .collect::<Result<Vec<_>, SdkError>>()?;
             self.journal.signing_batches.insert(
                 session.clone(),
-                SavedBatch {
+                Arc::new(SavedBatch {
                     revision: JournalEntryRevision::default(),
                     input_commitment: commitment,
                     items: batch,
-                },
+                }),
             );
         }
         self.checkpoint.save(self.journal).await?;
@@ -1435,6 +1442,108 @@ mod checkpoint_revision_tests {
     }
 
     #[test]
+    fn journal_forks_share_payloads_and_detach_only_changed_entries() {
+        let original = journal();
+        let mut fork = original.clone();
+        let sibling = original.clone();
+        let original_json = serde_json::to_value(&original).unwrap();
+        assert!(Arc::ptr_eq(
+            &original.commands["ping/1"],
+            &fork.commands["ping/1"]
+        ));
+        let batch_id = original.signing_batches.keys().next().unwrap();
+        assert!(Arc::ptr_eq(
+            &original.signing_batches[batch_id],
+            &fork.signing_batches[batch_id]
+        ));
+        let entry = fork.commands.get_mut("ping/1").unwrap();
+        JournalEntry::clear_outcome(entry);
+        assert!(Arc::ptr_eq(&original.commands["ping/1"], entry));
+        let outcome = Outcome::new(
+            entry.request.request().command.clone(),
+            EnclaveOutcome::System(SystemOutcome::Pong),
+        );
+        JournalEntry::record_outcome(entry, &outcome);
+        assert!(!Arc::ptr_eq(&original.commands["ping/1"], entry));
+        assert!(original
+            .command_outcome("ping", EnclaveId::new(1))
+            .is_none());
+        assert!(fork.command_outcome("ping", EnclaveId::new(1)).is_some());
+        let completed = fork.clone();
+        JournalEntry::record_outcome(fork.commands.get_mut("ping/1").unwrap(), &outcome);
+        assert!(Arc::ptr_eq(
+            &completed.commands["ping/1"],
+            &fork.commands["ping/1"]
+        ));
+        JournalEntry::clear_outcome(fork.commands.get_mut("ping/1").unwrap());
+        assert!(completed
+            .command_outcome("ping", EnclaveId::new(1))
+            .is_some());
+        assert!(fork.command_outcome("ping", EnclaveId::new(1)).is_none());
+        assert_eq!(serde_json::to_value(&sibling).unwrap(), original_json);
+        let restored: ConfidentialJournal = serde_json::from_value(original_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), original_json);
+    }
+
+    #[test]
+    #[ignore = "isolated allocation benchmark; compare KEYMELD_JOURNAL_BENCH_DEEP=1"]
+    fn journal_fork_memory_benchmark() {
+        let mut value = serde_json::to_value(journal()).unwrap();
+        value["commands"]["ping/1"]["request"]["envelope"]["ciphertext"] =
+            "ab".repeat(2 * 1024 * 1024).into();
+        let template = value["commands"]["ping/1"].clone();
+        value["commands"] = (0..8)
+            .map(|index| (format!("bench/{index}/1"), template.clone()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        drop(template);
+        let original: ConfidentialJournal = serde_json::from_value(value).unwrap();
+        let deep = std::env::var_os("KEYMELD_JOURNAL_BENCH_DEEP").is_some();
+        let started = std::time::Instant::now();
+        let forks: Vec<_> = (0..3)
+            .map(|_| {
+                if deep {
+                    // Reproduce the pre-sharing Clone behavior without changing
+                    // its request, outcome, or batch contents.
+                    ConfidentialJournal {
+                        commands: original
+                            .commands
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Arc::new((**v).clone())))
+                            .collect(),
+                        signing_batches: original
+                            .signing_batches
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Arc::new((**v).clone())))
+                            .collect(),
+                        opaque_route_id: original.opaque_route_id,
+                        aborted_signing_sessions: original.aborted_signing_sessions.clone(),
+                    }
+                } else {
+                    original.clone()
+                }
+            })
+            .collect();
+        std::hint::black_box(&forks);
+        println!(
+            "journal_entries=8 payload_mib=32 journal_forks=3 deep={deep} elapsed_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        #[cfg(target_os = "linux")]
+        for line in std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+        {
+            if ["VmRSS:", "VmHWM:", "VmSwap:"]
+                .iter()
+                .any(|field| line.starts_with(field))
+            {
+                println!("{line}");
+            }
+        }
+    }
+
+    #[test]
     fn outcome_changes_invalidate_only_the_changed_copy() {
         let original = journal();
         let before = original.checkpoint_revision("commands", "ping/1").unwrap();
@@ -1444,14 +1553,14 @@ mod checkpoint_revision_tests {
             entry.request.request().command.clone(),
             EnclaveOutcome::System(SystemOutcome::Pong),
         );
-        entry.clear_outcome();
+        JournalEntry::clear_outcome(entry);
         assert_eq!(before, entry.revision);
-        entry.record_outcome(&outcome);
+        JournalEntry::record_outcome(entry, &outcome);
         let recorded = entry.revision.clone();
         assert_ne!(before, recorded);
-        entry.record_outcome(&outcome);
+        JournalEntry::record_outcome(entry, &outcome);
         assert_eq!(recorded, entry.revision);
-        entry.clear_outcome();
+        JournalEntry::clear_outcome(entry);
         assert_ne!(recorded, entry.revision);
         assert_eq!(
             Some(before),
