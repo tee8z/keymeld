@@ -380,6 +380,9 @@ impl<'a> ConfidentialSession<'a> {
             EnclaveOutcome::Error(keymeld_core::protocol::ErrorResponse {
                 error: keymeld_core::protocol::EnclaveError::EscrowPreparationExhausted { reason },
             }) => Err(SdkError::EscrowPreparationExhausted { reason }),
+            EnclaveOutcome::Error(keymeld_core::protocol::ErrorResponse {
+                error: keymeld_core::protocol::EnclaveError::EscrowPreparationBusy { reason },
+            }) => Err(SdkError::EscrowPreparationBusy { reason }),
             EnclaveOutcome::Error(error) => Err(invalid(format!(
                 "Enclave rejected the confidential operation: {}",
                 error.error
@@ -1566,5 +1569,41 @@ mod checkpoint_revision_tests {
             Some(before),
             original.checkpoint_revision("commands", "ping/1")
         );
+    }
+}
+
+#[cfg(test)]
+mod command_response_tests {
+    use super::*;
+    use keymeld_core::protocol::{EnclaveError, ErrorResponse};
+    use std::time::SystemTime;
+
+    fn rejection(error: EnclaveError) -> Outcome {
+        Outcome {
+            command_id: Uuid::now_v7(),
+            created_at: SystemTime::now(),
+            completed_at: SystemTime::now(),
+            response: EnclaveOutcome::Error(ErrorResponse { error }),
+        }
+    }
+
+    #[test]
+    fn a_busy_enclave_is_retryable_and_never_reads_as_exhausted() {
+        let busy =
+            ConfidentialSession::command_response(rejection(EnclaveError::EscrowPreparationBusy {
+                reason: "shared budget full".into(),
+            }))
+            .unwrap_err();
+        assert!(matches!(busy, SdkError::EscrowPreparationBusy { .. }));
+        // Callers that retire work on exhaustion also match this text.
+        assert!(!busy.to_string().contains("capacity exhausted"));
+
+        let spent = ConfidentialSession::command_response(rejection(
+            EnclaveError::EscrowPreparationExhausted {
+                reason: "permission spent".into(),
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(spent, SdkError::EscrowPreparationExhausted { .. }));
     }
 }

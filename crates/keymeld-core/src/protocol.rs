@@ -1590,6 +1590,10 @@ pub enum EnclaveError {
     /// executions and paid candidates remain eligible for release/recovery.
     #[error("Escrow preparation exhausted: {reason}")]
     EscrowPreparationExhausted { reason: String },
+    /// Capacity shared by every session is momentarily full. Nothing was
+    /// prepared, and the same request may succeed once capacity returns.
+    #[error("Escrow preparation busy: {reason}")]
+    EscrowPreparationBusy { reason: String },
 }
 
 impl From<hex::FromHexError> for EnclaveError {
