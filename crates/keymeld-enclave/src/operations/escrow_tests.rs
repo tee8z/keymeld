@@ -1011,7 +1011,7 @@ fn seal_v1(context: &EnclaveSharedContext, state: SealedState) -> Payload {
 }
 fn unseal_prepared(context: &EnclaveSharedContext, sealed: &Payload) -> PreparedAction {
     match unseal(context, sealed).unwrap() {
-        SealedState::Prepared { prepared } => prepared,
+        SealedState::Prepared { prepared } => Arc::unwrap_or_clone(prepared),
         other => panic!("expected a prepared state, got {other:?}"),
     }
 }
@@ -1030,7 +1030,7 @@ fn compressed_sealed_state_round_trips_and_v1_states_still_execute() {
     let resealed = seal_state(
         &f.context,
         SealedState::Prepared {
-            prepared: state.clone(),
+            prepared: Arc::new(state.clone()),
         },
     )
     .unwrap();
@@ -1040,7 +1040,7 @@ fn compressed_sealed_state_round_trips_and_v1_states_still_execute() {
     let legacy = seal_v1(
         &f.context,
         SealedState::Prepared {
-            prepared: state.clone(),
+            prepared: Arc::new(state.clone()),
         },
     );
     assert_eq!(sealed_label(&legacy), SEALED_STATE_V1);
@@ -1172,8 +1172,10 @@ fn contract_scope_sealed_state_shrinks_for_large_pools() {
         let (scope, digests) = contract_scope(players);
         let mut state = template.clone();
         state.action = Action::Sign { scope };
-        state.binding.participant_policy_digests = digests;
-        let state = SealedState::Prepared { prepared: state };
+        Arc::make_mut(&mut state.binding).participant_policy_digests = digests;
+        let state = SealedState::Prepared {
+            prepared: Arc::new(state),
+        };
         let v1 = seal_v1(&f.context, state.clone());
         let v2 = seal_state(&f.context, state).unwrap();
         assert_eq!(
@@ -1243,7 +1245,13 @@ fn a_two_place_pool_of_twenty_fits_one_permit_and_one_signing_request() {
         scope: scope.clone(),
     };
     let action = Payload::encode(&state.action).unwrap();
-    let sealed = seal_state(&f.context, SealedState::Prepared { prepared: state }).unwrap();
+    let sealed = seal_state(
+        &f.context,
+        SealedState::Prepared {
+            prepared: Arc::new(state),
+        },
+    )
+    .unwrap();
     let restored = unseal_prepared(&f.context, &sealed);
     assert_eq!(restored.action, Action::Sign { scope });
     // A signing retry sends the scope as verifier parameters beside its prior receipt.
@@ -1374,4 +1382,146 @@ fn a_committed_trial_keeps_the_live_policy_bindings_and_reply_cache() {
     assert_eq!(state.bindings[&user], [1; 32]);
     assert_eq!(state.cached_response_bytes, 4096);
     assert_eq!(state.inflight_request_ids.len(), 1);
+}
+
+#[test]
+fn an_executed_signing_action_shares_one_preparation_scope_binding_and_receipt() {
+    let f = fixture(false);
+    let (prepared, attempt) = prepare(&f, "sign");
+    let execute = execute_command(&f, "sign", &attempt, prepared.sealed_state, proof());
+    let executed = handle(&f.completed, &f.context, &execute, 1).unwrap();
+    let escrow_state = &f
+        .completed
+        .musig_processor()
+        .get_session_metadata_public()
+        .escrow_state;
+    let key = (f.user.clone(), "sign".to_string());
+    let receipt = {
+        let state = escrow_state.inner.lock().unwrap();
+        let shared = &state.executions[&key].prepared;
+        assert!(Arc::ptr_eq(&state.preparations[&key], shared));
+        let permit = &state.permits[&(f.signing.signing_session_id.clone(), f.user.clone())];
+        assert!(Arc::ptr_eq(&permit.prepared, shared));
+        assert!(Arc::ptr_eq(
+            &state.required_bindings[&f.user],
+            &shared.binding
+        ));
+        state.execution_receipts[&key].clone()
+    };
+    // An exact retry answers from the canonical receipt and keeps it, not a fresh copy.
+    let retry = handle(&f.completed, &f.context, &execute, 1).unwrap();
+    assert_eq!(retry.sealed_state, executed.sealed_state);
+    let state = escrow_state.inner.lock().unwrap();
+    assert!(Arc::ptr_eq(&state.execution_receipts[&key], &receipt));
+    let scope = scope_bytes(&state.executions[&key].prepared.action);
+    drop(state);
+    let usage = escrow_state.memory_usage().unwrap();
+    assert!(scope > 0);
+    assert_eq!(usage.scope_bytes, scope, "a shared scope counts once");
+    assert!(usage.prepared_bytes > 0);
+    assert!(usage.binding_bytes > 0);
+}
+
+/// Escrow states as sealed while each held its values directly.
+#[derive(Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+enum ByValueState<'a> {
+    Bound { binding: &'a Binding },
+    Prepared { prepared: ByValuePrepared<'a> },
+    Executed { executed: ByValueExecuted<'a> },
+}
+#[derive(Serialize)]
+struct ByValuePrepared<'a> {
+    binding: &'a Binding,
+    action_id: &'a str,
+    attempt: &'a ActionAttempt,
+    action: &'a Action,
+    application_state: &'a Payload,
+    output: &'a Payload,
+    predecessor: Option<[u8; 32]>,
+    generation: u16,
+}
+impl<'a> From<&'a PreparedAction> for ByValuePrepared<'a> {
+    fn from(prepared: &'a PreparedAction) -> Self {
+        Self {
+            binding: &prepared.binding,
+            action_id: &prepared.action_id,
+            attempt: &prepared.attempt,
+            action: &prepared.action,
+            application_state: &prepared.application_state,
+            output: &prepared.output,
+            predecessor: prepared.predecessor,
+            generation: prepared.generation,
+        }
+    }
+}
+#[derive(Serialize)]
+struct ByValueExecuted<'a> {
+    prepared: ByValuePrepared<'a>,
+    execution_digest: [u8; 32],
+    original_request_id: Uuid,
+    original_request_digest: [u8; 32],
+    output: &'a ExecutionOutput,
+}
+
+#[test]
+fn shared_escrow_states_seal_and_digest_exactly_as_by_value_states() {
+    let f = fixture(false);
+    let bound = bind(&f);
+    let (prepared, attempt) = prepare(&f, "sign");
+    let execute = execute_command(&f, "sign", &attempt, prepared.sealed_state, proof());
+    let receipt = handle(&f.completed, &f.context, &execute, 1)
+        .unwrap()
+        .sealed_state;
+    let SealedState::Bound { binding } = unseal(&f.context, &bound.sealed_state).unwrap() else {
+        panic!("expected a bound state")
+    };
+    let SealedState::Executed { executed } = unseal(&f.context, &receipt).unwrap() else {
+        panic!("expected an executed state")
+    };
+    let cases = [
+        (
+            SealedState::Bound {
+                binding: binding.clone(),
+            },
+            ByValueState::Bound { binding: &binding },
+        ),
+        (
+            SealedState::Prepared {
+                prepared: executed.prepared.clone(),
+            },
+            ByValueState::Prepared {
+                prepared: executed.prepared.as_ref().into(),
+            },
+        ),
+        (
+            SealedState::Executed {
+                executed: executed.clone(),
+            },
+            ByValueState::Executed {
+                executed: ByValueExecuted {
+                    prepared: executed.prepared.as_ref().into(),
+                    execution_digest: executed.execution_digest,
+                    original_request_id: executed.original_request_id,
+                    original_request_digest: executed.original_request_digest,
+                    output: &executed.output,
+                },
+            },
+        ),
+    ];
+    for (shared, by_value) in cases {
+        let written = serde_json::to_vec(&shared).unwrap();
+        assert_eq!(written, serde_json::to_vec(&by_value).unwrap());
+        // A state sealed before sharing decodes and is written again unchanged.
+        let decoded: SealedState = serde_json::from_slice(&written).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), written);
+    }
+    assert_eq!(
+        preparation_digest(&executed.prepared).unwrap(),
+        authorization_digest(
+            "escrow-prepared-action-v2",
+            &ByValuePrepared::from(executed.prepared.as_ref())
+        )
+        .unwrap()
+    );
 }

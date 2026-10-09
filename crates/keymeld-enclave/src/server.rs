@@ -293,13 +293,16 @@ impl EnclaveServer {
         );
         #[cfg(feature = "escrow")]
         info!(
-            "Escrow Memory: enclave_id={}, accounted_response_bytes={}, preparations={}, executions={}, receipt_bytes={}, signing_permits={}, unavailable_sessions={}",
+            "Escrow Memory: enclave_id={}, accounted_response_bytes={}, preparations={}, executions={}, receipt_bytes={}, signing_permits={}, prepared_bytes={}, scope_bytes={}, binding_bytes={}, unavailable_sessions={}",
             self.operator.enclave_id,
             held.escrow.response_bytes,
             held.escrow.preparations,
             held.escrow.executions,
             held.escrow.receipt_bytes,
             held.escrow.permits,
+            held.escrow.prepared_bytes,
+            held.escrow.scope_bytes,
+            held.escrow.binding_bytes,
             held.escrow_unavailable,
         );
     }
