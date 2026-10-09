@@ -69,11 +69,11 @@ struct SessionState {
 }
 
 impl SessionState {
-    /// Trial updates keep payloads shared until all checks succeed. The cache
-    /// and in-flight reservations remain owned by the current live state.
+    /// Trial updates keep payloads shared until all checks succeed. Policy
+    /// bindings, the cache and in-flight reservations remain owned by the
+    /// current live state.
     fn transition(&self) -> Self {
         Self {
-            bindings: self.bindings.clone(),
             permits: self.permits.clone(),
             preparations: self.preparations.clone(),
             executions: self.executions.clone(),
@@ -81,6 +81,30 @@ impl SessionState {
             required_bindings: self.required_bindings.clone(),
             ..Default::default()
         }
+    }
+
+    /// Install a trial from [`Self::transition`] after all its checks succeeded.
+    /// Every field is named, so a new one must be committed or skipped here.
+    fn commit(&mut self, trial: Self) {
+        let Self {
+            // Bound on the live state before any trial starts.
+            bindings: _,
+            permits,
+            preparations,
+            executions,
+            execution_receipts,
+            required_bindings,
+            // Owned by the live state, as in transition().
+            requests: _,
+            cached_response_bytes: _,
+            inflight_request_ids: _,
+            inflight: _,
+        } = trial;
+        self.permits = permits;
+        self.preparations = preparations;
+        self.executions = executions;
+        self.execution_receipts = execution_receipts;
+        self.required_bindings = required_bindings;
     }
 }
 
@@ -1736,11 +1760,7 @@ pub(crate) async fn handle_snapshot(
             Arc::new(result.sealed_state.clone()),
         );
     }
-    state.required_bindings = next.required_bindings;
-    state.preparations = next.preparations;
-    state.executions = next.executions;
-    state.execution_receipts = next.execution_receipts;
-    state.permits = next.permits;
+    state.commit(next);
     if let Some((bytes, charge)) = retained_reply {
         state.cached_response_bytes += bytes;
         state

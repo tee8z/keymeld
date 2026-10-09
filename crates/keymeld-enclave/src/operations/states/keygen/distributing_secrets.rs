@@ -544,7 +544,10 @@ fn invalid_registration(message: impl Into<String>) -> EnclaveError {
 #[cfg(test)]
 mod registration_tests {
     use super::*;
-    use crate::operations::{registration::tests::fixture, session_context::SessionContext};
+    use crate::operations::{
+        registration::tests::fixture,
+        session_context::{ProcessedCommand, SessionContext},
+    };
     use keymeld_core::protocol::{AddParticipantsBatchCommand, InitKeygenSessionCommand};
     use std::collections::BTreeMap;
 
@@ -656,9 +659,9 @@ mod registration_tests {
         let aggregate = session.extract_keygen_data().unwrap().aggregate_public_key;
         assert!(!aggregate.is_empty());
         let saved_command = keymeld_core::protocol::Command::new(registration.clone());
-        session
-            .session_context
-            .add_processed_command(saved_command.clone().try_into().unwrap());
+        session.session_context.add_processed_command(
+            ProcessedCommand::new(saved_command.command_id, &saved_command.command).unwrap(),
+        );
         let sessions = Arc::new(dashmap::DashMap::new());
         sessions.insert(session_id.clone(), session);
         let queue = crate::queue::Queue::new(sessions.clone());

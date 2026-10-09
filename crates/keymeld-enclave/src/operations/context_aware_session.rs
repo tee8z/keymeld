@@ -35,7 +35,8 @@ impl ContextAwareSession {
         }
     }
 
-    pub fn process(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
+    /// Skip exact retries first, as the queue does: dispatch does not check them.
+    pub(crate) fn process(&mut self, cmd: &EnclaveCommand) -> Result<(), EnclaveError> {
         self.validate_command(cmd)?;
         self.process_validated(cmd)
     }

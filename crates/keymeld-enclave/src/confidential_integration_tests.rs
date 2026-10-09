@@ -1,6 +1,7 @@
 //! Exercise the SDK's real native MuSig2 orchestration through an opaque HTTP
 //! relay. This is an in-process cryptographic test, not a Nitro attestation test.
 use super::*;
+use crate::operations::SessionContext;
 use axum::{
     extract::{Path, State},
     routing::{get, post},
@@ -17,6 +18,7 @@ use keymeld_core::{
 use keymeld_sdk::{
     confidential_session::{
         CheckpointFuture, ConfidentialCheckpoint, ConfidentialJournal, ConfidentialSession,
+        JournalEntryRevision,
     },
     AuthorizationCredentials, BatchSigningItem, KeyMeldClient, SessionCredentials, UserCredentials,
 };
@@ -93,10 +95,14 @@ pub(super) async fn relay(
     Ok(Json(*response))
 }
 
+/// Saves the way a writer that reuses unchanged entries does, and fails the test when an
+/// entry changed under the same checkpoint revision: that writer would persist it stale.
 #[derive(Default)]
 pub(super) struct Checkpoint {
     pub(super) fail_next: AtomicBool,
     pub(super) saved: Mutex<Option<String>>,
+    /// Each entry's JSON from the last durable save, by collection and key.
+    entries: Mutex<BTreeMap<(String, String), (JournalEntryRevision, serde_json::Value)>>,
 }
 impl ConfidentialCheckpoint for Checkpoint {
     fn save<'a>(&'a self, journal: &'a ConfidentialJournal) -> CheckpointFuture<'a> {
@@ -106,7 +112,35 @@ impl ConfidentialCheckpoint for Checkpoint {
                     "simulated durable storage failure".into(),
                 ));
             }
+            let encoded = serde_json::to_value(journal)?;
+            let mut rebuilt = encoded.clone();
+            let mut entries = BTreeMap::new();
+            {
+                let cached = self.entries.lock().unwrap();
+                for collection in ["commands", "signing_batches"] {
+                    let values = rebuilt[collection]
+                        .as_object_mut()
+                        .expect("journal collections are maps");
+                    for (key, value) in values.iter_mut() {
+                        let revision = journal
+                            .checkpoint_revision(collection, key)
+                            .expect("a saved entry has a revision");
+                        let id = (collection.to_string(), key.clone());
+                        if let Some((previous, cached_value)) = cached.get(&id) {
+                            if *previous == revision {
+                                *value = cached_value.clone();
+                            }
+                        }
+                        entries.insert(id, (revision, value.clone()));
+                    }
+                }
+            }
+            assert_eq!(
+                rebuilt, encoded,
+                "a journal entry changed without a new checkpoint revision"
+            );
             *self.saved.lock().unwrap() = Some(serde_json::to_string(journal)?);
+            *self.entries.lock().unwrap() = entries;
             Ok(())
         })
     }
@@ -385,6 +419,17 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
             enclave.handle_command(raw.clone()).await.is_err(),
             "legacy raw signing bypassed private policy"
         );
+        // A reset whose save failed keeps the rejection, and later saves keep it unchanged.
+        checkpoint.fail_next.store(true, Ordering::SeqCst);
+        assert!(session
+            .clear_rejected_command(&stage, protected_enclave)
+            .await
+            .is_err());
+        assert!(session
+            .sign_prepared_batch(&signing_id, 300, &[])
+            .await
+            .is_err());
+        assert!(session.command_was_rejected(&stage, protected_enclave));
         session
             .clear_rejected_command(&stage, protected_enclave)
             .await
@@ -584,6 +629,30 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         }
         server.abort();
         return;
+    }
+    // The coordinator's enclave ran each round once, and kept one retry entry for each,
+    // under the command id that the journal sent.
+    {
+        let coordinator = state.operators.lock().unwrap()[&EnclaveId::new(1)].clone();
+        let signing = coordinator.sessions.get(&signing_id).unwrap();
+        let SessionContext::Signing(context) = &signing.session_context else {
+            panic!("expected a signing session")
+        };
+        let kept: Vec<_> = context
+            .command_history
+            .iter()
+            .map(|processed| processed.command_id)
+            .collect();
+        let sent: Vec<_> = ["nonces", "partials", "final"]
+            .into_iter()
+            .map(|round| {
+                session
+                    .recorded_command(&format!("sign/{signing_id}/{round}"), EnclaveId::new(1))
+                    .unwrap()
+                    .command_id
+            })
+            .collect();
+        assert_eq!(kept, sent);
     }
     let unfinished = SessionId::new_v7();
     session

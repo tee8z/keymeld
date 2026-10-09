@@ -7,7 +7,6 @@
 //!               -> GeneratingPartialSignatures -> CollectingPartialSignatures
 //!               -> FinalizingSignature -> Completed
 
-use crate::operations::session_context::ProcessedCommand;
 use crate::operations::states::{keygen, signing, KeygenStatus, SigningStatus};
 use crate::operations::{EnclaveSharedContext, KeygenSessionContext, SigningSessionContext};
 use keymeld_core::identifiers::SessionId;
@@ -153,12 +152,6 @@ impl SigningStatus {
             self, signing_cmd
         );
 
-        if signing_ctx.check_command_idempotency(cmd)? {
-            debug!("Command already processed for session {}", session_id);
-            return Ok(self);
-        }
-
-        let processed = ProcessedCommand::new(uuid::Uuid::now_v7(), cmd)?;
         let result = match (self, signing_cmd) {
             // Initialized + InitSession => GeneratingNonces
             (SigInitialized(s), SigInitSession(c)) => s.init_session(c, signing_ctx, enclave_ctx),
@@ -201,17 +194,13 @@ impl SigningStatus {
             (state, cmd) => return Err(invalid_transition(&state, cmd, &session_id)),
         };
 
-        result
-            .inspect(|_| {
-                signing_ctx.add_processed_command(processed);
-            })
-            .or_else(|e| {
-                warn!("Signing session {} failed: {}", session_id, e);
-                Ok(SigningStatus::Failed(signing::Failed::new(
-                    session_id,
-                    created_at,
-                    e.to_string(),
-                )))
-            })
+        result.or_else(|e| {
+            warn!("Signing session {} failed: {}", session_id, e);
+            Ok(SigningStatus::Failed(signing::Failed::new(
+                session_id,
+                created_at,
+                e.to_string(),
+            )))
+        })
     }
 }
