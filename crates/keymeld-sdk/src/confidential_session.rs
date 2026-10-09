@@ -35,6 +35,26 @@ use uuid::Uuid;
 
 const MAX_JOURNAL_COMMANDS: usize = 4096;
 
+/// An in-process identity for one unchanged checkpoint entry. It contains no
+/// protocol data and is never persisted. Clones share it; deserialization and
+/// mutations create a fresh identity. Holding it prevents allocation reuse
+/// from making a later entry compare equal to an older one.
+#[derive(Clone, Default)]
+pub struct JournalEntryRevision(std::sync::Arc<()>);
+
+impl PartialEq for JournalEntryRevision {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for JournalEntryRevision {}
+
+impl std::fmt::Debug for JournalEntryRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JournalEntryRevision(..)")
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub type CheckpointFuture<'a> = Pin<Box<dyn Future<Output = Result<(), SdkError>> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
@@ -48,13 +68,34 @@ pub trait ConfidentialCheckpoint: Send + Sync {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct JournalEntry {
+    #[serde(skip)]
+    revision: JournalEntryRevision,
     input_commitment: [u8; 32],
     request: PreparedConfidentialCommand,
     outcome: Option<Outcome>,
 }
 
+impl JournalEntry {
+    fn record_outcome(&mut self, outcome: &Outcome) {
+        // A retry passes back this same saved outcome. Avoid invalidating an
+        // unchanged entry, while newly authenticated results get a new identity.
+        if self.outcome.is_none() {
+            self.revision = JournalEntryRevision::default();
+            self.outcome = Some(outcome.clone());
+        }
+    }
+
+    fn clear_outcome(&mut self) {
+        if self.outcome.take().is_some() {
+            self.revision = JournalEntryRevision::default();
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct SavedBatch {
+    #[serde(skip)]
+    revision: JournalEntryRevision,
     input_commitment: [u8; 32],
     items: Vec<EnclaveBatchItem>,
 }
@@ -73,6 +114,22 @@ pub struct ConfidentialJournal {
 }
 
 impl ConfidentialJournal {
+    /// Identity of an entry in the serialized `commands` or `signing_batches`
+    /// map. A checkpoint writer can reuse that entry's authenticated encoding
+    /// while this identity compares equal. Cache only after durable commit,
+    /// scope caches to the same session and encryption key, and keep accounting
+    /// for reused entries when applying the reconstructed-state size limit.
+    pub fn checkpoint_revision(&self, collection: &str, key: &str) -> Option<JournalEntryRevision> {
+        match collection {
+            "commands" => self.commands.get(key).map(|entry| entry.revision.clone()),
+            "signing_batches" => self
+                .signing_batches
+                .get(&SessionId::parse(key).ok()?)
+                .map(|entry| entry.revision.clone()),
+            _ => None,
+        }
+    }
+
     pub fn recorded_command(&self, stage: &str, enclave: EnclaveId) -> Option<&Command> {
         self.commands
             .get(&format!("{stage}/{}", enclave.as_u32()))
@@ -241,6 +298,7 @@ impl<'a> ConfidentialSession<'a> {
             self.journal.commands.insert(
                 key.clone(),
                 JournalEntry {
+                    revision: JournalEntryRevision::default(),
                     input_commitment: commitment,
                     request,
                     outcome: None,
@@ -295,11 +353,12 @@ impl<'a> ConfidentialSession<'a> {
         // the first error. A peer's transport failure must not discard successes.
         for ((_, key), result) in keys.iter().zip(&results) {
             if let Ok(outcome) = result {
-                self.journal
+                let entry = self
+                    .journal
                     .commands
                     .get_mut(key)
-                    .expect("recorded command")
-                    .outcome = Some(outcome.clone());
+                    .expect("recorded command");
+                entry.record_outcome(outcome);
             }
         }
         self.checkpoint.save(self.journal).await?;
@@ -492,7 +551,7 @@ impl<'a> ConfidentialSession<'a> {
                     // Execute restores its sealed preparation and binding before
                     // reinstalling effects. Retain Bind/Prepare outputs: repeating
                     // Prepare could otherwise create a different external invoice.
-                    saved.outcome = None;
+                    saved.clear_outcome();
                 }
             }
             self.checkpoint.save(self.journal).await?;
@@ -1076,6 +1135,7 @@ impl<'a> ConfidentialSession<'a> {
             self.journal.signing_batches.insert(
                 session.clone(),
                 SavedBatch {
+                    revision: JournalEntryRevision::default(),
                     input_commitment: commitment,
                     items: batch,
                 },
@@ -1299,4 +1359,103 @@ pub fn decrypt_batch_results(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod checkpoint_revision_tests {
+    use super::*;
+    use keymeld_core::confidential::{ConfidentialRequest, EnclaveEnvelope};
+
+    fn journal() -> ConfidentialJournal {
+        let envelope = EnclaveEnvelope {
+            transport_version: 1,
+            destination_enclave: EnclaveId::new(1),
+            opaque_route_id: Uuid::now_v7(),
+            correlation_id: "ab".repeat(32),
+            ciphertext: "opaque test data".into(),
+        };
+        let request = ConfidentialRequest {
+            header: envelope.header(),
+            enclave_public_key: vec![2; 33],
+            enclave_key_epoch: 1,
+            authority_public_key: vec![3; 33],
+            response_public_key: vec![4; 33],
+            command: Command::new(EnclaveCommand::System(SystemCommand::Ping)),
+            request_nonce: [0; 32],
+            signature: vec![0; 64],
+        };
+        serde_json::from_value(serde_json::json!({
+            "commands": {"ping/1": {
+                "input_commitment": vec![0; 32],
+                "request": {"envelope": envelope, "request": request}, "outcome": null,
+            }},
+            "signing_batches": {SessionId::new_v7().to_string(): {
+                "input_commitment": vec![0; 32], "items": [],
+            }},
+            "opaque_route_id": null, "aborted_signing_sessions": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn clones_share_revisions_but_reloads_and_replacements_do_not() {
+        let original = journal();
+        let clone = original.clone();
+        let json = serde_json::to_value(&original).unwrap();
+        let restored: ConfidentialJournal = serde_json::from_value(json.clone()).unwrap();
+        assert!(!json.to_string().contains("revision"));
+        for (collection, key) in [
+            ("commands", "ping/1".to_string()),
+            (
+                "signing_batches",
+                original.signing_batches.keys().next().unwrap().to_string(),
+            ),
+        ] {
+            let revision = original.checkpoint_revision(collection, &key).unwrap();
+            assert_eq!(
+                Some(revision.clone()),
+                clone.checkpoint_revision(collection, &key)
+            );
+            assert_ne!(
+                Some(revision),
+                restored.checkpoint_revision(collection, &key)
+            );
+        }
+        assert_ne!(
+            original.checkpoint_revision("commands", "ping/1"),
+            journal().checkpoint_revision("commands", "ping/1")
+        );
+        assert_eq!(original.checkpoint_revision("commands", "missing"), None);
+        assert_eq!(
+            original.checkpoint_revision("signing_batches", "invalid"),
+            None
+        );
+        assert_eq!(original.checkpoint_revision("unknown", "ping/1"), None);
+        assert_eq!(serde_json::to_value(restored).unwrap(), json);
+    }
+
+    #[test]
+    fn outcome_changes_invalidate_only_the_changed_copy() {
+        let original = journal();
+        let before = original.checkpoint_revision("commands", "ping/1").unwrap();
+        let mut modified = original.clone();
+        let entry = modified.commands.get_mut("ping/1").unwrap();
+        let outcome = Outcome::new(
+            entry.request.request().command.clone(),
+            EnclaveOutcome::System(SystemOutcome::Pong),
+        );
+        entry.clear_outcome();
+        assert_eq!(before, entry.revision);
+        entry.record_outcome(&outcome);
+        let recorded = entry.revision.clone();
+        assert_ne!(before, recorded);
+        entry.record_outcome(&outcome);
+        assert_eq!(recorded, entry.revision);
+        entry.clear_outcome();
+        assert_ne!(recorded, entry.revision);
+        assert_eq!(
+            Some(before),
+            original.checkpoint_revision("commands", "ping/1")
+        );
+    }
 }
