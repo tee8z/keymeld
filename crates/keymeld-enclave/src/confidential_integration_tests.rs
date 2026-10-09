@@ -724,7 +724,7 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         let budget = operator.response_budget().unwrap();
         let held = budget.snapshot();
         let mut pressure = budget.reserve(held.limit - held.used).unwrap();
-        assert!(pressure.retain(held.limit - held.used));
+        pressure.retain(held.limit - held.used);
         pressure
     };
     let pressure_expiry = operator.memory_aware_expiry(&expiry);

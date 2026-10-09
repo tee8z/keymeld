@@ -91,12 +91,24 @@ enum CachedRequest {
     Executed { prepared: Arc<PreparedAction> },
 }
 
+/// Charged per cached reply beyond its payloads and signature: an estimate of its receipt
+/// context and cache entry.
+const CACHED_REPLY_OVERHEAD_BYTES: usize = 4096;
+/// Enclave replies carry a compact secp256k1 ECDSA signature.
+const REPLY_SIGNATURE_BYTES: usize = 64;
+// `Payload` bounds both payloads, so every cached reply fits the reservation that Bind and
+// Prepare take before they run, and retaining it never needs more budget.
+const _: () = assert!(
+    2 * escrow::MAX_PAYLOAD_BYTES + REPLY_SIGNATURE_BYTES + CACHED_REPLY_OVERHEAD_BYTES
+        <= MAX_CACHED_RESPONSE_BYTES
+);
+
 /// The bytes a cached reply holds against the preparation-reply budget.
 fn cached_reply_bytes(reply: &EscrowResponse) -> usize {
     reply.output.as_bytes().len()
         + reply.sealed_state.as_bytes().len()
-        + reply.enclave_signature.len()
-        + 4096
+        + REPLY_SIGNATURE_BYTES
+        + CACHED_REPLY_OVERHEAD_BYTES
 }
 
 impl SessionState {
@@ -977,6 +989,7 @@ struct Reservation {
     state: Arc<EscrowSessionState>,
     key: (UserId, String),
     request_key: (UserId, uuid::Uuid),
+    /// The reply reservation that Bind and Prepare take. Execute and recovery take none.
     cache: Option<ResponseCharge>,
 }
 impl Drop for Reservation {
@@ -1807,19 +1820,11 @@ pub(crate) async fn handle_snapshot(
     {
         return Err(invalid("Escrow preparation reservation changed"));
     }
-    let retained_reply = if command.context.operation != Operation::Execute {
+    let retained_reply = reservation.cache.take().map(|mut charge| {
         let bytes = cached_reply_bytes(&result);
-        let mut charge = reservation
-            .cache
-            .take()
-            .ok_or_else(|| invalid("Missing preparation reply reservation"))?;
-        if !charge.retain(bytes) {
-            return Err(invalid("Preparation reply exceeds its wire reservation"));
-        }
-        Some((bytes, charge))
-    } else {
-        None
-    };
+        charge.retain(bytes);
+        (bytes, charge)
+    });
     // Check all transitions before any commit, so a failed install has no effect.
     let mut next = state.transition();
     if let Some(binding) = new_binding {

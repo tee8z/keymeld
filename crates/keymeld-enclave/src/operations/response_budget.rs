@@ -93,12 +93,11 @@ pub(crate) struct ResponseCharge {
 }
 impl ResponseCharge {
     /// Shrink the reservation to the reply it now retains. From here until the charge
-    /// drops, its bytes count toward pressure.
-    /// Payload bounds guarantee this is at most the admission reservation.
-    pub(crate) fn retain(&mut self, bytes: usize) -> bool {
-        if bytes > self.bytes {
-            return false;
-        }
+    /// drops, its bytes count toward pressure. Callers reserve for their largest reply,
+    /// which the escrow engine checks at compile time, so `bytes` never exceeds it.
+    pub(crate) fn retain(&mut self, bytes: usize) {
+        debug_assert!(bytes <= self.bytes, "a reply outgrew its reservation");
+        let bytes = bytes.min(self.bytes);
         let released = self.bytes - bytes;
         self.budget.used.fetch_sub(released, Ordering::AcqRel);
         if self.retained {
@@ -108,7 +107,6 @@ impl ResponseCharge {
             self.retained = true;
         }
         self.bytes = bytes;
-        true
     }
 }
 impl Drop for ResponseCharge {
@@ -138,8 +136,7 @@ mod tests {
                 rejected: 1
             }
         );
-        assert!(first.retain(10));
-        assert!(!first.retain(11));
+        first.retain(10);
         assert_eq!(budget.snapshot().used, 50);
         assert_eq!(budget.snapshot().retained, 10);
         drop(second);
@@ -156,11 +153,11 @@ mod tests {
             !budget.pressured(),
             "a full budget of pending reservations drains without releasing sessions"
         );
-        assert!(pending.retain(74));
+        pending.retain(74);
         assert!(!budget.pressured());
         let mut more = budget.reserve(26).unwrap();
         assert!(!budget.pressured());
-        assert!(more.retain(1));
+        more.retain(1);
         assert!(budget.pressured(), "75 % of the limit is retained");
         drop(pending);
         assert!(!budget.pressured());

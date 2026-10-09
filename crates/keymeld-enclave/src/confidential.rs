@@ -1061,7 +1061,7 @@ mod tests {
             configured.idle_keygen,
             "pending reservations drain on their own"
         );
-        assert!(pressure.retain(limit));
+        pressure.retain(limit);
         let expiry = operator.memory_aware_expiry(&configured);
         assert_eq!(expiry.idle_keygen, PRESSURED_IDLE_KEYGEN);
         assert_eq!(expiry.finished_signing, configured.finished_signing);
