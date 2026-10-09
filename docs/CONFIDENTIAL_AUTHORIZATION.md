@@ -81,3 +81,16 @@ Verifier capability queries expose deployment descriptors and bounded capability
 They are not an authenticated application-membership system.
 
 See [Generic escrow](ESCROW.md) for the current protocol.
+
+## Incremental application checkpoints
+
+`ConfidentialJournal::checkpoint_revision` identifies an unchanged command or signing batch in the current process.
+Cloning a journal preserves these opaque identities.
+Deserialization creates new identities, and changing a saved outcome invalidates its identity.
+The identities contain no protocol data and are absent from serialized journals.
+
+An application can reuse a committed entry encoding while its identity matches.
+Keep the cache within one session and encryption key.
+Advance it only after the checkpoint transaction commits.
+Count reused entries when enforcing the reconstructed state limit, and discard entries removed from the journal.
+The application must still persist and authenticate the complete checkpoint manifest before transmitting commands.
