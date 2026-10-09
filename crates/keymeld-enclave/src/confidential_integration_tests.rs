@@ -627,6 +627,22 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
                 );
             }
         }
+        // Releasing the protected keygen session returns the charges its cached
+        // replies held, not only what the test reserved itself.
+        #[cfg(feature = "escrow")]
+        {
+            let enclave = state.operators.lock().unwrap()[&protected_enclave].clone();
+            let budget = enclave.response_budget().unwrap();
+            let retained = budget.snapshot().retained;
+            assert!(
+                retained > 0,
+                "the binding reply stays cached for exact retries"
+            );
+            let expiry = SessionExpiry::default();
+            let expired = enclave.expire_sessions(&expiry, Instant::now() + expiry.idle_keygen);
+            assert_eq!(expired.keygen, 1);
+            assert_eq!(budget.snapshot().used, 0);
+        }
         server.abort();
         return;
     }
