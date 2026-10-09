@@ -816,6 +816,12 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
         let (prepared, attempt) = prepare(&f, permission);
         candidates.push((permission, prepared, attempt));
     }
+    // Executing a preparation releases that preparation's cached reply.
+    let released: usize = candidates
+        .iter()
+        .map(|(_, prepared, _)| cached_reply_bytes(prepared))
+        .sum();
+    let unrelated = bind(&f);
     let escrow_state = &f
         .completed
         .musig_processor()
@@ -831,8 +837,10 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
                 (f.user.clone(), Uuid::now_v7()),
                 (
                     [0; 32],
-                    candidates[0].1.clone(),
-                    f.context.response_budget.reserve(0).unwrap(),
+                    CachedRequest::Reply {
+                        reply: Box::new(unrelated.clone()),
+                        charge: f.context.response_budget.reserve(0).unwrap(),
+                    },
                 ),
             );
         }
@@ -891,7 +899,10 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
     }
     let state = escrow_state.inner.lock().unwrap();
     assert_eq!(state.requests.len(), cached_count);
-    assert_eq!(state.cached_response_bytes, MAX_REQUEST_CACHE_BYTES);
+    assert_eq!(
+        state.cached_response_bytes,
+        MAX_REQUEST_CACHE_BYTES - released
+    );
     assert_eq!(state.execution_receipts.len(), 3);
     assert_eq!(state.executions.len(), 3);
     assert_eq!(state.permits.len(), 1);

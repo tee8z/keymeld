@@ -69,14 +69,68 @@ struct SessionState {
     executions: BTreeMap<(UserId, String), Arc<ExecutedAction>>,
     // One canonical successful receipt per permission, never one per retry.
     execution_receipts: BTreeMap<(UserId, String), Arc<Payload>>,
-    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], EscrowResponse, ResponseCharge)>,
+    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], CachedRequest)>,
     cached_response_bytes: usize,
     inflight_request_ids: BTreeMap<(UserId, uuid::Uuid), [u8; 32]>,
     required_bindings: BTreeMap<UserId, Arc<Binding>>,
     inflight: BTreeMap<(UserId, String), ([u8; 32], Arc<tokio::sync::Notify>)>,
 }
 
+/// What an exact retry of a Bind or Prepare request is answered from.
+#[derive(Debug)]
+enum CachedRequest {
+    /// The signed reply, charged to the shared budget while it is cached.
+    Reply {
+        reply: Box<EscrowResponse>,
+        charge: ResponseCharge,
+    },
+    /// A Prepare whose receipt has executed. Its reply and charge are released, and a
+    /// retry is answered with this preparation sealed again, never prepared again: a
+    /// verifier asked again could prepare a different action, such as a second invoice.
+    /// The preparation is shared with the ledger, not copied.
+    Executed { prepared: Arc<PreparedAction> },
+}
+
+/// The bytes a cached reply holds against the preparation-reply budget.
+fn cached_reply_bytes(reply: &EscrowResponse) -> usize {
+    reply.output.as_bytes().len()
+        + reply.sealed_state.as_bytes().len()
+        + reply.enclave_signature.len()
+        + 4096
+}
+
 impl SessionState {
+    /// Release the cached reply of the Prepare whose receipt `executed` consumed. That
+    /// receipt is the reply's own sealed state: sealing is randomized, so the bytes name
+    /// exactly one reply, and a receipt sealed again or recovered matches none.
+    fn release_executed_reply(
+        &mut self,
+        user: &UserId,
+        executed: &Payload,
+        prepared: &Arc<PreparedAction>,
+    ) {
+        for ((owner, _), (_, cached)) in &mut self.requests {
+            let consumed = match cached {
+                CachedRequest::Reply { reply, .. } => reply.sealed_state == *executed,
+                CachedRequest::Executed { .. } => false,
+            };
+            if owner != user || !consumed {
+                continue;
+            }
+            let released = std::mem::replace(
+                cached,
+                CachedRequest::Executed {
+                    prepared: prepared.clone(),
+                },
+            );
+            if let CachedRequest::Reply { reply, charge } = released {
+                self.cached_response_bytes -= cached_reply_bytes(&reply);
+                // Returns the reply's share of the enclave budget.
+                drop(charge);
+            }
+        }
+    }
+
     /// Trial updates keep payloads shared until all checks succeed. Policy
     /// bindings, the cache and in-flight reservations remain owned by the
     /// current live state.
@@ -1233,26 +1287,44 @@ pub(crate) async fn handle_snapshot(
                     "Successful execution request identity was reused with changed inputs",
                 ));
             }
-            if let Some((digest, reply, _charge)) = state.requests.get(&request_key) {
+            if let Some((digest, cached)) = state.requests.get(&request_key) {
                 if *digest != request_digest {
                     return Err(invalid("Escrow request ID was reused with changed inputs"));
                 }
-                if reply.context.enclave_key_epoch == key_epoch {
-                    return Ok(reply.clone());
-                }
-                let mut receipt_context = reply.context.clone();
-                receipt_context.enclave_key_epoch = key_epoch;
-                let secret = Zeroizing::new(
-                    <[u8; 32]>::try_from(context.private_key.as_slice())
-                        .map_err(|_| invalid("Invalid enclave signing key"))?,
+                let prepared = match cached {
+                    CachedRequest::Reply { reply, .. }
+                        if reply.context.enclave_key_epoch == key_epoch =>
+                    {
+                        return Ok(reply.as_ref().clone());
+                    }
+                    CachedRequest::Reply { reply, .. } => {
+                        let mut receipt_context = reply.context.clone();
+                        receipt_context.enclave_key_epoch = key_epoch;
+                        let secret = Zeroizing::new(
+                            <[u8; 32]>::try_from(context.private_key.as_slice())
+                                .map_err(|_| invalid("Invalid enclave signing key"))?,
+                        );
+                        return EscrowResponse::sign(
+                            receipt_context,
+                            reply.output.clone(),
+                            reply.sealed_state.clone(),
+                            &secret,
+                        )
+                        .map_err(invalid);
+                    }
+                    CachedRequest::Executed { prepared } => prepared.clone(),
+                };
+                // Sealing deflates the whole state, so it runs without the session lock.
+                drop(state);
+                return response(
+                    context,
+                    command,
+                    key_epoch,
+                    prepared.output.clone(),
+                    SealedState::Prepared {
+                        prepared: prepared.as_ref().clone(),
+                    },
                 );
-                return EscrowResponse::sign(
-                    receipt_context,
-                    reply.output.clone(),
-                    reply.sealed_state.clone(),
-                    &secret,
-                )
-                .map_err(invalid);
             }
             if command.context.operation != Operation::Execute
                 && state.requests.keys().filter(|(id, _)| id == user).count()
@@ -1325,6 +1397,8 @@ pub(crate) async fn handle_snapshot(
             ))
         })
         .collect::<Result<BTreeMap<_, _>, EnclaveError>>()?;
+    // The Prepare receipt that this Execute consumed, if it was one.
+    let mut consumed_receipt = None;
     let (result, new_binding, new_preparation, new_execution) = match command.context.operation {
         Operation::Bind => {
             let request: BindEscrowRequest =
@@ -1611,6 +1685,7 @@ pub(crate) async fn handle_snapshot(
                     let execution_digest =
                         verify_execution(context, manifest, policy, &prepared, &request.proof)
                             .await?;
+                    consumed_receipt = Some(request.prepared_receipt);
                     let old = metadata
                         .escrow_state
                         .inner
@@ -1733,10 +1808,7 @@ pub(crate) async fn handle_snapshot(
         return Err(invalid("Escrow preparation reservation changed"));
     }
     let retained_reply = if command.context.operation != Operation::Execute {
-        let bytes = result.output.as_bytes().len()
-            + result.sealed_state.as_bytes().len()
-            + result.enclave_signature.len()
-            + 4096;
+        let bytes = cached_reply_bytes(&result);
         let mut charge = reservation
             .cache
             .take()
@@ -1761,6 +1833,9 @@ pub(crate) async fn handle_snapshot(
             command.context.operation == Operation::Execute,
         )?;
     }
+    let executed_key = new_execution
+        .as_ref()
+        .map(|executed| (user.clone(), executed.prepared.action_id.clone()));
     if let Some(executed) = new_execution {
         install_execution(&mut next, &executed, policy)?;
         next.execution_receipts.insert(
@@ -1771,9 +1846,22 @@ pub(crate) async fn handle_snapshot(
     state.commit(next);
     if let Some((bytes, charge)) = retained_reply {
         state.cached_response_bytes += bytes;
-        state
-            .requests
-            .insert(request_key, (request_digest, result.clone(), charge));
+        state.requests.insert(
+            request_key,
+            (
+                request_digest,
+                CachedRequest::Reply {
+                    reply: Box::new(result.clone()),
+                    charge,
+                },
+            ),
+        );
+    }
+    // Execute installed the preparation it executed, so the ledger now holds it.
+    if let (Some(receipt), Some(key)) = (&consumed_receipt, &executed_key) {
+        if let Some(prepared) = state.preparations.get(key).cloned() {
+            state.release_executed_reply(user, receipt, &prepared);
+        }
     }
 
     Ok(result)

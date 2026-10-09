@@ -1,6 +1,7 @@
 //! Shared preparation-reply admission. Charged reservations survive HTTP/task
 //! cancellation until their owner drops, and retained replies keep their charge
-//! until the session is released. Execution/recovery does not use this budget.
+//! until their preparation executes or their session is released.
+//! Execution/recovery does not use this budget.
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
@@ -9,9 +10,9 @@ use std::sync::{
 const DEFAULT_LIMIT: usize = 256 * 1024 * 1024;
 /// Retained replies at or above this share of the limit, in percent, put the budget under
 /// pressure, and idle keygen sessions are then released sooner (see
-/// [`crate::confidential::PRESSURED_IDLE_KEYGEN`]). Only releasing sessions frees retained
-/// replies. Pending reservations do not count: they drain on their own when their
-/// preparations finish or are cancelled, so they never shorten an exact-retry window.
+/// [`crate::confidential::PRESSURED_IDLE_KEYGEN`]), freeing their replies. Pending
+/// reservations do not count: they drain on their own when their preparations finish or
+/// are cancelled, so they never shorten an exact-retry window.
 const PRESSURE_PERCENT: u128 = 75;
 
 #[derive(Debug)]

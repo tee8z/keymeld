@@ -1303,3 +1303,93 @@ fn verifier_authorized_musig_signing_repeats_in_fresh_sessions() {
         assert_eq!(signing_session_id, session);
     }
 }
+
+#[tokio::test]
+async fn an_executed_preparation_releases_its_reply_and_exact_retries_are_never_prepared_again() {
+    let mut f = fixture_with_grants(
+        true,
+        true,
+        false,
+        false,
+        vec![(
+            "sign",
+            escrow::ActionGrant {
+                preparation: escrow::PreparationPolicy::Single,
+                repetition: escrow::Repetition::VerifierAuthorizedAttempts,
+                unbound: false,
+                condition: Condition::VerifierRule {
+                    rule: "document_approved".into(),
+                },
+                operation: escrow::Permission::Sign,
+            },
+        )],
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    f.context.escrow_verifiers = Arc::new(
+        VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
+            calls: calls.clone(),
+            execution_gate: None,
+            reject_recovery: false,
+        })])
+        .unwrap(),
+    );
+    let budget = f.context.response_budget.clone();
+    let binding = super::super::handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .await
+        .unwrap()
+        .sealed_state;
+    let bound = budget.snapshot();
+    // The second attempt supersedes the first in the ledger.
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let attempt = ActionAttempt {
+            attempt_id: Uuid::now_v7(),
+            signing_session_id: Some(SessionId::new_v7()),
+        };
+        let prepare = prepare_command(&f, binding.clone(), "sign", &attempt, &signing_action(&f));
+        let prepared = super::super::handle(&f.completed, &f.context, &prepare, 1)
+            .await
+            .unwrap();
+        assert!(
+            budget.snapshot().retained > bound.retained,
+            "a pending preparation keeps its reply for an exact retry"
+        );
+        let execute = execute_command(
+            &f,
+            "sign",
+            &attempt,
+            prepared.sealed_state.clone(),
+            approved(),
+        );
+        super::super::handle(&f.completed, &f.context, &execute, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            budget.snapshot(),
+            bound,
+            "execution released the reply and its charge"
+        );
+        attempts.push((prepare, prepared));
+    }
+    // Asking the verifier again could prepare a different action. Each exact retry is
+    // answered with the preparation its reply sealed, even once superseded.
+    for (prepare, original) in &attempts {
+        let retried = super::super::handle(&f.completed, &f.context, prepare, 1)
+            .await
+            .unwrap();
+        retried
+            .verify(&original.context, &f.context.public_key)
+            .unwrap();
+        assert_eq!(retried.output, original.output);
+        assert_eq!(
+            unseal_prepared(&f.context, &retried.sealed_state),
+            unseal_prepared(&f.context, &original.sealed_state)
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        budget.snapshot(),
+        bound,
+        "an answer from the ledger is not cached again"
+    );
+}

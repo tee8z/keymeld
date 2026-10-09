@@ -55,6 +55,7 @@ Preparation receipts allow separate permissions to share one authenticated appli
 The engine independently checks each permission and release recipient.
 
 Exact retries preserve request identities and ciphertexts.
+Once a preparation executes, the enclave stops caching its Prepare reply: an exact retry is answered with that preparation sealed again and is never prepared again.
 Identical-scope signing repetition requires explicit participant consent and fresh signing sessions.
 Release permissions are single-use within the live ledger, with exact recovery retries.
 The signed `PreparationPolicy` separately controls replacement preparations.
