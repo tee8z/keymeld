@@ -12,7 +12,8 @@ categories.workspace = true
 [dependencies]
 # Use keymeld-core without default features (no networking) for WASM compatibility
 keymeld-core = { path = "../keymeld-core", default-features = false }
-serde = { workspace = true }
+# Journals share entries through Arc; JSON keeps the plain entry encoding.
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }

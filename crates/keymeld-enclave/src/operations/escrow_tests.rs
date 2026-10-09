@@ -1322,9 +1322,10 @@ fn preparation_reply_budget_is_shared_across_sessions_and_exact_retries_do_not_r
     assert_eq!(cached.output, reply.output);
     assert_eq!(budget.snapshot().0, retained);
     let next = bind_command(&second);
+    // Retryable, unlike a spent per-permission or per-session bound.
     assert!(matches!(
         handle(&second.completed, &second.context, &next, 1),
-        Err(EnclaveError::EscrowPreparationExhausted { .. })
+        Err(EnclaveError::EscrowPreparationBusy { .. })
     ));
     assert_eq!(budget.snapshot().0, retained);
     drop(first);

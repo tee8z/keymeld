@@ -20,6 +20,9 @@ pub enum SdkError {
     Internal(String),
     #[error("Escrow preparation capacity exhausted: {reason}")]
     EscrowPreparationExhausted { reason: String },
+    /// Retryable: the enclave prepared nothing because shared capacity was full.
+    #[error("Escrow preparation is busy; retry later: {reason}")]
+    EscrowPreparationBusy { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

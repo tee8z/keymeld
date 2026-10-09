@@ -48,6 +48,14 @@ fn preparation_exhausted(reason: impl Into<String>) -> EnclaveError {
     }
 }
 
+/// Clients retry this one: other sessions' replies and reservations fill the
+/// shared budget, and they drain without any action by this participant.
+fn preparation_busy(reason: impl Into<String>) -> EnclaveError {
+    EnclaveError::EscrowPreparationBusy {
+        reason: reason.into(),
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct EscrowSessionState {
     inner: Mutex<SessionState>,
@@ -1280,7 +1288,7 @@ pub(crate) async fn handle_snapshot(
                             .response_budget
                             .reserve(MAX_CACHED_RESPONSE_BYTES)
                             .ok_or_else(|| {
-                                preparation_exhausted(
+                                preparation_busy(
                                     "Enclave preparation response cache budget reached",
                                 )
                             })?,
