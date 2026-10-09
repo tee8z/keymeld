@@ -54,16 +54,60 @@ pub struct EscrowSessionState {
 #[derive(Debug, Default)]
 struct SessionState {
     bindings: BTreeMap<UserId, [u8; 32]>,
-    permits: BTreeMap<(SessionId, UserId), SigningPermit>,
-    preparations: BTreeMap<(UserId, String), PreparedAction>,
-    executions: BTreeMap<(UserId, String), ExecutedAction>,
+    permits: BTreeMap<(SessionId, UserId), Arc<SigningPermit>>,
+    preparations: BTreeMap<(UserId, String), Arc<PreparedAction>>,
+    executions: BTreeMap<(UserId, String), Arc<ExecutedAction>>,
     // One canonical successful receipt per permission, never one per retry.
-    execution_receipts: BTreeMap<(UserId, String), Payload>,
+    execution_receipts: BTreeMap<(UserId, String), Arc<Payload>>,
     requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], EscrowResponse)>,
     cached_response_bytes: usize,
     inflight_request_ids: BTreeMap<(UserId, uuid::Uuid), [u8; 32]>,
-    required_bindings: BTreeMap<UserId, Binding>,
+    required_bindings: BTreeMap<UserId, Arc<Binding>>,
     inflight: BTreeMap<(UserId, String), ([u8; 32], Arc<tokio::sync::Notify>)>,
+}
+
+impl SessionState {
+    /// Trial updates keep payloads shared until all checks succeed. The cache
+    /// and in-flight reservations remain owned by the current live state.
+    fn transition(&self) -> Self {
+        Self {
+            bindings: self.bindings.clone(),
+            permits: self.permits.clone(),
+            preparations: self.preparations.clone(),
+            executions: self.executions.clone(),
+            execution_receipts: self.execution_receipts.clone(),
+            required_bindings: self.required_bindings.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MemoryUsage {
+    pub response_bytes: usize,
+    pub preparations: usize,
+    pub executions: usize,
+    pub receipt_bytes: usize,
+    pub permits: usize,
+}
+
+impl EscrowSessionState {
+    /// Counts only; never clone or serialize state for diagnostics. A busy
+    /// state is reported unavailable rather than delaying protocol work.
+    pub(crate) fn memory_usage(&self) -> Option<MemoryUsage> {
+        let state = self.inner.try_lock().ok()?;
+        Some(MemoryUsage {
+            response_bytes: state.cached_response_bytes,
+            preparations: state.preparations.len(),
+            executions: state.executions.len(),
+            receipt_bytes: state
+                .execution_receipts
+                .values()
+                .map(|value| value.as_bytes().len())
+                .sum(),
+            permits: state.permits.len(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -642,7 +686,7 @@ fn install_preparation(
         }
     }
     if let Some(old) = state.preparations.get(&key) {
-        if old != prepared {
+        if old.as_ref() != prepared {
             let same_action = old.binding == prepared.binding && old.action == prepared.action;
             let successor = prepared.predecessor == Some(preparation_digest(old)?)
                 && old.generation.checked_add(1) == Some(prepared.generation)
@@ -663,7 +707,7 @@ fn install_preparation(
             }
         }
     }
-    state.preparations.insert(key, prepared.clone());
+    state.preparations.insert(key, Arc::new(prepared.clone()));
     Ok(())
 }
 
@@ -729,14 +773,18 @@ fn install_execution(
             policy_digest: prepared.binding.policy_digest,
             scope: scope.clone(),
         };
-        if state.permits.get(&key).is_some_and(|old| old != &permit) {
+        if state
+            .permits
+            .get(&key)
+            .is_some_and(|old| old.as_ref() != &permit)
+        {
             return Err(invalid(
                 "Escrow signing session already has a different authorization",
             ));
         }
-        state.permits.insert(key, permit);
+        state.permits.insert(key, Arc::new(permit));
     }
-    state.executions.insert(key, executed.clone());
+    state.executions.insert(key, Arc::new(executed.clone()));
     Ok(())
 }
 
@@ -826,13 +874,13 @@ fn validate_roster(processor: &MusigProcessor, binding: &Binding) -> Result<(), 
 
 fn install_binding(state: &mut SessionState, binding: &Binding) -> Result<(), EnclaveError> {
     if let Some(old) = state.required_bindings.get(&binding.context.user_id) {
-        if old != binding {
+        if old.as_ref() != binding {
             return Err(invalid("Escrow binding cannot be replaced"));
         }
     }
     state
         .required_bindings
-        .insert(binding.context.user_id.clone(), binding.clone());
+        .insert(binding.context.user_id.clone(), Arc::new(binding.clone()));
     Ok(())
 }
 
@@ -1388,7 +1436,7 @@ pub(crate) async fn handle_snapshot(
                     let fresh = grant.repetition == Repetition::VerifierAuthorizedAttempts
                         && old.binding == binding
                         && old.attempt.attempt_id != request.attempt.attempt_id;
-                    if !fresh && repeated.as_ref() != Some(old) {
+                    if !fresh && repeated.as_ref() != Some(old.as_ref()) {
                         return Err(invalid("Permission already prepared; retry original request or present its exact preparation"));
                     }
                 }
@@ -1534,7 +1582,7 @@ pub(crate) async fn handle_snapshot(
                             ));
                         }
                         if old.prepared == prepared && old.execution_digest == execution_digest {
-                            old
+                            old.as_ref().clone()
                         } else {
                             let output = execute_output(
                                 &prepared,
@@ -1583,7 +1631,7 @@ pub(crate) async fn handle_snapshot(
                         state
                             .execution_receipts
                             .get(&key)
-                            .map(|receipt| (old.clone(), receipt.clone()))
+                            .map(|receipt| (old.as_ref().clone(), receipt.as_ref().clone()))
                     })
             };
             let canonical_receipt = match existing_receipt {
@@ -1634,15 +1682,7 @@ pub(crate) async fn handle_snapshot(
         return Err(invalid("Escrow preparation reservation changed"));
     }
     // Check all transitions before any commit, so a failed install has no effect.
-    let mut next = SessionState {
-        bindings: state.bindings.clone(),
-        permits: state.permits.clone(),
-        preparations: state.preparations.clone(),
-        executions: state.executions.clone(),
-        execution_receipts: state.execution_receipts.clone(),
-        required_bindings: state.required_bindings.clone(),
-        ..Default::default()
-    };
+    let mut next = state.transition();
     if let Some(binding) = new_binding {
         install_binding(&mut next, &binding)?;
     }
@@ -1658,7 +1698,7 @@ pub(crate) async fn handle_snapshot(
         install_execution(&mut next, &executed, policy)?;
         next.execution_receipts.insert(
             (user.clone(), executed.prepared.action_id.clone()),
-            result.sealed_state.clone(),
+            Arc::new(result.sealed_state.clone()),
         );
     }
     state.required_bindings = next.required_bindings;

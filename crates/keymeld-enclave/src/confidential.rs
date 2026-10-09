@@ -224,6 +224,10 @@ pub(crate) struct ConfidentialDispatcher {
 }
 
 impl ConfidentialDispatcher {
+    pub(crate) fn reply_cache_bytes(&self) -> Option<usize> {
+        self.state.try_lock().ok().map(|state| state.reply_bytes)
+    }
+
     /// Serialize transitions for one native session, including legacy traffic.
     /// The global registry lock is never held during verification or network work.
     pub(crate) async fn lock(

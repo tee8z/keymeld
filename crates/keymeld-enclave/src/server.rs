@@ -279,6 +279,22 @@ impl EnclaveServer {
             held.signing_active,
             held.signing_finished
         );
+        info!(
+            "Enclave Memory: enclave_id={}, confidential_reply_bytes={:?}",
+            self.operator.enclave_id,
+            self.operator.confidential.reply_cache_bytes(),
+        );
+        #[cfg(feature = "escrow")]
+        info!(
+            "Escrow Memory: enclave_id={}, accounted_response_bytes={}, preparations={}, executions={}, receipt_bytes={}, signing_permits={}, unavailable_sessions={}",
+            self.operator.enclave_id,
+            held.escrow.response_bytes,
+            held.escrow.preparations,
+            held.escrow.executions,
+            held.escrow.receipt_bytes,
+            held.escrow.permits,
+            held.escrow_unavailable,
+        );
     }
 
     async fn log_server_stats(&self) {

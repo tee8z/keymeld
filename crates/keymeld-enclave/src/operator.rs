@@ -93,6 +93,10 @@ pub(crate) struct SessionCounts {
     pub(crate) keygen_failed: usize,
     pub(crate) signing_active: usize,
     pub(crate) signing_finished: usize,
+    #[cfg(feature = "escrow")]
+    pub(crate) escrow: crate::operations::escrow::MemoryUsage,
+    #[cfg(feature = "escrow")]
+    pub(crate) escrow_unavailable: usize,
 }
 
 pub struct EnclaveOperator {
@@ -854,7 +858,27 @@ impl EnclaveOperator {
         let mut counts = SessionCounts::default();
         for session in self.sessions.iter() {
             match &session.status {
-                OperatorStatus::Keygen(KeygenStatus::Completed(_)) => counts.keygen_completed += 1,
+                OperatorStatus::Keygen(KeygenStatus::Completed(completed)) => {
+                    counts.keygen_completed += 1;
+                    #[cfg(feature = "escrow")]
+                    match completed
+                        .musig_processor()
+                        .get_session_metadata_public()
+                        .escrow_state
+                        .memory_usage()
+                    {
+                        Some(usage) => {
+                            counts.escrow.response_bytes += usage.response_bytes;
+                            counts.escrow.preparations += usage.preparations;
+                            counts.escrow.executions += usage.executions;
+                            counts.escrow.receipt_bytes += usage.receipt_bytes;
+                            counts.escrow.permits += usage.permits;
+                        }
+                        None => counts.escrow_unavailable += 1,
+                    }
+                    #[cfg(not(feature = "escrow"))]
+                    let _ = completed;
+                }
                 OperatorStatus::Keygen(KeygenStatus::Failed(_)) => counts.keygen_failed += 1,
                 OperatorStatus::Keygen(_) => counts.keygen_registering += 1,
                 OperatorStatus::Signing(_) if session.signing_round_finished() => {

@@ -1243,3 +1243,44 @@ fn a_two_place_pool_of_twenty_fits_one_permit_and_one_signing_request() {
     println!("two places, 20 players: signing request {size} bytes");
     assert!(size + 64 * 1024 <= keymeld_core::confidential::MAX_PLAINTEXT_BYTES);
 }
+
+#[test]
+fn trial_transition_shares_large_receipts_and_keeps_live_state_isolated() {
+    let user = UserId::new_v7();
+    let mut state = SessionState::default();
+    for index in 0..32 {
+        state.execution_receipts.insert(
+            (user.clone(), format!("receipt-{index}")),
+            Arc::new(Payload::new(vec![index as u8; 512 * 1024]).unwrap()),
+        );
+    }
+    let key = (user, "receipt-0".to_string());
+    let original_bytes = state.execution_receipts[&key].as_bytes().as_ptr();
+    let mut next = state.transition();
+    for (key, receipt) in &state.execution_receipts {
+        assert_eq!(
+            receipt.as_bytes().as_ptr(),
+            next.execution_receipts[key].as_bytes().as_ptr(),
+            "trial updates must not copy accumulated receipts"
+        );
+    }
+    next.execution_receipts
+        .insert(key.clone(), Arc::new(Payload::new(vec![99]).unwrap()));
+    assert_eq!(
+        state.execution_receipts[&key].as_bytes().as_ptr(),
+        original_bytes
+    );
+    assert_eq!(state.execution_receipts[&key].as_bytes().len(), 512 * 1024);
+    let observed = EscrowSessionState {
+        inner: Mutex::new(state),
+    };
+    assert_eq!(
+        observed.memory_usage().unwrap().receipt_bytes,
+        16 * 1024 * 1024
+    );
+    let _busy = observed.inner.lock().unwrap();
+    assert!(
+        observed.memory_usage().is_none(),
+        "diagnostics must not wait for protocol state"
+    );
+}
