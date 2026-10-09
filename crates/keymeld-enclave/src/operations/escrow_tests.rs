@@ -829,7 +829,11 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
         for _ in 0..escrow::MAX_ACTIONS * 4 {
             state.requests.insert(
                 (f.user.clone(), Uuid::now_v7()),
-                ([0; 32], candidates[0].1.clone()),
+                (
+                    [0; 32],
+                    candidates[0].1.clone(),
+                    f.context.response_budget.reserve(0).unwrap(),
+                ),
             );
         }
     }
@@ -849,6 +853,9 @@ fn exhausted_preparation_cache_cannot_block_authorized_execution_or_recovery() {
         handle(&f.completed, &f.context, &rebind, 1),
         Err(EnclaveError::EscrowPreparationExhausted { .. })
     ));
+    let (used, limit, _) = f.context.response_budget.snapshot();
+    let _other_sessions = f.context.response_budget.reserve(limit - used).unwrap();
+    assert_eq!(f.context.response_budget.snapshot().0, limit);
     let cached_count = escrow_state.inner.lock().unwrap().requests.len();
     for (permission, prepared, attempt) in candidates {
         let execute = execute_command(&f, permission, &attempt, prepared.sealed_state, proof());
@@ -1283,4 +1290,46 @@ fn trial_transition_shares_large_receipts_and_keeps_live_state_isolated() {
         observed.memory_usage().is_none(),
         "diagnostics must not wait for protocol state"
     );
+}
+
+#[test]
+fn preparation_reply_budget_is_shared_across_sessions_and_exact_retries_do_not_recharge() {
+    use super::super::response_budget::ResponseBudget;
+    let mut first = fixture(true);
+    let mut second = fixture(true);
+    let budget = Arc::new(ResponseBudget::new(MAX_CACHED_RESPONSE_BYTES));
+    first.context.response_budget = budget.clone();
+    second.context.response_budget = budget.clone();
+    let bind_command = |f: &Fixture| {
+        command(
+            f,
+            Operation::Bind,
+            None,
+            &BindEscrowRequest {
+                participant_policies: BTreeMap::new(),
+                binding_data: Payload::default(),
+                schema_version: escrow::SCHEMA_VERSION,
+                policy: f.registration.policy.clone(),
+                application_context: Payload::new(b"approved document".to_vec()).unwrap(),
+            },
+        )
+    };
+    let initial = bind_command(&first);
+    let reply = handle(&first.completed, &first.context, &initial, 1).unwrap();
+    let retained = budget.snapshot().0;
+    assert!(retained > 0 && retained < MAX_CACHED_RESPONSE_BYTES);
+    let cached = handle(&first.completed, &first.context, &initial, 1).unwrap();
+    assert_eq!(cached.output, reply.output);
+    assert_eq!(budget.snapshot().0, retained);
+    let next = bind_command(&second);
+    assert!(matches!(
+        handle(&second.completed, &second.context, &next, 1),
+        Err(EnclaveError::EscrowPreparationExhausted { .. })
+    ));
+    assert_eq!(budget.snapshot().0, retained);
+    drop(first);
+    assert_eq!(budget.snapshot().0, 0);
+    handle(&second.completed, &second.context, &next, 1).unwrap();
+    drop(second);
+    assert_eq!(budget.snapshot().0, 0);
 }

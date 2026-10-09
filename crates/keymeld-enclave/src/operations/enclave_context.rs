@@ -28,6 +28,8 @@ pub struct EnclaveSharedContext {
     pub enclave_public_keys: DashMap<EnclaveId, String>, // Other enclaves' public keys
     pub attestation_manager: Option<AttestationManager>,
     pub config: TimeoutConfig,
+    #[cfg(feature = "escrow")]
+    pub(crate) response_budget: std::sync::Arc<super::response_budget::ResponseBudget>,
     pub escrow_verifiers: std::sync::Arc<crate::escrow_verifier::VerifierRegistry>,
     pub escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities,
 }
@@ -49,6 +51,8 @@ impl EnclaveSharedContext {
             enclave_public_keys: DashMap::new(),
             attestation_manager,
             config,
+            #[cfg(feature = "escrow")]
+            response_budget: std::sync::Arc::new(Default::default()),
             escrow_verifiers: std::sync::Arc::new(Default::default()),
             escrow_capabilities: keymeld_core::escrow_capabilities::EscrowCapabilities::for_service(
                 cfg!(feature = "escrow"),
@@ -396,6 +400,8 @@ impl Clone for EnclaveSharedContext {
             enclave_public_keys: self.enclave_public_keys.clone(),
             attestation_manager: self.attestation_manager.clone(),
             config: self.config.clone(),
+            #[cfg(feature = "escrow")]
+            response_budget: self.response_budget.clone(),
             escrow_verifiers: self.escrow_verifiers.clone(),
             escrow_capabilities: self.escrow_capabilities,
         }

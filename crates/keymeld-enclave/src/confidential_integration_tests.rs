@@ -632,9 +632,21 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
     session.sign_prepared_batch(&fresh, 300, &[]).await.unwrap();
     assert_eq!(state.requests.lock().unwrap().len(), count);
 
-    // An idle keygen session is released like a restart of that session alone, and the
-    // journal restores it the same way.
-    let expired = operator.expire_sessions(&expiry, Instant::now() + expiry.idle_keygen);
+    // Pressure shortens idle retention. Releasing that keygen session is like a
+    // restart of that session alone; its durable journal must still restore it.
+    #[cfg(feature = "escrow")]
+    let pressure = {
+        let budget = operator.response_budget().unwrap();
+        let (used, limit, _) = budget.snapshot();
+        budget.reserve(limit - used).unwrap()
+    };
+    let pressure_expiry = operator.memory_aware_expiry(&expiry);
+    #[cfg(feature = "escrow")]
+    assert_eq!(pressure_expiry.idle_keygen, Duration::from_secs(300));
+    let expired = operator.expire_sessions(
+        &pressure_expiry,
+        Instant::now() + pressure_expiry.idle_keygen,
+    );
     assert_eq!(
         expired,
         ExpiredSessions {
@@ -643,6 +655,8 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         }
     );
     assert!(operator.sessions.is_empty());
+    #[cfg(feature = "escrow")]
+    drop(pressure);
     session.restore_keygen(&registrations).await.unwrap();
     assert!(operator.sessions.contains_key(&session_id));
     let restored = SessionId::new_v7();

@@ -46,3 +46,6 @@ pub struct InitConfig {
 
 #[cfg(feature = "escrow")]
 pub mod escrow;
+
+#[cfg(feature = "escrow")]
+pub(crate) mod response_budget;

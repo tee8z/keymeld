@@ -14,7 +14,7 @@ uninlined_format_args = "allow"
 name = "keymeld"
 
 [workspace.package]
-version = "0.10.2"
+version = "0.10.3"
 edition = "2021"
 authors = ["tee8z <tee8z@protonmail.com>"]
 license = "MIT"
@@ -37,7 +37,7 @@ axum = { version = "0.8.8", features = ["ws", "macros"] }
 tower = { version = "0.5.3", features = ["full"] }
 tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 hyper = "1.7.0"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_yaml = "0.9"
 serde_json = "1.0.149"
 serde_cbor = "0.11"
