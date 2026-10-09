@@ -13,7 +13,8 @@ secp256k1 = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }
 tokio-vsock = { workspace = true }
-serde = { workspace = true }
+# `rc` shares retained escrow state; an `Arc` serializes exactly as its value.
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 bincode = { workspace = true }
 serde_cbor = { workspace = true }

@@ -20,9 +20,9 @@ use keymeld_core::{
             BindEscrowRequest, EscrowCommand, EscrowResponse, ExecuteEscrowRequest,
             ExecutionOutput, Operation, Payload, PrepareEscrowRequest, ReceiptContext,
         },
-        Action, ActionAttempt, AdaptorContext, Condition, ConditionProof, EscrowContext,
-        EscrowRegistration, KeyTweak, PreparationPolicy, PublicKeyBytes, Repetition, ScopeSigner,
-        SignedEscrowPolicy, SigningItem, SigningScope,
+        Action, ActionAttempt, AdaptorContext, Bip340Item, Condition, ConditionProof,
+        EscrowContext, EscrowRegistration, KeyTweak, PreparationPolicy, PublicKeyBytes, Repetition,
+        ScopeSigner, SignedEscrowPolicy, SigningItem, SigningScope,
     },
     protocol::{
         AdaptorType, EnclaveError, InitSigningSessionCommand, TaprootTweak, ValidationError,
@@ -64,19 +64,85 @@ pub struct EscrowSessionState {
 #[derive(Debug, Default)]
 struct SessionState {
     bindings: BTreeMap<UserId, [u8; 32]>,
-    permits: BTreeMap<(SessionId, UserId), Arc<SigningPermit>>,
+    permits: BTreeMap<(SessionId, UserId), SigningPermit>,
     preparations: BTreeMap<(UserId, String), Arc<PreparedAction>>,
     executions: BTreeMap<(UserId, String), Arc<ExecutedAction>>,
     // One canonical successful receipt per permission, never one per retry.
     execution_receipts: BTreeMap<(UserId, String), Arc<Payload>>,
-    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], EscrowResponse, ResponseCharge)>,
+    requests: BTreeMap<(UserId, uuid::Uuid), ([u8; 32], CachedRequest)>,
     cached_response_bytes: usize,
     inflight_request_ids: BTreeMap<(UserId, uuid::Uuid), [u8; 32]>,
     required_bindings: BTreeMap<UserId, Arc<Binding>>,
     inflight: BTreeMap<(UserId, String), ([u8; 32], Arc<tokio::sync::Notify>)>,
 }
 
+/// What an exact retry of a Bind or Prepare request is answered from.
+#[derive(Debug)]
+enum CachedRequest {
+    /// The signed reply, charged to the shared budget while it is cached.
+    Reply {
+        reply: Box<EscrowResponse>,
+        charge: ResponseCharge,
+    },
+    /// A Prepare whose receipt has executed. Its reply and charge are released, and a
+    /// retry is answered with this preparation sealed again, never prepared again: a
+    /// verifier asked again could prepare a different action, such as a second invoice.
+    /// The preparation is shared with the ledger, not copied.
+    Executed { prepared: Arc<PreparedAction> },
+}
+
+/// Charged per cached reply beyond its payloads and signature: an estimate of its receipt
+/// context and cache entry.
+const CACHED_REPLY_OVERHEAD_BYTES: usize = 4096;
+/// Enclave replies carry a compact secp256k1 ECDSA signature.
+const REPLY_SIGNATURE_BYTES: usize = 64;
+// `Payload` bounds both payloads, so every cached reply fits the reservation that Bind and
+// Prepare take before they run, and retaining it never needs more budget.
+const _: () = assert!(
+    2 * escrow::MAX_PAYLOAD_BYTES + REPLY_SIGNATURE_BYTES + CACHED_REPLY_OVERHEAD_BYTES
+        <= MAX_CACHED_RESPONSE_BYTES
+);
+
+/// The bytes a cached reply holds against the preparation-reply budget.
+fn cached_reply_bytes(reply: &EscrowResponse) -> usize {
+    reply.output.as_bytes().len()
+        + reply.sealed_state.as_bytes().len()
+        + REPLY_SIGNATURE_BYTES
+        + CACHED_REPLY_OVERHEAD_BYTES
+}
+
 impl SessionState {
+    /// Release the cached reply of the Prepare whose receipt `executed` consumed. That
+    /// receipt is the reply's own sealed state: sealing is randomized, so the bytes name
+    /// exactly one reply, and a receipt sealed again or recovered matches none.
+    fn release_executed_reply(
+        &mut self,
+        user: &UserId,
+        executed: &Payload,
+        prepared: &Arc<PreparedAction>,
+    ) {
+        for ((owner, _), (_, cached)) in &mut self.requests {
+            let consumed = match cached {
+                CachedRequest::Reply { reply, .. } => reply.sealed_state == *executed,
+                CachedRequest::Executed { .. } => false,
+            };
+            if owner != user || !consumed {
+                continue;
+            }
+            let released = std::mem::replace(
+                cached,
+                CachedRequest::Executed {
+                    prepared: prepared.clone(),
+                },
+            );
+            if let CachedRequest::Reply { reply, charge } = released {
+                self.cached_response_bytes -= cached_reply_bytes(&reply);
+                // Returns the reply's share of the enclave budget.
+                drop(charge);
+            }
+        }
+    }
+
     /// Trial updates keep payloads shared until all checks succeed. Policy
     /// bindings, the cache and in-flight reservations remain owned by the
     /// current live state.
@@ -116,6 +182,9 @@ impl SessionState {
     }
 }
 
+/// `prepared_bytes`, `scope_bytes` and `binding_bytes` estimate the heap bytes of distinct
+/// values, so a value shared between ledger maps counts once. They exclude map and
+/// allocator overhead.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemoryUsage {
     pub response_bytes: usize,
@@ -123,6 +192,12 @@ pub(crate) struct MemoryUsage {
     pub executions: usize,
     pub receipt_bytes: usize,
     pub permits: usize,
+    /// Prepared actions, apart from their scopes and bindings.
+    pub prepared_bytes: usize,
+    /// Signing scopes of prepared actions.
+    pub scope_bytes: usize,
+    /// Bindings, whether required or referenced by a prepared action.
+    pub binding_bytes: usize,
 }
 
 impl EscrowSessionState {
@@ -130,7 +205,30 @@ impl EscrowSessionState {
     /// state is reported unavailable rather than delaying protocol work.
     pub(crate) fn memory_usage(&self) -> Option<MemoryUsage> {
         let state = self.inner.try_lock().ok()?;
-        Some(MemoryUsage {
+        let mut prepared = BTreeMap::new();
+        let held = state
+            .preparations
+            .values()
+            .chain(state.executions.values().map(|executed| &executed.prepared))
+            .chain(state.permits.values().map(|permit| &permit.prepared))
+            .chain(
+                state
+                    .requests
+                    .values()
+                    .filter_map(|(_, cached)| match cached {
+                        CachedRequest::Executed { prepared } => Some(prepared),
+                        CachedRequest::Reply { .. } => None,
+                    }),
+            );
+        for value in held {
+            prepared.entry(Arc::as_ptr(value)).or_insert(value);
+        }
+        let mut bindings: BTreeMap<_, _> = state
+            .required_bindings
+            .values()
+            .map(|binding| (Arc::as_ptr(binding), binding))
+            .collect();
+        let mut usage = MemoryUsage {
             response_bytes: state.cached_response_bytes,
             preparations: state.preparations.len(),
             executions: state.executions.len(),
@@ -140,14 +238,57 @@ impl EscrowSessionState {
                 .map(|value| value.as_bytes().len())
                 .sum(),
             permits: state.permits.len(),
-        })
+            ..MemoryUsage::default()
+        };
+        for value in prepared.into_values() {
+            bindings
+                .entry(Arc::as_ptr(&value.binding))
+                .or_insert(&value.binding);
+            usage.prepared_bytes += size_of::<PreparedAction>()
+                + value.action_id.len()
+                + value.application_state.as_bytes().len()
+                + value.output.as_bytes().len();
+            usage.scope_bytes += scope_bytes(&value.action);
+        }
+        usage.binding_bytes = bindings
+            .values()
+            .map(|binding| {
+                size_of::<Binding>()
+                    + binding.application_state.as_bytes().len()
+                    + binding.participant_policy_digests.len() * (size_of::<UserId>() + 32)
+            })
+            .sum();
+        Some(usage)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Estimated heap bytes of an action's scope. Keys are 33-byte compressed points.
+fn scope_bytes(action: &Action) -> usize {
+    const KEY_BYTES: usize = 33;
+    match action {
+        Action::Sign { scope } => scope
+            .batch
+            .iter()
+            .map(|item| {
+                let adaptor = match item.adaptor {
+                    AdaptorContext::None => 0,
+                    AdaptorContext::Single { .. } => KEY_BYTES,
+                };
+                size_of::<SigningItem>()
+                    + item.signers.len() * (size_of::<ScopeSigner>() + KEY_BYTES)
+                    + adaptor
+            })
+            .sum(),
+        Action::SignBip340 { scope } => KEY_BYTES + scope.items.len() * size_of::<Bip340Item>(),
+        Action::ReleaseSecret { .. } | Action::ReleaseSigningKey { .. } => 0,
+    }
+}
+
+/// Authorizes one participant's part in one signing session: the executed Sign
+/// preparation, shared with the ledger rather than copying its scope.
+#[derive(Debug, Clone)]
 struct SigningPermit {
-    policy_digest: [u8; 32],
-    scope: SigningScope,
+    prepared: Arc<PreparedAction>,
 }
 
 /// Called at admission and again during restored-state validation. The policy
@@ -410,7 +551,9 @@ pub fn verify_signing_batch(
             .ok_or_else(|| {
                 invalid("Escrow signing requires a verified condition for this signing session")
             })?;
-        if permit.policy_digest != digest || permit.scope != actual {
+        if permit.prepared.binding.policy_digest != digest
+            || permit.prepared.action != (Action::Sign { scope: actual })
+        {
             return Err(invalid(
                 "Signing batch differs from the participant-authorized escrow action",
             ));
@@ -437,7 +580,7 @@ struct Binding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreparedAction {
-    binding: Binding,
+    binding: Arc<Binding>,
     action_id: String,
     attempt: ActionAttempt,
     action: Action,
@@ -450,7 +593,7 @@ struct PreparedAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutedAction {
-    prepared: PreparedAction,
+    prepared: Arc<PreparedAction>,
     execution_digest: [u8; 32],
     original_request_id: uuid::Uuid,
     original_request_digest: [u8; 32],
@@ -459,10 +602,12 @@ struct ExecutedAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+/// States hold shared values. `Arc` serializes as its value, so sealed bytes and
+/// digests are unchanged.
 enum SealedState {
-    Bound { binding: Binding },
-    Prepared { prepared: PreparedAction },
-    Executed { executed: ExecutedAction },
+    Bound { binding: Arc<Binding> },
+    Prepared { prepared: Arc<PreparedAction> },
+    Executed { executed: Arc<ExecutedAction> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,7 +778,8 @@ fn validate_prepared(
         .get(&prepared.action_id)
         .is_some_and(|grant| grant.unbound);
     // Prepare derives this binding only for an unbound permission, never from a receipt.
-    if unbound && prepared.binding != unbound_binding(policy, prepared.binding.enclave_id, command)?
+    if unbound
+        && *prepared.binding != unbound_binding(policy, prepared.binding.enclave_id, command)?
     {
         return Err(invalid(
             "An unbound permission acts only under its derived binding",
@@ -700,7 +846,7 @@ fn fresh_attempt(
 
 fn install_preparation(
     state: &mut SessionState,
-    prepared: &PreparedAction,
+    prepared: Arc<PreparedAction>,
     policy: &SignedEscrowPolicy,
     select_for_execution: bool,
 ) -> Result<(), EnclaveError> {
@@ -712,7 +858,7 @@ fn install_preparation(
         == PreparationPolicy::RenewableIdenticalAction;
     if renewable {
         if let Some(executed) = state.executions.get(&key) {
-            if !select_for_execution || executed.prepared != *prepared {
+            if !select_for_execution || executed.prepared != prepared {
                 return Err(invalid(
                     "A successful execution freezes this release permission",
                 ));
@@ -720,7 +866,7 @@ fn install_preparation(
         }
     }
     if let Some(old) = state.preparations.get(&key) {
-        if old.as_ref() != prepared {
+        if *old != prepared {
             let same_action = old.binding == prepared.binding && old.action == prepared.action;
             let successor = prepared.predecessor == Some(preparation_digest(old)?)
                 && old.generation.checked_add(1) == Some(prepared.generation)
@@ -734,14 +880,14 @@ fn install_preparation(
                     && matches!(prepared.action, Action::Sign { .. })
                     && old.attempt.signing_session_id != prepared.attempt.signing_session_id
             };
-            if !fresh_attempt(policy, old, prepared) && (!same_action || !allowed) {
+            if !fresh_attempt(policy, old, &prepared) && (!same_action || !allowed) {
                 return Err(invalid(
                     "Escrow action was already prepared for another attempt",
                 ));
             }
         }
     }
-    state.preparations.insert(key, Arc::new(prepared.clone()));
+    state.preparations.insert(key, prepared);
     Ok(())
 }
 
@@ -758,7 +904,7 @@ fn validate_live_execution(
         prepared.binding.context.user_id.clone(),
         prepared.action_id.clone(),
     )) {
-        if old.prepared != *prepared
+        if *old.prepared != *prepared
             && !fresh_attempt(policy, &old.prepared, prepared)
             && !(prepared.predecessor.is_some()
                 && matches!(prepared.action, Action::Sign { .. })
@@ -775,7 +921,7 @@ fn validate_live_execution(
 
 fn install_execution(
     state: &mut SessionState,
-    executed: &ExecutedAction,
+    executed: Arc<ExecutedAction>,
     policy: &SignedEscrowPolicy,
 ) -> Result<(), EnclaveError> {
     let prepared = &executed.prepared;
@@ -796,29 +942,30 @@ fn install_execution(
             ));
         }
     }
-    if let Action::Sign { scope } = &prepared.action {
+    if matches!(prepared.action, Action::Sign { .. }) {
         let session = prepared
             .attempt
             .signing_session_id
             .as_ref()
             .ok_or_else(|| invalid("Escrow signing target is missing"))?;
         let key = (session.clone(), prepared.binding.context.user_id.clone());
-        let permit = SigningPermit {
-            policy_digest: prepared.binding.policy_digest,
-            scope: scope.clone(),
-        };
-        if state
-            .permits
-            .get(&key)
-            .is_some_and(|old| old.as_ref() != &permit)
-        {
+        // Both are Sign actions, so equal actions are equal scopes.
+        if state.permits.get(&key).is_some_and(|old| {
+            old.prepared.binding.policy_digest != prepared.binding.policy_digest
+                || old.prepared.action != prepared.action
+        }) {
             return Err(invalid(
                 "Escrow signing session already has a different authorization",
             ));
         }
-        state.permits.insert(key, Arc::new(permit));
+        state.permits.insert(
+            key,
+            SigningPermit {
+                prepared: prepared.clone(),
+            },
+        );
     }
-    state.executions.insert(key, Arc::new(executed.clone()));
+    state.executions.insert(key, executed);
     Ok(())
 }
 
@@ -906,15 +1053,15 @@ fn validate_roster(processor: &MusigProcessor, binding: &Binding) -> Result<(), 
     Ok(())
 }
 
-fn install_binding(state: &mut SessionState, binding: &Binding) -> Result<(), EnclaveError> {
+fn install_binding(state: &mut SessionState, binding: Arc<Binding>) -> Result<(), EnclaveError> {
     if let Some(old) = state.required_bindings.get(&binding.context.user_id) {
-        if old.as_ref() != binding {
+        if *old != binding {
             return Err(invalid("Escrow binding cannot be replaced"));
         }
     }
     state
         .required_bindings
-        .insert(binding.context.user_id.clone(), Arc::new(binding.clone()));
+        .insert(binding.context.user_id.clone(), binding);
     Ok(())
 }
 
@@ -923,6 +1070,7 @@ struct Reservation {
     state: Arc<EscrowSessionState>,
     key: (UserId, String),
     request_key: (UserId, uuid::Uuid),
+    /// The reply reservation that Bind and Prepare take. Execute and recovery take none.
     cache: Option<ResponseCharge>,
 }
 impl Drop for Reservation {
@@ -1233,26 +1381,42 @@ pub(crate) async fn handle_snapshot(
                     "Successful execution request identity was reused with changed inputs",
                 ));
             }
-            if let Some((digest, reply, _charge)) = state.requests.get(&request_key) {
+            if let Some((digest, cached)) = state.requests.get(&request_key) {
                 if *digest != request_digest {
                     return Err(invalid("Escrow request ID was reused with changed inputs"));
                 }
-                if reply.context.enclave_key_epoch == key_epoch {
-                    return Ok(reply.clone());
-                }
-                let mut receipt_context = reply.context.clone();
-                receipt_context.enclave_key_epoch = key_epoch;
-                let secret = Zeroizing::new(
-                    <[u8; 32]>::try_from(context.private_key.as_slice())
-                        .map_err(|_| invalid("Invalid enclave signing key"))?,
+                let prepared = match cached {
+                    CachedRequest::Reply { reply, .. }
+                        if reply.context.enclave_key_epoch == key_epoch =>
+                    {
+                        return Ok(reply.as_ref().clone());
+                    }
+                    CachedRequest::Reply { reply, .. } => {
+                        let mut receipt_context = reply.context.clone();
+                        receipt_context.enclave_key_epoch = key_epoch;
+                        let secret = Zeroizing::new(
+                            <[u8; 32]>::try_from(context.private_key.as_slice())
+                                .map_err(|_| invalid("Invalid enclave signing key"))?,
+                        );
+                        return EscrowResponse::sign(
+                            receipt_context,
+                            reply.output.clone(),
+                            reply.sealed_state.clone(),
+                            &secret,
+                        )
+                        .map_err(invalid);
+                    }
+                    CachedRequest::Executed { prepared } => prepared.clone(),
+                };
+                // Sealing deflates the whole state, so it runs without the session lock.
+                drop(state);
+                return response(
+                    context,
+                    command,
+                    key_epoch,
+                    prepared.output.clone(),
+                    SealedState::Prepared { prepared },
                 );
-                return EscrowResponse::sign(
-                    receipt_context,
-                    reply.output.clone(),
-                    reply.sealed_state.clone(),
-                    &secret,
-                )
-                .map_err(invalid);
             }
             if command.context.operation != Operation::Execute
                 && state.requests.keys().filter(|(id, _)| id == user).count()
@@ -1325,6 +1489,8 @@ pub(crate) async fn handle_snapshot(
             ))
         })
         .collect::<Result<BTreeMap<_, _>, EnclaveError>>()?;
+    // The Prepare receipt that this Execute consumed, if it was one.
+    let mut consumed_receipt = None;
     let (result, new_binding, new_preparation, new_execution) = match command.context.operation {
         Operation::Bind => {
             let request: BindEscrowRequest =
@@ -1387,6 +1553,7 @@ pub(crate) async fn handle_snapshot(
                     "Built-in escrow cannot interpret application binding data",
                 ));
             }
+            let binding = Arc::new(binding);
             let reply = response(
                 context,
                 command,
@@ -1411,7 +1578,7 @@ pub(crate) async fn handle_snapshot(
                 if !request.binding_receipt.as_bytes().is_empty() {
                     return Err(invalid("An unbound permission takes no binding receipt"));
                 }
-                unbound_binding(policy, context.enclave_id, command)?
+                Arc::new(unbound_binding(policy, context.enclave_id, command)?)
             } else {
                 let SealedState::Bound { binding } = unseal(context, &request.binding_receipt)?
                 else {
@@ -1426,7 +1593,7 @@ pub(crate) async fn handle_snapshot(
             for receipt in &request.prior_preparation_receipts {
                 let prior_prepared = match unseal(context, receipt)? {
                     SealedState::Prepared { prepared } => prepared,
-                    SealedState::Executed { executed } => executed.prepared,
+                    SealedState::Executed { executed } => executed.prepared.clone(),
                     _ => return Err(invalid("Expected prior prepared action")),
                 };
                 if prior_prepared.binding != binding
@@ -1487,7 +1654,7 @@ pub(crate) async fn handle_snapshot(
                     let fresh = grant.repetition == Repetition::VerifierAuthorizedAttempts
                         && old.binding == binding
                         && old.attempt.attempt_id != request.attempt.attempt_id;
-                    if !fresh && repeated.as_ref() != Some(old.as_ref()) {
+                    if !fresh && repeated.as_ref() != Some(old) {
                         return Err(invalid("Permission already prepared; retry original request or present its exact preparation"));
                     }
                 }
@@ -1549,7 +1716,7 @@ pub(crate) async fn handle_snapshot(
                     "Renewed preparation must preserve the identical authorized action",
                 ));
             }
-            let predecessor = repeated.as_ref().map(preparation_digest).transpose()?;
+            let predecessor = repeated.as_deref().map(preparation_digest).transpose()?;
             let prepared = PreparedAction {
                 binding,
                 action_id: request.action_id,
@@ -1561,6 +1728,7 @@ pub(crate) async fn handle_snapshot(
                 generation,
             };
             validate_prepared(&prepared, command, policy)?;
+            let prepared = Arc::new(prepared);
             let reply = response(
                 context,
                 command,
@@ -1584,7 +1752,7 @@ pub(crate) async fn handle_snapshot(
                     return Err(invalid("Execution requires prepared action"))
                 }
                 SealedState::Executed { executed } => {
-                    recovered_receipt = Some(request.prepared_receipt.clone());
+                    recovered_receipt = Some(request.prepared_receipt);
                     validate_prepared(&executed.prepared, command, policy)?;
                     validate_roster(processor, &executed.prepared.binding)?;
                     validate_live_execution(&metadata.escrow_state, &executed.prepared, policy)?;
@@ -1611,6 +1779,7 @@ pub(crate) async fn handle_snapshot(
                     let execution_digest =
                         verify_execution(context, manifest, policy, &prepared, &request.proof)
                             .await?;
+                    consumed_receipt = Some(request.prepared_receipt);
                     let old = metadata
                         .escrow_state
                         .inner
@@ -1633,20 +1802,20 @@ pub(crate) async fn handle_snapshot(
                             ));
                         }
                         if old.prepared == prepared && old.execution_digest == execution_digest {
-                            old.as_ref().clone()
+                            old
                         } else {
                             let output = execute_output(
                                 &prepared,
                                 registration,
                                 participant.private_key.as_ref().map(|key| key.as_bytes()),
                             )?;
-                            ExecutedAction {
+                            Arc::new(ExecutedAction {
                                 prepared,
                                 execution_digest,
                                 original_request_id: command.context.request_id,
                                 original_request_digest: request_digest,
                                 output,
-                            }
+                            })
                         }
                     } else {
                         let output = execute_output(
@@ -1654,13 +1823,13 @@ pub(crate) async fn handle_snapshot(
                             registration,
                             participant.private_key.as_ref().map(|key| key.as_bytes()),
                         )?;
-                        ExecutedAction {
+                        Arc::new(ExecutedAction {
                             prepared,
                             execution_digest,
                             original_request_id: command.context.request_id,
                             original_request_digest: request_digest,
                             output,
-                        }
+                        })
                     }
                 }
             };
@@ -1682,7 +1851,7 @@ pub(crate) async fn handle_snapshot(
                         state
                             .execution_receipts
                             .get(&key)
-                            .map(|receipt| (old.as_ref().clone(), receipt.as_ref().clone()))
+                            .map(|receipt| (old.clone(), receipt.clone()))
                     })
             };
             let canonical_receipt = match existing_receipt {
@@ -1690,7 +1859,7 @@ pub(crate) async fn handle_snapshot(
                     executed = existing;
                     receipt
                 }
-                None => match recovered_receipt {
+                None => Arc::new(match recovered_receipt {
                     Some(receipt) => receipt,
                     None => seal_state(
                         context,
@@ -1698,14 +1867,14 @@ pub(crate) async fn handle_snapshot(
                             executed: executed.clone(),
                         },
                     )?,
-                },
+                }),
             };
             let reply = signed_response(
                 context,
                 command,
                 key_epoch,
                 Payload::encode(&executed.output).map_err(invalid)?,
-                canonical_receipt,
+                canonical_receipt.as_ref().clone(),
             )?;
             let unbound = policy
                 .policy
@@ -1716,7 +1885,7 @@ pub(crate) async fn handle_snapshot(
                 reply,
                 (!unbound).then(|| executed.prepared.binding.clone()),
                 Some(executed.prepared.clone()),
-                Some(executed),
+                Some((executed, canonical_receipt)),
             )
         }
     };
@@ -1732,48 +1901,48 @@ pub(crate) async fn handle_snapshot(
     {
         return Err(invalid("Escrow preparation reservation changed"));
     }
-    let retained_reply = if command.context.operation != Operation::Execute {
-        let bytes = result.output.as_bytes().len()
-            + result.sealed_state.as_bytes().len()
-            + result.enclave_signature.len()
-            + 4096;
-        let mut charge = reservation
-            .cache
-            .take()
-            .ok_or_else(|| invalid("Missing preparation reply reservation"))?;
-        if !charge.retain(bytes) {
-            return Err(invalid("Preparation reply exceeds its wire reservation"));
-        }
-        Some((bytes, charge))
-    } else {
-        None
-    };
+    let retained_reply = reservation.cache.take().map(|mut charge| {
+        let bytes = cached_reply_bytes(&result);
+        charge.retain(bytes);
+        (bytes, charge)
+    });
     // Check all transitions before any commit, so a failed install has no effect.
     let mut next = state.transition();
     if let Some(binding) = new_binding {
-        install_binding(&mut next, &binding)?;
+        install_binding(&mut next, binding)?;
     }
     if let Some(prepared) = new_preparation {
         install_preparation(
             &mut next,
-            &prepared,
+            prepared,
             policy,
             command.context.operation == Operation::Execute,
         )?;
     }
-    if let Some(executed) = new_execution {
-        install_execution(&mut next, &executed, policy)?;
-        next.execution_receipts.insert(
-            (user.clone(), executed.prepared.action_id.clone()),
-            Arc::new(result.sealed_state.clone()),
-        );
+    let executed_preparation = new_execution
+        .as_ref()
+        .map(|(executed, _)| executed.prepared.clone());
+    if let Some((executed, receipt)) = new_execution {
+        next.execution_receipts
+            .insert((user.clone(), executed.prepared.action_id.clone()), receipt);
+        install_execution(&mut next, executed, policy)?;
     }
     state.commit(next);
     if let Some((bytes, charge)) = retained_reply {
         state.cached_response_bytes += bytes;
-        state
-            .requests
-            .insert(request_key, (request_digest, result.clone(), charge));
+        state.requests.insert(
+            request_key,
+            (
+                request_digest,
+                CachedRequest::Reply {
+                    reply: Box::new(result.clone()),
+                    charge,
+                },
+            ),
+        );
+    }
+    if let (Some(receipt), Some(prepared)) = (&consumed_receipt, &executed_preparation) {
+        state.release_executed_reply(user, receipt, prepared);
     }
 
     Ok(result)

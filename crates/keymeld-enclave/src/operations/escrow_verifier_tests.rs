@@ -4,13 +4,21 @@ use crate::escrow_verifier::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct ExecutionGate {
+/// Holds a verifier call after it signals that it entered, until the test releases it.
+struct VerifierGate {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
 }
+impl VerifierGate {
+    async fn pass(&self) {
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+    }
+}
 struct DocumentVerifier {
     calls: Arc<AtomicUsize>,
-    execution_gate: Option<Arc<ExecutionGate>>,
+    preparation_gate: Option<Arc<VerifierGate>>,
+    execution_gate: Option<Arc<VerifierGate>>,
     reject_recovery: bool,
 }
 impl EscrowVerifier for DocumentVerifier {
@@ -53,6 +61,9 @@ impl EscrowVerifier for DocumentVerifier {
     ) -> VerificationFuture<'a, VerifierPreparedAction> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.preparation_gate {
+                gate.pass().await;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(15)).await;
             if view.bound_state.as_bytes() != b"document signed later" {
                 return Err(invalid("Wrong bound document"));
@@ -81,8 +92,7 @@ impl EscrowVerifier for DocumentVerifier {
     ) -> VerificationFuture<'a, ()> {
         Box::pin(async move {
             if let Some(gate) = &self.execution_gate {
-                gate.entered.add_permits(1);
-                gate.release.acquire().await.unwrap().forget();
+                gate.pass().await;
             }
             let expected = if prepared.application_state.as_bytes() == b"exact prepared document" {
                 b"approved".to_vec()
@@ -116,20 +126,21 @@ fn application_fixture() -> (Fixture, Arc<AtomicUsize>) {
 }
 fn application_fixture_options(
     repeat: bool,
-    execution_gate: Option<Arc<ExecutionGate>>,
+    execution_gate: Option<Arc<VerifierGate>>,
 ) -> (Fixture, Arc<AtomicUsize>) {
     application_fixture_policies(repeat, false, execution_gate)
 }
 fn application_fixture_policies(
     repeat: bool,
     renewable: bool,
-    execution_gate: Option<Arc<ExecutionGate>>,
+    execution_gate: Option<Arc<VerifierGate>>,
 ) -> (Fixture, Arc<AtomicUsize>) {
     let mut f = fixture_with_preparation(true, true, repeat, renewable);
     let calls = Arc::new(AtomicUsize::new(0));
     f.context.escrow_verifiers = Arc::new(
         VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
             calls: calls.clone(),
+            preparation_gate: None,
             execution_gate,
             reject_recovery: false,
         })])
@@ -197,6 +208,7 @@ fn unknown_verifier_and_duplicate_registration_fail_closed() {
     assert!(handle(&f.completed, &f.context, &binding_command(&f), 1).is_err());
     let verifier: Arc<dyn EscrowVerifier> = Arc::new(DocumentVerifier {
         calls: Arc::new(AtomicUsize::new(0)),
+        preparation_gate: None,
         execution_gate: None,
         reject_recovery: false,
     });
@@ -583,7 +595,7 @@ fn repeated_signing_requires_participant_consent_and_the_exact_scope() {
 
 #[tokio::test]
 async fn pending_or_rejected_execution_has_no_effect_and_does_not_hold_the_ledger() {
-    let gate = Arc::new(ExecutionGate {
+    let gate = Arc::new(VerifierGate {
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
     });
@@ -1022,6 +1034,7 @@ fn executed_receipt_recovery_must_pass_the_trusted_recovery_gate_before_restorin
         f.context.escrow_verifiers = Arc::new(
             VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
                 calls: calls.clone(),
+                preparation_gate: None,
                 execution_gate: None,
                 reject_recovery,
             })])
@@ -1082,6 +1095,7 @@ fn bip340_fixture(repetition: escrow::Repetition) -> Fixture {
     f.context.escrow_verifiers = Arc::new(
         VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
             calls: Arc::new(AtomicUsize::new(0)),
+            preparation_gate: None,
             execution_gate: None,
             reject_recovery: false,
         })])
@@ -1265,6 +1279,7 @@ fn verifier_authorized_musig_signing_repeats_in_fresh_sessions() {
     f.context.escrow_verifiers = Arc::new(
         VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
             calls: Arc::new(AtomicUsize::new(0)),
+            preparation_gate: None,
             execution_gate: None,
             reject_recovery: false,
         })])
@@ -1302,4 +1317,176 @@ fn verifier_authorized_musig_signing_repeats_in_fresh_sessions() {
         };
         assert_eq!(signing_session_id, session);
     }
+}
+
+#[tokio::test]
+async fn an_executed_preparation_releases_its_reply_and_exact_retries_are_never_prepared_again() {
+    let mut f = fixture_with_grants(
+        true,
+        true,
+        false,
+        false,
+        vec![(
+            "sign",
+            escrow::ActionGrant {
+                preparation: escrow::PreparationPolicy::Single,
+                repetition: escrow::Repetition::VerifierAuthorizedAttempts,
+                unbound: false,
+                condition: Condition::VerifierRule {
+                    rule: "document_approved".into(),
+                },
+                operation: escrow::Permission::Sign,
+            },
+        )],
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    f.context.escrow_verifiers = Arc::new(
+        VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
+            calls: calls.clone(),
+            preparation_gate: None,
+            execution_gate: None,
+            reject_recovery: false,
+        })])
+        .unwrap(),
+    );
+    let budget = f.context.response_budget.clone();
+    let binding = super::super::handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .await
+        .unwrap()
+        .sealed_state;
+    let bound = budget.snapshot();
+    // The second attempt supersedes the first in the ledger.
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let attempt = ActionAttempt {
+            attempt_id: Uuid::now_v7(),
+            signing_session_id: Some(SessionId::new_v7()),
+        };
+        let prepare = prepare_command(&f, binding.clone(), "sign", &attempt, &signing_action(&f));
+        let prepared = super::super::handle(&f.completed, &f.context, &prepare, 1)
+            .await
+            .unwrap();
+        assert!(
+            budget.snapshot().retained > bound.retained,
+            "a pending preparation keeps its reply for an exact retry"
+        );
+        let execute = execute_command(
+            &f,
+            "sign",
+            &attempt,
+            prepared.sealed_state.clone(),
+            approved(),
+        );
+        super::super::handle(&f.completed, &f.context, &execute, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            budget.snapshot(),
+            bound,
+            "execution released the reply and its charge"
+        );
+        attempts.push((prepare, prepared));
+    }
+    // Asking the verifier again could prepare a different action. Each exact retry is
+    // answered with the preparation its reply sealed, even once superseded.
+    for (prepare, original) in &attempts {
+        let retried = super::super::handle(&f.completed, &f.context, prepare, 1)
+            .await
+            .unwrap();
+        retried
+            .verify(&original.context, &f.context.public_key)
+            .unwrap();
+        assert_eq!(retried.output, original.output);
+        assert_eq!(
+            unseal_prepared(&f.context, &retried.sealed_state),
+            unseal_prepared(&f.context, &original.sealed_state)
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        budget.snapshot(),
+        bound,
+        "an answer from the ledger is not cached again"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_or_refused_preparation_returns_its_reply_reservation() {
+    let gate = Arc::new(VerifierGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut f = fixture_with_preparation(true, true, false, false);
+    f.context.escrow_verifiers = Arc::new(
+        VerifierRegistry::new(vec![Arc::new(DocumentVerifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+            preparation_gate: Some(gate.clone()),
+            execution_gate: None,
+            reject_recovery: false,
+        })])
+        .unwrap(),
+    );
+    let budget = f.context.response_budget.clone();
+    let binding = super::super::handle(&f.completed, &f.context, &binding_command(&f), 1)
+        .await
+        .unwrap()
+        .sealed_state;
+    // The binding reply stays retained throughout.
+    let idle = budget.snapshot();
+    let attempt = ActionAttempt {
+        attempt_id: Uuid::now_v7(),
+        signing_session_id: Some(f.signing.signing_session_id.clone()),
+    };
+    let prepare = prepare_command(&f, binding.clone(), "sign", &attempt, &signing_action(&f));
+    let mut preparation = Box::pin(super::super::handle(&f.completed, &f.context, &prepare, 1));
+    tokio::select! {
+        _ = &mut preparation => panic!("the gated verifier answered"),
+        entered = gate.entered.acquire() => entered.unwrap().forget(),
+    }
+    let pending = budget.snapshot();
+    assert_eq!(pending.used, idle.used + MAX_CACHED_RESPONSE_BYTES);
+    assert_eq!(pending.retained, idle.retained);
+    drop(preparation);
+    assert_eq!(
+        budget.snapshot(),
+        idle,
+        "cancellation returned the reservation"
+    );
+    assert!(f
+        .completed
+        .musig_processor()
+        .get_session_metadata_public()
+        .escrow_state
+        .inner
+        .lock()
+        .unwrap()
+        .inflight
+        .is_empty());
+
+    gate.release.add_permits(1);
+    let unreadable = command(
+        &f,
+        Operation::Prepare,
+        Some(("sign", &attempt)),
+        &PrepareEscrowRequest {
+            schema_version: escrow::SCHEMA_VERSION,
+            binding_receipt: binding,
+            action_id: "sign".into(),
+            attempt: attempt.clone(),
+            action: None,
+            action_parameters: Payload::new(b"not an action".to_vec()).unwrap(),
+            prior_preparation_receipts: vec![],
+        },
+    );
+    assert!(
+        super::super::handle(&f.completed, &f.context, &unreadable, 1)
+            .await
+            .is_err(),
+        "the verifier refuses parameters it cannot read"
+    );
+    assert_eq!(
+        budget.snapshot(),
+        idle,
+        "a refusal returned the reservation"
+    );
 }

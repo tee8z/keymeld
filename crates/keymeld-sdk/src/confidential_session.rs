@@ -1489,64 +1489,6 @@ mod checkpoint_revision_tests {
     }
 
     #[test]
-    #[ignore = "isolated allocation benchmark; compare KEYMELD_JOURNAL_BENCH_DEEP=1"]
-    fn journal_fork_memory_benchmark() {
-        let mut value = serde_json::to_value(journal()).unwrap();
-        value["commands"]["ping/1"]["request"]["envelope"]["ciphertext"] =
-            "ab".repeat(2 * 1024 * 1024).into();
-        let template = value["commands"]["ping/1"].clone();
-        value["commands"] = (0..8)
-            .map(|index| (format!("bench/{index}/1"), template.clone()))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-        drop(template);
-        let original: ConfidentialJournal = serde_json::from_value(value).unwrap();
-        let deep = std::env::var_os("KEYMELD_JOURNAL_BENCH_DEEP").is_some();
-        let started = std::time::Instant::now();
-        let forks: Vec<_> = (0..3)
-            .map(|_| {
-                if deep {
-                    // Reproduce the pre-sharing Clone behavior without changing
-                    // its request, outcome, or batch contents.
-                    ConfidentialJournal {
-                        commands: original
-                            .commands
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Arc::new((**v).clone())))
-                            .collect(),
-                        signing_batches: original
-                            .signing_batches
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Arc::new((**v).clone())))
-                            .collect(),
-                        opaque_route_id: original.opaque_route_id,
-                        aborted_signing_sessions: original.aborted_signing_sessions.clone(),
-                    }
-                } else {
-                    original.clone()
-                }
-            })
-            .collect();
-        std::hint::black_box(&forks);
-        println!(
-            "journal_entries=8 payload_mib=32 journal_forks=3 deep={deep} elapsed_ms={:.3}",
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-        #[cfg(target_os = "linux")]
-        for line in std::fs::read_to_string("/proc/self/status")
-            .unwrap()
-            .lines()
-        {
-            if ["VmRSS:", "VmHWM:", "VmSwap:"]
-                .iter()
-                .any(|field| line.starts_with(field))
-            {
-                println!("{line}");
-            }
-        }
-    }
-
-    #[test]
     fn outcome_changes_invalidate_only_the_changed_copy() {
         let original = journal();
         let before = original.checkpoint_revision("commands", "ping/1").unwrap();

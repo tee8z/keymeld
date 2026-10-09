@@ -883,6 +883,9 @@ impl EnclaveOperator {
                             counts.escrow.executions += usage.executions;
                             counts.escrow.receipt_bytes += usage.receipt_bytes;
                             counts.escrow.permits += usage.permits;
+                            counts.escrow.prepared_bytes += usage.prepared_bytes;
+                            counts.escrow.scope_bytes += usage.scope_bytes;
+                            counts.escrow.binding_bytes += usage.binding_bytes;
                         }
                         None => counts.escrow_unavailable += 1,
                     }
