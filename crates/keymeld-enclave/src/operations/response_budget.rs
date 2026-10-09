@@ -30,15 +30,19 @@ impl ResponseBudget {
         }
     }
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<ResponseCharge> {
-        if self
-            .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|total| *total <= self.limit)
-            })
-            .is_err()
-        {
-            self.rejected.fetch_add(1, Ordering::Relaxed);
-            return None;
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let Some(next) = used.checked_add(bytes).filter(|total| *total <= self.limit) else {
+                self.rejected.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(current) => used = current,
+            }
         }
         Some(ResponseCharge {
             budget: self.clone(),
