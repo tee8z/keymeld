@@ -1,6 +1,7 @@
 //! Exercise the SDK's real native MuSig2 orchestration through an opaque HTTP
 //! relay. This is an in-process cryptographic test, not a Nitro attestation test.
 use super::*;
+use crate::operations::SessionContext;
 use axum::{
     extract::{Path, State},
     routing::{get, post},
@@ -584,6 +585,30 @@ async fn run_native_flow(with_policy: bool, enclave_count: u32) {
         }
         server.abort();
         return;
+    }
+    // The coordinator's enclave ran each round once, and kept one retry entry for each,
+    // under the command id that the journal sent.
+    {
+        let coordinator = state.operators.lock().unwrap()[&EnclaveId::new(1)].clone();
+        let signing = coordinator.sessions.get(&signing_id).unwrap();
+        let SessionContext::Signing(context) = &signing.session_context else {
+            panic!("expected a signing session")
+        };
+        let kept: Vec<_> = context
+            .command_history
+            .iter()
+            .map(|processed| processed.command_id)
+            .collect();
+        let sent: Vec<_> = ["nonces", "partials", "final"]
+            .into_iter()
+            .map(|round| {
+                session
+                    .recorded_command(&format!("sign/{signing_id}/{round}"), EnclaveId::new(1))
+                    .unwrap()
+                    .command_id
+            })
+            .collect();
+        assert_eq!(kept, sent);
     }
     let unfinished = SessionId::new_v7();
     session

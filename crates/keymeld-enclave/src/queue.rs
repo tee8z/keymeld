@@ -161,6 +161,8 @@ impl Queue {
         );
 
         let mut processing_result: Option<Result<(), EnclaveError>> = None;
+        // Hash before alter(): its closure holds the shard's write lock. Keep no payload copy.
+        let processed = ProcessedCommand::new(command.command_id, &command.command)?;
 
         // Use alter() for atomic state processing with owned context
         sessions.alter(session_id, |_key, mut current_session| {
@@ -179,8 +181,9 @@ impl Queue {
             }
 
             // Check command idempotency using the proper MuSig rules
-            // - Once-only commands: Check kind() (don't process same command type twice per session)
+            // - Once-only stages: compare inputs with the completed stage (don't run it twice)
             // - Repeatable commands: Check command_id (don't process exact same command twice)
+            // Dispatch relies on this: it neither checks nor records commands again.
             let command_history = match &current_session.session_context {
                 SessionContext::Keygen(ctx) => &ctx.command_history,
                 SessionContext::Signing(ctx) => &ctx.command_history,
@@ -188,7 +191,7 @@ impl Queue {
 
             match current_session
                 .session_context
-                .check_command_idempotency(&command.command)
+                .check_command_idempotency(&processed)
             {
                 Ok(true) => {
                     debug!(
@@ -228,14 +231,6 @@ impl Queue {
                 return current_session;
             }
 
-            // Authenticate retry metadata before changing the state. Keep no payload copy.
-            let processed = match ProcessedCommand::new(command.command_id, &command.command) {
-                Ok(processed) => processed,
-                Err(error) => {
-                    processing_result = Some(Err(error));
-                    return current_session;
-                }
-            };
             // Process the inner EnclaveCommand using the session's owned context
             match current_session.process(&command.command) {
                 Ok(()) => {
