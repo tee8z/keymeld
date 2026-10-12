@@ -38,6 +38,8 @@ moka = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
 sqlx = { workspace = true }
+# Not used directly: sets the bundled SQLite version (see the workspace manifest).
+libsqlite3-sys = { workspace = true }
 prometheus = { version = "0.14.0" }
 lazy_static = { version = "1.4.0" }
 utoipa = { version = "6.0.0", features = [
@@ -52,6 +54,7 @@ utoipa = { version = "6.0.0", features = [
 utoipa-scalar = { version = "0.4.0", features = ["axum"] }
 
 [dev-dependencies]
+sha2 = { workspace = true }
 tempfile = "3.15.0"
 
 [features]
@@ -70,7 +73,7 @@ name = "keymeld-gateway"
 path = "src/main.rs"
 
 [package.metadata.cargo-machete]
-ignored = ["minify-js", "sha2", "walkdir"]
+ignored = ["libsqlite3-sys", "minify-js", "sha2", "walkdir"]
 
 [lints]
 workspace = true

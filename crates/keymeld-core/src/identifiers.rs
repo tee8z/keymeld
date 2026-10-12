@@ -65,7 +65,7 @@ impl sqlx::Type<sqlx::Sqlite> for EnclaveId {
 impl sqlx::Encode<'_, sqlx::Sqlite> for EnclaveId {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let value = self.0 as i64;
         <i64 as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&value, args)
@@ -183,7 +183,7 @@ impl sqlx::Type<sqlx::Sqlite> for UserId {
 impl sqlx::Encode<'_, sqlx::Sqlite> for UserId {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = self.0.as_bytes().to_vec();
         <Vec<u8> as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&bytes, args)
@@ -274,7 +274,7 @@ impl sqlx::Type<sqlx::Sqlite> for SessionId {
 impl sqlx::Encode<'_, sqlx::Sqlite> for SessionId {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = self.0.as_bytes().to_vec();
         <Vec<u8> as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&bytes, args)
@@ -370,7 +370,7 @@ impl sqlx::Type<sqlx::Sqlite> for KeyId {
 impl sqlx::Encode<'_, sqlx::Sqlite> for KeyId {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = self.0.as_bytes().to_vec();
         <Vec<u8> as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&bytes, args)
@@ -457,7 +457,7 @@ impl sqlx::Type<sqlx::Sqlite> for CorrelationId {
 impl sqlx::Encode<'_, sqlx::Sqlite> for CorrelationId {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = self.0.as_bytes().to_vec();
         <Vec<u8> as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&bytes, args)

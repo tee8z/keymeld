@@ -56,7 +56,12 @@ sha2 = "0.10.8"
 hex = "0.4.3"
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls"] }
 reqwest-middleware = "0.4.2"
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "uuid", "time", "migrate"] }
+# runtime-tokio + tls-rustls-ring is what 0.8's runtime-tokio-rustls enabled.
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "uuid", "time", "migrate"] }
+# sqlx bundles the SQLite from libsqlite3-sys; 0.37 carries SQLite 3.51.3. Earlier
+# releases have the WAL-reset bug: a WAL database can be corrupted when two connections
+# write or checkpoint it at the same instant, as the gateway and Litestream both do.
+libsqlite3-sys = { version = "0.37.0", default-features = false }
 uuid = { version = "1.20", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
 config = "0.15.19"
