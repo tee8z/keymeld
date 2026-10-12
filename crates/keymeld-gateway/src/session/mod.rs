@@ -96,7 +96,7 @@ impl sqlx::Type<sqlx::Sqlite> for SessionKind {
 impl sqlx::Encode<'_, sqlx::Sqlite> for SessionKind {
     fn encode_by_ref(
         &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+        args: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let value = match self {
             SessionKind::Keygen => "keygen",

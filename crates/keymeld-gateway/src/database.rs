@@ -186,7 +186,7 @@ impl Database {
             .await
             .context("Failed to open database writer")?;
         sqlx::migrate!("./migrations")
-            .run_direct(&mut connection)
+            .run_direct(None, &mut connection, false)
             .await
             .context("Failed to run database migrations")?;
 
@@ -1430,7 +1430,8 @@ impl Database {
             "#
         );
 
-        let mut query_builder = sqlx::query_as::<_, ProcessableSessionRecord>(&query);
+        let mut query_builder =
+            sqlx::query_as::<_, ProcessableSessionRecord>(sqlx::AssertSqlSafe(query));
 
         for status in active_states {
             query_builder = query_builder.bind(status.as_ref());
@@ -1501,7 +1502,8 @@ impl Database {
             "#
         );
 
-        let mut query_builder = sqlx::query_as::<_, ProcessableSessionRecord>(&query);
+        let mut query_builder =
+            sqlx::query_as::<_, ProcessableSessionRecord>(sqlx::AssertSqlSafe(query));
 
         for status in active_states {
             query_builder = query_builder.bind(status.as_ref());
@@ -2984,7 +2986,7 @@ impl Database {
             limit_clause
         );
 
-        let rows = sqlx::query_as::<_, (String, String)>(&query)
+        let rows = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(query))
             .fetch_all(&self.pool)
             .await?;
 
@@ -3030,7 +3032,7 @@ impl Database {
             limit_clause
         );
 
-        let rows = sqlx::query_as::<_, (String, String)>(&query)
+        let rows = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(query))
             .fetch_all(&self.pool)
             .await?;
 
@@ -3377,5 +3379,56 @@ mod tests {
             Err(ApiError::Conflict(_))
         ));
         assert!(db.get_pending_key_store(&key).await.unwrap().is_none());
+    }
+
+    /// SQLite 3.51.3 fixed the WAL-reset bug: two connections that write or checkpoint one WAL
+    /// database at the same instant (the gateway and Litestream) could corrupt it.
+    #[tokio::test]
+    async fn bundled_sqlite_has_the_wal_reset_fix() {
+        let (db, _directory) = create_test_db().await;
+        let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let parts: Vec<u32> = version
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        assert!(parts[..] >= [3, 51, 3][..], "bundled SQLite {version}");
+    }
+
+    /// Deployed databases record each applied migration's checksum, the SHA-384 of its file.
+    /// A sqlx release that hashed migrations differently would refuse to open them.
+    #[test]
+    fn migration_checksums_are_the_sha384_of_each_file() {
+        use sha2::{Digest, Sha384};
+        let migrator = sqlx::migrate!("./migrations");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            if !name.ends_with(".sql") || name.ends_with(".down.sql") {
+                continue;
+            }
+            let version: i64 = name.split('_').next().unwrap().parse().unwrap();
+            let migration = migrator
+                .iter()
+                .find(|m| m.version == version && m.migration_type.is_up_migration())
+                .unwrap_or_else(|| panic!("{name} is not embedded"));
+            let text = std::fs::read(path).unwrap();
+            assert_eq!(
+                &migration.checksum[..],
+                Sha384::digest(text).as_slice(),
+                "{name}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no migrations found");
+        assert_eq!(
+            checked,
+            migrator.iter().count(),
+            "every migration has a file"
+        );
     }
 }

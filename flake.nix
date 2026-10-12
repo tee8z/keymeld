@@ -40,8 +40,8 @@
           inherit system overlays;
         };
 
-        # Use specific Rust version for reproducible builds
-        rustToolchain = pkgs.rust-bin.stable."1.92.0".default.override {
+        # Use specific Rust version for reproducible builds. sqlx 0.9 needs 1.94.
+        rustToolchain = pkgs.rust-bin.stable."1.94.1".default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
