@@ -1642,6 +1642,45 @@ mod tests {
         assert_eq!(pending.user_id, user);
         assert_eq!(pending.keygen_session_id, session);
 
+        // The participant credential polls the copy while it is pending and
+        // after the coordinator moves it into the stored keys.
+        let status_url = format!("/api/v1/keys/{user}/{}/status", request.key_id);
+        for (expected, completes_first) in [("pending", false), ("completed", true)] {
+            if completes_first {
+                state
+                    .db
+                    .complete_pending_key_store(
+                        &request.key_id,
+                        &[9],
+                        &owner
+                            .derive_session_auth_pubkey(&session.to_string())
+                            .unwrap(),
+                        1,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let status_signature = owner
+                .sign_for_session(
+                    &request.key_id.to_string(),
+                    &user.to_string(),
+                    &session.to_string(),
+                )
+                .unwrap();
+            let (code, _, body) = server
+                .request_with_body(
+                    "GET",
+                    &status_url,
+                    &format!("X-User-Signature: {status_signature}\r\n"),
+                    "",
+                )
+                .await;
+            assert_eq!(code, 200, "{expected}: {body}");
+            let status: KeyStatusResponse = serde_json::from_str(&body).unwrap();
+            assert_eq!(status.status, expected);
+            assert_eq!(status.key_id, request.key_id);
+        }
+
         // A fresh gateway has persisted session state and an empty in-memory
         // assignment cache until background restoration finishes.
         assert!(state

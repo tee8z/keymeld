@@ -2926,52 +2926,50 @@ impl Database {
     }
 
     /// Get key operation status (checks both pending tables and user_keys)
+    ///
+    /// Completing an import or keygen store moves its row from a pending table
+    /// into user_keys in one transaction. Separate reads per table can straddle
+    /// that commit and find the row in neither, so one statement reads all three
+    /// tables from a single snapshot.
     pub async fn get_key_operation_status(
         &self,
         user_id: &UserId,
         key_id: &KeyId,
     ) -> Result<Option<KeyOperationStatus>, ApiError> {
-        // Check if key exists in user_keys (completed)
-        if let Some(key) = self.get_user_key_by_user_and_key(user_id, key_id).await? {
-            return Ok(Some(KeyOperationStatus {
-                enclave_id: key.enclave_id,
-                key_id: key.key_id,
-                user_id: key.user_id,
-                status: "completed".to_string(),
-                error_message: None,
-                created_at: key.created_at,
-            }));
-        }
+        let row = sqlx::query_as::<_, KeyOperationStatus>(
+            r#"SELECT enclave_id, key_id, user_id, status, error_message, created_at, auth_pubkey
+             FROM (
+                 SELECT 0 AS source, enclave_id, key_id, user_id, 'completed' AS status,
+                        NULL AS error_message, created_at, auth_pubkey
+                 FROM user_keys
+                 WHERE user_id = ? AND key_id = ?
+                 UNION ALL
+                 SELECT 1, enclave_id, key_id, user_id, status_name,
+                        error_message, created_at, auth_pubkey
+                 FROM pending_key_imports
+                 WHERE user_id = ? AND key_id = ?
+                 UNION ALL
+                 SELECT 2, ps.enclave_id, ps.key_id, ps.user_id, ps.status_name,
+                        ps.error_message, ps.created_at, uk.auth_pubkey
+                 FROM pending_key_stores ps
+                 LEFT JOIN keygen_participants kp
+                   ON kp.keygen_session_id = ps.keygen_session_id AND kp.user_id = ps.user_id
+                 LEFT JOIN user_keys uk ON uk.id = kp.user_key_id
+                 WHERE ps.user_id = ? AND ps.key_id = ?
+             )
+             ORDER BY source
+             LIMIT 1"#,
+        )
+        .bind(user_id)
+        .bind(key_id)
+        .bind(user_id)
+        .bind(key_id)
+        .bind(user_id)
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
-        // Check pending_key_imports
-        if let Some(pending) = self.get_pending_key_import(key_id).await? {
-            if pending.user_id == *user_id {
-                return Ok(Some(KeyOperationStatus {
-                    enclave_id: pending.enclave_id,
-                    key_id: pending.key_id,
-                    user_id: pending.user_id,
-                    status: pending.status_name,
-                    error_message: pending.error_message,
-                    created_at: pending.created_at,
-                }));
-            }
-        }
-
-        // Check pending_key_stores
-        if let Some(pending) = self.get_pending_key_store(key_id).await? {
-            if pending.user_id == *user_id {
-                return Ok(Some(KeyOperationStatus {
-                    enclave_id: pending.enclave_id,
-                    key_id: pending.key_id,
-                    user_id: pending.user_id,
-                    status: pending.status_name,
-                    error_message: pending.error_message,
-                    created_at: pending.created_at,
-                }));
-            }
-        }
-
-        Ok(None)
+        Ok(row)
     }
 
     /// List keygen sessions, optionally limited to most recent
@@ -3195,7 +3193,7 @@ pub struct PendingKeyStore {
 }
 
 /// Combined status for key operations (import or store from keygen)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromRow)]
 pub struct KeyOperationStatus {
     pub enclave_id: EnclaveId,
     pub key_id: KeyId,
@@ -3203,6 +3201,9 @@ pub struct KeyOperationStatus {
     pub status: String,
     pub error_message: Option<String>,
     pub created_at: i64,
+    /// Credential that authenticates status polling: the stored or imported
+    /// key's auth key, or the participant's for a pending keygen store.
+    pub auth_pubkey: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -3379,6 +3380,231 @@ mod tests {
             Err(ApiError::Conflict(_))
         ));
         assert!(db.get_pending_key_store(&key).await.unwrap().is_none());
+    }
+
+    const PARTICIPANT_AUTH: [u8; 33] = [2; 33];
+    const IMPORT_AUTH: [u8; 33] = [3; 33];
+
+    /// A completed keygen session whose participant may copy their key out of it.
+    async fn keygen_participant(db: &Database) -> (UserId, SessionId) {
+        let user_id = UserId::new_v7();
+        let session_id = SessionId::new_v7();
+        let seed_session_id = session_id.clone();
+        db.execute(move |connection| Box::pin(async move {
+            sqlx::query("INSERT INTO enclave_public_keys (enclave_id, cached_at, expires_at, public_key) VALUES (1, 0, 1, '')")
+                .execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO keygen_sessions (keygen_session_id, status_name, created_at, expires_at, expected_participants, status) VALUES (?, 'completed', 0, 1, '[]', '{}')")
+                .bind(&seed_session_id).execute(&mut *connection).await?;
+            Ok(())
+        })).await.unwrap();
+        let registration = db
+            .store_user_key(StoreUserKeyParams {
+                user_id: &user_id,
+                key_id: &KeyId::new_v7(),
+                enclave_id: EnclaveId::from(1),
+                enclave_key_epoch: 1,
+                encrypted_private_key: &[1],
+                auth_pubkey: &PARTICIPANT_AUTH,
+                origin_keygen_session_id: Some(&session_id),
+            })
+            .await
+            .unwrap();
+        let (seed_session_id, seed_user_id) = (session_id.clone(), user_id.clone());
+        db.execute(move |connection| Box::pin(async move {
+            sqlx::query("INSERT INTO keygen_participants (keygen_session_id, user_id, user_key_id, registered_at) VALUES (?, ?, ?, 0)")
+                .bind(&seed_session_id).bind(&seed_user_id).bind(registration)
+                .execute(connection).await?;
+            Ok(())
+        })).await.unwrap();
+        (user_id, session_id)
+    }
+
+    /// Completing a keygen store or an import moves its row from a pending table
+    /// into user_keys in one commit. A status poll must find it on one side.
+    #[tokio::test]
+    async fn key_status_reads_one_snapshot_across_a_completing_move() {
+        let (db, _directory) = create_test_db().await;
+        let (user_id, session_id) = keygen_participant(&db).await;
+        let expiry = DbUtils::current_timestamp() + 600;
+        let status = |key_id: &KeyId| {
+            let (db, user_id, key_id) = (db.clone(), user_id.clone(), key_id.clone());
+            async move {
+                let operation = db
+                    .get_key_operation_status(&user_id, &key_id)
+                    .await
+                    .unwrap()
+                    .expect("key operation must stay readable");
+                (
+                    operation.status,
+                    operation.error_message,
+                    operation.auth_pubkey,
+                )
+            }
+        };
+
+        let stored = KeyId::new_v7();
+        db.create_pending_key_store(
+            &stored,
+            &user_id,
+            &session_id,
+            EnclaveId::from(1),
+            expiry,
+            "proof",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status(&stored).await,
+            ("pending".to_string(), None, Some(PARTICIPANT_AUTH.to_vec()))
+        );
+        db.mark_pending_key_store_processing(&stored).await.unwrap();
+        assert_eq!(status(&stored).await.0, "processing");
+
+        // The poll that failed read user_keys before the completion committed
+        // and the pending tables after it, so it found the key in neither.
+        assert!(db
+            .get_user_key_by_user_and_key(&user_id, &stored)
+            .await
+            .unwrap()
+            .is_none());
+        db.complete_pending_key_store(&stored, &[9], &PARTICIPANT_AUTH, 1)
+            .await
+            .unwrap();
+        assert!(db.get_pending_key_import(&stored).await.unwrap().is_none());
+        assert!(db.get_pending_key_store(&stored).await.unwrap().is_none());
+        assert_eq!(
+            status(&stored).await,
+            (
+                "completed".to_string(),
+                None,
+                Some(PARTICIPANT_AUTH.to_vec())
+            )
+        );
+        assert!(db
+            .get_key_operation_status(&UserId::new_v7(), &stored)
+            .await
+            .unwrap()
+            .is_none());
+
+        // A rejected import keeps its row, so the failure stays readable.
+        let rejected = KeyId::new_v7();
+        db.reserve_key_slot(
+            &rejected,
+            &user_id,
+            EnclaveId::from(1),
+            1,
+            expiry,
+            &IMPORT_AUTH,
+        )
+        .await
+        .unwrap();
+        db.move_reserved_to_pending_import(&rejected, &[7], &IMPORT_AUTH, expiry)
+            .await
+            .unwrap();
+        db.mark_pending_key_import_processing(&rejected)
+            .await
+            .unwrap();
+        db.fail_pending_key_import(&rejected, "rejected")
+            .await
+            .unwrap();
+        assert_eq!(
+            status(&rejected).await,
+            (
+                "failed".to_string(),
+                Some("rejected".to_string()),
+                Some(IMPORT_AUTH.to_vec())
+            )
+        );
+
+        let imported = KeyId::new_v7();
+        db.reserve_key_slot(
+            &imported,
+            &user_id,
+            EnclaveId::from(1),
+            1,
+            expiry,
+            &IMPORT_AUTH,
+        )
+        .await
+        .unwrap();
+        db.move_reserved_to_pending_import(&imported, &[7], &IMPORT_AUTH, expiry)
+            .await
+            .unwrap();
+        assert_eq!(
+            status(&imported).await,
+            ("pending".to_string(), None, Some(IMPORT_AUTH.to_vec()))
+        );
+        db.complete_pending_key_import(&imported).await.unwrap();
+        assert_eq!(
+            status(&imported).await,
+            ("completed".to_string(), None, Some(IMPORT_AUTH.to_vec()))
+        );
+    }
+
+    /// Status polls that race the coordinator's completions never report a key
+    /// operation missing. Separate reads per table missed it within a few moves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn key_status_polls_racing_completions_always_find_the_operation() {
+        const MOVES: usize = 100;
+        let directory = TempDir::new().unwrap();
+        let db = Database::new(&DatabaseConfig {
+            path: directory
+                .path()
+                .join("race.db")
+                .to_string_lossy()
+                .into_owned(),
+            max_connections: 2,
+            connection_timeout_secs: 5,
+            idle_timeout_secs: Some(60),
+            enable_wal_mode: Some(true),
+        })
+        .await
+        .unwrap();
+        let (user_id, session_id) = keygen_participant(&db).await;
+        let expiry = DbUtils::current_timestamp() + 600;
+        let current = Arc::new(std::sync::Mutex::new(None::<KeyId>));
+        let done = Arc::new(AtomicBool::new(false));
+        let poller = {
+            let (db, user_id) = (db.clone(), user_id.clone());
+            let (current, done) = (current.clone(), done.clone());
+            tokio::spawn(async move {
+                let mut polls = 0usize;
+                while !done.load(Ordering::Acquire) {
+                    let key_id = current.lock().unwrap().clone();
+                    let Some(key_id) = key_id else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    let status = db.get_key_operation_status(&user_id, &key_id).await;
+                    assert!(
+                        status.unwrap().is_some(),
+                        "status poll missed key operation {key_id}"
+                    );
+                    polls += 1;
+                }
+                polls
+            })
+        };
+
+        for _ in 0..MOVES {
+            let key_id = KeyId::new_v7();
+            db.create_pending_key_store(
+                &key_id,
+                &user_id,
+                &session_id,
+                EnclaveId::from(1),
+                expiry,
+                "proof",
+            )
+            .await
+            .unwrap();
+            *current.lock().unwrap() = Some(key_id.clone());
+            db.complete_pending_key_store(&key_id, &[9], &PARTICIPANT_AUTH, 1)
+                .await
+                .unwrap();
+        }
+        done.store(true, Ordering::Release);
+        assert!(poller.await.unwrap() > 0);
     }
 
     /// SQLite 3.51.3 fixed the WAL-reset bug: two connections that write or checkpoint one WAL

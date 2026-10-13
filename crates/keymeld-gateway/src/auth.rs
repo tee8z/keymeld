@@ -86,27 +86,15 @@ where
             user_key.auth_pubkey
         } else if parts.method == axum::http::Method::GET && parts.uri.path().ends_with("/status") {
             // Import failures and pending copies still belong to their authenticated
-            // submitter. Only status polling may use these pending credentials.
-            if let Some(import) = app_state
+            // submitter. Only status polling may use these pending credentials. The
+            // operation may have completed since the read above, so this lookup reads
+            // user_keys and both pending tables from one snapshot.
+            app_state
                 .db
-                .get_pending_key_import(&key_id)
+                .get_key_operation_status(&user_id, &key_id)
                 .await?
-                .filter(|import| import.user_id == user_id)
-            {
-                import.auth_pubkey
-            } else if let Some(store) = app_state
-                .db
-                .get_pending_key_store(&key_id)
-                .await?
-                .filter(|store| store.user_id == user_id)
-            {
-                app_state
-                    .db
-                    .get_participant_auth_pubkey(&user_id, &store.keygen_session_id)
-                    .await?
-            } else {
-                return Err(ApiError::not_found("Key operation not found"));
-            }
+                .and_then(|operation| operation.auth_pubkey)
+                .ok_or_else(|| ApiError::not_found("Key operation not found"))?
         } else {
             return Err(ApiError::not_found("Stored key not found"));
         };
