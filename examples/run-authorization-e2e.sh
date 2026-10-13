@@ -42,8 +42,9 @@ for test_binary in keymeld-gateway keymeld-enclave; do
 done
 
 # This runner owns every process and file it creates. Existing development
-# services and databases remain available while these tests run.
-test_directory=$(mktemp -d -t keymeld-authorization-e2e.XXXXXXXX)
+# services and databases remain available while these tests run. CI points
+# KEYMELD_E2E_TMPDIR outside the Nix shell's TMPDIR so failure logs can be uploaded.
+test_directory=$(mktemp -d "${KEYMELD_E2E_TMPDIR:-${TMPDIR:-/tmp}}/keymeld-authorization-e2e.XXXXXXXX")
 test_pids=()
 test_succeeded=false
 cleanup() {

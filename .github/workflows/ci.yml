@@ -299,6 +299,8 @@ jobs:
           npx playwright install chromium --with-deps
 
       - name: Run ${{ matrix.test.name }}
+        env:
+          KEYMELD_E2E_TMPDIR: ${{ runner.temp }}
         run: |
           # Use nix develop to get 'just' command
           # Set IN_NIX_SHELL to signal recipes to skip their internal nix develop wrapper
@@ -315,7 +317,7 @@ jobs:
             logs/
             data/
             *.log
-            /tmp/keymeld-authorization-e2e.*/
+            ${{ runner.temp }}/keymeld-authorization-e2e.*/
           retention-days: 7
 
       - name: Upload Playwright report on failure
