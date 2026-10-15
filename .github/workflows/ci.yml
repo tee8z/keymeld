@@ -13,6 +13,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep file/line backtraces without the large variable/type debug sections.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Build everything once, upload binaries for e2e tests
@@ -22,14 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free up disk space
+      - name: Free build space in the background
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          sudo apt-get clean || true
+          nohup sudo sh -c 'rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL' \
+            >"$RUNNER_TEMP/free-build-space.log" 2>&1 &
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
@@ -40,26 +40,10 @@ jobs:
           use-gha-cache: false
           use-flakehub: false
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: target/
-          key: ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-nix-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-nix-cargo-build-
+          cmd-format: nix develop -c {0}
+          key: nix-${{ hashFiles('flake.nix', 'flake.lock') }}
 
       - name: Build project
         run: nix develop -c cargo build --workspace --locked
@@ -76,6 +60,8 @@ jobs:
             target/debug/keymeld_demo
             target/debug/keymeld_session_test
           retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
 
   # Format check (no build needed)
   fmt:
@@ -211,7 +197,7 @@ jobs:
   # End-to-end integration tests (uses pre-built binaries)
   e2e-test:
     runs-on: ubuntu-latest
-    needs: [build, fmt, clippy, machete, test, escrow-features, wasm]
+    needs: [build]
     if: "!contains(github.event.pull_request.labels.*.name, 'skip-e2e')"
     strategy:
       fail-fast: false
@@ -252,15 +238,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          sudo apt-get clean || true
-
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
@@ -269,6 +246,15 @@ jobs:
         with:
           use-gha-cache: false
           use-flakehub: false
+
+      # Authorization compiles the shared integration dependencies. Other
+      # matrix jobs restore that cache without competing to save it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+          shared-key: ci-nix-e2e
+          key: ${{ hashFiles('flake.nix', 'flake.lock', 'nix/**') }}
+          save-if: ${{ github.ref == 'refs/heads/master' && matrix.test.name == 'authorization' }}
 
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
