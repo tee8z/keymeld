@@ -31,14 +31,20 @@ jobs:
           nohup sudo sh -c 'rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL' \
             >"$RUNNER_TEMP/free-build-space.log" 2>&1 &
 
+      # The release workflow on master caches the patched OpenSSL and other
+      # shell outputs. Restore them before Nix so the cache stays runner-owned.
+      - name: Restore development shell outputs
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nix-cache
+          key: nix-devshell-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**') }}
+          restore-keys: nix-devshell-${{ runner.arch }}-
+      - run: mkdir -p "$RUNNER_TEMP/nix-cache"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          extra-conf: |
+            extra-substituters = file://${{ runner.temp }}/nix-cache?trusted=1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -238,14 +244,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The release workflow on master caches the patched OpenSSL and other
+      # shell outputs. Restore them before Nix so the cache stays runner-owned.
+      - name: Restore development shell outputs
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nix-cache
+          key: nix-devshell-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**') }}
+          restore-keys: nix-devshell-${{ runner.arch }}-
+      - run: mkdir -p "$RUNNER_TEMP/nix-cache"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          use-gha-cache: false
-          use-flakehub: false
+          extra-conf: |
+            extra-substituters = file://${{ runner.temp }}/nix-cache?trusted=1
 
       # Authorization compiles the shared integration dependencies. Other
       # matrix jobs restore that cache without competing to save it.
