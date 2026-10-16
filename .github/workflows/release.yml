@@ -29,6 +29,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep file/line backtraces without the large variable/type debug sections.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   prepare-release:
@@ -178,6 +182,8 @@ jobs:
             extra-substituters = file://${{ runner.temp }}/nix-cache?trusted=1
       - uses: Swatinem/rust-cache@v2
         with:
+          cmd-format: nix develop -c {0}
+          key: ${{ hashFiles('flake.nix', 'flake.lock', 'nix/**') }}
           shared-key: release-authorization
           save-if: ${{ needs.prepare-release.outputs.warm == 'true' }}
       - name: Run real gateway and enclave authorization regressions (3 enclaves)
