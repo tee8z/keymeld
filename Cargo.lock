@@ -317,14 +317,14 @@ dependencies = [
 
 [[package]]
 name = "aws-nitro-enclaves-cose"
-version = "0.5.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8a94047bd9c3717c6ca3a145504c0e26b64a5e2d9eb9559b187748433fbc382"
+checksum = "1444605960434515bc850c6a5752967472fdcb32301dcc652aff72f4ce0dc997"
 dependencies = [
+ "ciborium",
  "openssl",
  "serde",
  "serde_bytes",
- "serde_cbor",
  "serde_repr",
  "serde_with",
 ]
