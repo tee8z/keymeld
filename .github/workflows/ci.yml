@@ -202,7 +202,8 @@ jobs:
 
   # End-to-end integration tests (uses pre-built binaries)
   e2e-test:
-    runs-on: ubuntu-latest
+    # ubuntu-latest (26.04) has no vmw_vsock_loopback, so the enclaves' vsock connections time out.
+    runs-on: ubuntu-24.04
     needs: [build]
     if: "!contains(github.event.pull_request.labels.*.name, 'skip-e2e')"
     strategy:
